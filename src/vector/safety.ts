@@ -1,13 +1,21 @@
+import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import type { SpendLimits, SpendStatus, AuditEntry } from './types.js';
 
 const VECTOR_SPEND_LIMIT_PER_TX = parseInt(process.env.VECTOR_SPEND_LIMIT_PER_TX || '100000000'); // 100 ADA
 const VECTOR_SPEND_LIMIT_DAILY = parseInt(process.env.VECTOR_SPEND_LIMIT_DAILY || '500000000'); // 500 ADA
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const projectRoot = resolve(__dirname, '../..');
 
 export class SafetyLayer {
   private dailySpent: number = 0;
   private dailyResetTime: number;
   private auditLog: AuditEntry[] = [];
   private limits: SpendLimits;
+  private auditLogPath: string;
 
   constructor() {
     this.limits = {
@@ -16,6 +24,13 @@ export class SafetyLayer {
     };
     // Reset daily limit at midnight UTC
     this.dailyResetTime = this.getNextMidnightUTC();
+
+    // Audit log file persistence
+    this.auditLogPath = process.env.VECTOR_AUDIT_LOG_PATH
+      ? resolve(process.env.VECTOR_AUDIT_LOG_PATH)
+      : resolve(projectRoot, 'vector-audit-log.json');
+
+    this.loadAuditLog();
   }
 
   private getNextMidnightUTC(): number {
@@ -28,6 +43,45 @@ export class SafetyLayer {
     if (Date.now() >= this.dailyResetTime) {
       this.dailySpent = 0;
       this.dailyResetTime = this.getNextMidnightUTC();
+    }
+  }
+
+  private loadAuditLog(): void {
+    try {
+      if (existsSync(this.auditLogPath)) {
+        const data = readFileSync(this.auditLogPath, 'utf-8');
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed)) {
+          this.auditLog = parsed;
+          // Recalculate dailySpent from today's entries (survives server restart)
+          this.recalculateDailySpent();
+        }
+      }
+    } catch (err) {
+      console.error(`Warning: Could not load audit log from ${this.auditLogPath}:`, err);
+      this.auditLog = [];
+    }
+  }
+
+  private recalculateDailySpent(): void {
+    const todayStart = new Date();
+    todayStart.setUTCHours(0, 0, 0, 0);
+    const todayStartMs = todayStart.getTime();
+
+    this.dailySpent = 0;
+    for (const entry of this.auditLog) {
+      const entryTime = new Date(entry.timestamp).getTime();
+      if (entryTime >= todayStartMs) {
+        this.dailySpent += entry.amountLovelace;
+      }
+    }
+  }
+
+  private persistAuditLog(): void {
+    try {
+      writeFileSync(this.auditLogPath, JSON.stringify(this.auditLog, null, 2));
+    } catch (err) {
+      console.error(`Warning: Could not persist audit log to ${this.auditLogPath}:`, err);
     }
   }
 
@@ -63,6 +117,8 @@ export class SafetyLayer {
       recipient,
       action: 'send',
     });
+
+    this.persistAuditLog();
   }
 
   getSpendStatus(): SpendStatus {

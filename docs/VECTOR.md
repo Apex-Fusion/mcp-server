@@ -70,6 +70,67 @@ Check current spend limits, daily usage, and recent transaction audit log.
 
 **Example prompt:** "What are my current spend limits?"
 
+### vector_build_transaction
+
+Build a complex multi-output transaction with metadata. Optionally sign and submit.
+
+**Parameters:**
+- `outputs` (array, required) — Array of `{ address, lovelace, assets? }` objects
+- `metadata` (string, optional) — JSON metadata (attached under label 674)
+- `submit` (boolean, optional) — If true, sign and submit. If false/omitted, return unsigned CBOR.
+
+**Example prompt:** "Build a transaction sending 5 ADA to addr1qx... and 3 ADA to addr1qy..."
+
+### vector_dry_run
+
+Simulate a transaction without submitting — returns fee estimate and validation.
+
+**Parameters:**
+- `txCbor` (string, optional) — Hex CBOR of a built transaction to evaluate
+- `outputs` (array, optional) — If no txCbor, build a TX from these outputs and evaluate
+- `metadata` (string, optional) — JSON metadata when building from outputs
+
+**Example prompt:** "How much would it cost to send 10 ADA to addr1qx...?"
+
+### vector_get_transaction_history
+
+Get transaction history for an address via Koios indexed queries.
+
+**Parameters:**
+- `address` (string, optional) — Address to query. Uses agent's wallet if omitted.
+- `limit` (number, optional) — Number of transactions (default: 20, max: 50)
+- `offset` (number, optional) — Pagination offset (default: 0)
+
+**Example prompt:** "Show me my recent transactions"
+
+### vector_deploy_contract
+
+Deploy a Plutus/Aiken smart contract by locking funds at its script address.
+
+**Parameters:**
+- `scriptCbor` (string, required) — Compiled script CBOR hex
+- `scriptType` (string, required) — "PlutusV1", "PlutusV2", or "PlutusV3"
+- `initialDatum` (string, optional) — Datum CBOR hex (default: void `d87980`)
+- `lovelaceAmount` (number, optional) — ADA to lock in lovelace (default: 2 ADA)
+
+**Example prompt:** "Deploy this smart contract with 5 ADA locked"
+
+### vector_interact_contract
+
+Interact with a deployed smart contract — lock funds or spend from it.
+
+**Parameters:**
+- `scriptCbor` (string, required) — Compiled script CBOR hex
+- `scriptType` (string, required) — "PlutusV1", "PlutusV2", or "PlutusV3"
+- `action` (string, required) — "spend" or "lock"
+- `redeemer` (string, optional) — Redeemer CBOR hex (for spend, default: void)
+- `datum` (string, optional) — Datum CBOR hex (for lock, default: void)
+- `lovelaceAmount` (number, optional) — ADA to lock in lovelace (for lock)
+- `utxoRef` (object, optional) — `{ txHash, outputIndex }` for specific UTxO (for spend)
+- `assets` (object, optional) — Native assets for lock: `{ "unit": "quantity" }`
+
+**Example prompt:** "Collect funds from the escrow contract at addr1..."
+
 ## Safety Controls
 
 The server enforces configurable spend limits:
@@ -77,11 +138,13 @@ The server enforces configurable spend limits:
 - **Per-transaction limit** — Maximum ADA per single transaction (default: 100 ADA)
 - **Daily limit** — Maximum ADA per 24-hour period (default: 500 ADA)
 - **Audit log** — All transactions are logged with timestamp, amount, and recipient
+- **Persistent audit log** — Audit log is written to a JSON file that survives server restarts. Daily spend is recalculated from the log on startup.
 
 Limits are configured via environment variables:
 ```
 VECTOR_SPEND_LIMIT_PER_TX=100000000   # 100 ADA in lovelace
 VECTOR_SPEND_LIMIT_DAILY=500000000    # 500 ADA in lovelace
+VECTOR_AUDIT_LOG_PATH=./vector-audit-log.json  # Audit log file path
 ```
 
 ## Network Endpoints

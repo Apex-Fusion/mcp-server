@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Lucid, fromText } from 'lucid-cardano';
+import { Lucid, fromText, Data, applyDoubleCborEncoding } from 'lucid-cardano';
+import type { SpendingValidator } from 'lucid-cardano';
 import * as dotenv from 'dotenv';
 import { resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -12,6 +13,11 @@ import type {
   VectorWalletInfo,
   VectorAdaTransactionResult,
   VectorTokenTransactionResult,
+  TxOutput,
+  VectorBuildTransactionResult,
+  VectorDryRunResult,
+  VectorDeployContractResult,
+  VectorInteractContractResult,
 } from './types.js';
 
 // Direct .env loading
@@ -279,6 +285,235 @@ export async function sendTokens(
       explorer: explorerTxLink(txHash),
     },
   };
+}
+
+// Build a complex multi-output transaction
+export async function buildTransaction(
+  outputs: TxOutput[],
+  metadata: any = null,
+  submit: boolean = false,
+): Promise<VectorBuildTransactionResult> {
+  if (!outputs || outputs.length === 0) {
+    throw new Error('At least one output is required');
+  }
+
+  // Calculate total ADA across all outputs for safety check
+  const totalLovelace = outputs.reduce((sum, o) => sum + o.lovelace, 0);
+  const safetyCheck = safetyLayer.checkTransaction(totalLovelace);
+  if (!safetyCheck.allowed) {
+    throw new Error(`Safety limit exceeded: ${safetyCheck.reason}`);
+  }
+
+  const lucid = await initLucid();
+
+  // @ts-ignore
+  let tx = lucid.newTx();
+
+  for (const output of outputs) {
+    const assets: Record<string, bigint> = {
+      lovelace: BigInt(output.lovelace),
+    };
+    if (output.assets) {
+      for (const [unit, qty] of Object.entries(output.assets)) {
+        assets[unit] = BigInt(qty);
+      }
+    }
+    tx = tx.payToAddress(output.address, assets);
+  }
+
+  if (metadata) {
+    const parsedMetadata = typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
+    // @ts-ignore
+    tx = tx.attachMetadata(674, parsedMetadata);
+  }
+
+  // @ts-ignore
+  const completedTx = await tx.complete();
+  // @ts-ignore
+  const fee = completedTx.fee;
+  // @ts-ignore
+  const txHash = completedTx.toHash();
+  // @ts-ignore
+  const txCbor = completedTx.toString();
+
+  if (submit) {
+    // @ts-ignore
+    const signedTx = await completedTx.sign().complete();
+    const submittedHash = await signedTx.submit();
+
+    safetyLayer.recordTransaction(submittedHash, totalLovelace, outputs.map(o => o.address).join(', '));
+
+    return {
+      txCbor: '',
+      txHash: submittedHash,
+      fee: String(fee),
+      feeAda: lovelaceToAda(fee),
+      outputCount: outputs.length,
+      totalAda: lovelaceToAda(totalLovelace),
+      submitted: true,
+      links: { explorer: explorerTxLink(submittedHash) },
+    };
+  }
+
+  return {
+    txCbor,
+    txHash,
+    fee: String(fee),
+    feeAda: lovelaceToAda(fee),
+    outputCount: outputs.length,
+    totalAda: lovelaceToAda(totalLovelace),
+    submitted: false,
+  };
+}
+
+// Deploy a smart contract by locking funds at the script address
+export async function deployContract(
+  scriptCbor: string,
+  scriptType: string,
+  initialDatum: string | null = null,
+  lovelaceAmount: number = 2_000_000,
+): Promise<VectorDeployContractResult> {
+  const safetyCheck = safetyLayer.checkTransaction(lovelaceAmount);
+  if (!safetyCheck.allowed) {
+    throw new Error(`Safety limit exceeded: ${safetyCheck.reason}`);
+  }
+
+  const lucid = await initLucid();
+
+  const validator: SpendingValidator = {
+    type: scriptType as any,
+    script: applyDoubleCborEncoding(scriptCbor),
+  };
+
+  // @ts-ignore
+  const scriptAddress = lucid.utils.validatorToAddress(validator);
+  // @ts-ignore
+  const scriptHash = lucid.utils.validatorToScriptHash(validator);
+
+  const datum = initialDatum || Data.void();
+
+  // @ts-ignore
+  let tx = lucid.newTx()
+    .payToContract(scriptAddress, { inline: datum }, { lovelace: BigInt(lovelaceAmount) });
+
+  // @ts-ignore
+  tx = await tx.complete();
+  // @ts-ignore
+  const signedTx = await tx.sign().complete();
+  const txHash = await signedTx.submit();
+
+  safetyLayer.recordTransaction(txHash, lovelaceAmount, scriptAddress);
+
+  return {
+    txHash,
+    scriptAddress,
+    scriptHash,
+    scriptType,
+    links: { explorer: explorerTxLink(txHash) },
+  };
+}
+
+// Interact with a deployed smart contract (lock or spend)
+export async function interactWithContract(
+  scriptCbor: string,
+  scriptType: string,
+  action: 'spend' | 'lock',
+  redeemer: string | null = null,
+  datum: string | null = null,
+  lovelaceAmount: number = 2_000_000,
+  utxoRef: { txHash: string; outputIndex: number } | null = null,
+  assets: Record<string, string> | null = null,
+): Promise<VectorInteractContractResult> {
+  const lucid = await initLucid();
+  const walletAddress = await lucid.wallet.address();
+
+  const validator: SpendingValidator = {
+    type: scriptType as any,
+    script: applyDoubleCborEncoding(scriptCbor),
+  };
+
+  // @ts-ignore
+  const scriptAddress = lucid.utils.validatorToAddress(validator);
+
+  if (action === 'lock') {
+    const safetyCheck = safetyLayer.checkTransaction(lovelaceAmount);
+    if (!safetyCheck.allowed) {
+      throw new Error(`Safety limit exceeded: ${safetyCheck.reason}`);
+    }
+
+    const datumData = datum || Data.void();
+    const outputAssets: Record<string, bigint> = { lovelace: BigInt(lovelaceAmount) };
+    if (assets) {
+      for (const [unit, qty] of Object.entries(assets)) {
+        outputAssets[unit] = BigInt(qty);
+      }
+    }
+
+    // @ts-ignore
+    let tx = lucid.newTx()
+      .payToContract(scriptAddress, { inline: datumData }, outputAssets);
+
+    // @ts-ignore
+    tx = await tx.complete();
+    // @ts-ignore
+    const signedTx = await tx.sign().complete();
+    const txHash = await signedTx.submit();
+
+    safetyLayer.recordTransaction(txHash, lovelaceAmount, scriptAddress);
+
+    return {
+      txHash,
+      scriptAddress,
+      action: 'lock',
+      links: { explorer: explorerTxLink(txHash) },
+    };
+  } else {
+    // SPEND: collect from script
+    let scriptUtxos;
+    if (utxoRef) {
+      scriptUtxos = await lucid.provider.getUtxosByOutRef([utxoRef]);
+    } else {
+      scriptUtxos = await lucid.provider.getUtxos(scriptAddress);
+    }
+
+    if (!scriptUtxos || scriptUtxos.length === 0) {
+      throw new Error(`No UTxOs found at script address ${scriptAddress}`);
+    }
+
+    const redeemerData = redeemer || Data.void();
+
+    // @ts-ignore
+    let tx = lucid.newTx()
+      .collectFrom(scriptUtxos, redeemerData)
+      .attachSpendingValidator(validator)
+      .addSigner(walletAddress);
+
+    try {
+      // @ts-ignore
+      tx = await tx.complete();
+    } catch (err) {
+      // Retry without native UPLC evaluator if it fails
+      // @ts-ignore
+      tx = await lucid.newTx()
+        .collectFrom(scriptUtxos, redeemerData)
+        .attachSpendingValidator(validator)
+        .addSigner(walletAddress)
+        .complete({ nativeUplc: false });
+    }
+
+    // @ts-ignore
+    const signedTx = await tx.sign().complete();
+    const txHash = await signedTx.submit();
+
+    // No spend recording for collecting — funds are coming back to wallet
+
+    return {
+      txHash,
+      scriptAddress,
+      action: 'spend',
+      links: { explorer: explorerTxLink(txHash) },
+    };
+  }
 }
 
 // Register all Vector MCP tools
@@ -594,6 +829,387 @@ ${log.length > 0 ? `## Recent Transactions (last ${Math.min(5, log.length)}):\n$
           content: [{
             type: "text",
             text: `Failed to get spend limits: ${error.message}`,
+          }],
+        };
+      }
+    }
+  );
+
+  // vector_build_transaction — Build a complex multi-output transaction
+  // @ts-ignore: MCP SDK deep type instantiation
+  server.tool(
+    "vector_build_transaction",
+    "Build a complex multi-output transaction with metadata. Set submit=true to sign and submit, or false to return unsigned CBOR for review.",
+    {
+      outputs: z.array(z.object({
+        address: z.string().describe("Recipient Vector address"),
+        lovelace: z.number().describe("Amount in lovelace (1 ADA = 1,000,000 lovelace)"),
+        assets: z.record(z.string()).optional().describe("Optional native assets: { 'policyId+assetNameHex': 'quantity' }"),
+      })).min(1).describe("Transaction outputs"),
+      metadata: z.string().optional().describe("Optional JSON metadata (attached under label 674)"),
+      submit: z.boolean().optional().describe("If true, sign and submit the transaction. If false/omitted, return unsigned CBOR for review."),
+    },
+    async ({ outputs, metadata, submit }) => {
+      try {
+        const result = await buildTransaction(outputs, metadata, submit);
+
+        if (result.submitted) {
+          return {
+            content: [{
+              type: "text",
+              text: `# Transaction Submitted
+
+Transaction Hash: ${result.txHash}
+Fee: ${result.feeAda} ADA
+Outputs: ${result.outputCount}
+Total ADA Sent: ${result.totalAda} ADA
+
+[View on Explorer](${result.links?.explorer})`,
+            }],
+          };
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: `# Transaction Built (Not Submitted)
+
+Transaction Hash: ${result.txHash}
+Fee: ${result.feeAda} ADA
+Outputs: ${result.outputCount}
+Total ADA: ${result.totalAda} ADA
+
+CBOR (hex): ${result.txCbor.substring(0, 200)}${result.txCbor.length > 200 ? '...' : ''}
+
+Use vector_dry_run with this CBOR to simulate, or call vector_build_transaction again with submit=true to submit.`,
+          }],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to build transaction: ${error.message}
+
+**Troubleshooting Tips:**
+1. Verify all recipient addresses are valid (addr1...)
+2. Ensure wallet has enough ADA for outputs + fees
+3. Check spend limits with vector_get_spend_limits`,
+          }],
+        };
+      }
+    }
+  );
+
+  // vector_dry_run — Simulate a transaction without submitting
+  // @ts-ignore: MCP SDK deep type instantiation
+  server.tool(
+    "vector_dry_run",
+    "Simulate a transaction without submitting — returns fee estimate and validation result",
+    {
+      txCbor: z.string().optional().describe("Hex-encoded CBOR of a built transaction to evaluate"),
+      outputs: z.array(z.object({
+        address: z.string().describe("Recipient Vector address"),
+        lovelace: z.number().describe("Amount in lovelace"),
+        assets: z.record(z.string()).optional(),
+      })).optional().describe("If no txCbor provided, build a TX from these outputs and evaluate it"),
+      metadata: z.string().optional().describe("Optional JSON metadata when building from outputs"),
+    },
+    async ({ txCbor, outputs, metadata }) => {
+      try {
+        let cborToEvaluate = txCbor;
+        let feeFromBuild: string | null = null;
+
+        if (!cborToEvaluate && outputs && outputs.length > 0) {
+          // Build the transaction first
+          const lucid = await initLucid();
+
+          // @ts-ignore
+          let tx = lucid.newTx();
+          for (const output of outputs) {
+            const assets: Record<string, bigint> = { lovelace: BigInt(output.lovelace) };
+            if (output.assets) {
+              for (const [unit, qty] of Object.entries(output.assets)) {
+                assets[unit] = BigInt(qty);
+              }
+            }
+            tx = tx.payToAddress(output.address, assets);
+          }
+
+          if (metadata) {
+            const parsedMetadata = typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
+            // @ts-ignore
+            tx = tx.attachMetadata(674, parsedMetadata);
+          }
+
+          // @ts-ignore
+          const completedTx = await tx.complete();
+          // @ts-ignore
+          feeFromBuild = String(completedTx.fee);
+          // @ts-ignore
+          const signedTx = await completedTx.sign().complete();
+          cborToEvaluate = signedTx.toString();
+        }
+
+        if (!cborToEvaluate) {
+          throw new Error('Provide either txCbor or outputs to evaluate');
+        }
+
+        const provider = new OgmiosProvider({
+          ogmiosUrl: VECTOR_OGMIOS_URL,
+          submitUrl: VECTOR_SUBMIT_URL,
+          koiosUrl: VECTOR_KOIOS_URL,
+        });
+
+        let evalResult: VectorDryRunResult;
+        try {
+          const result = await provider.evaluateTransaction(cborToEvaluate);
+
+          // Parse Ogmios evaluateTransaction response
+          let totalMemory = 0;
+          let totalCpu = 0;
+          if (Array.isArray(result)) {
+            for (const item of result) {
+              if (item.budget) {
+                totalMemory += item.budget.memory || 0;
+                totalCpu += item.budget.cpu || 0;
+              }
+            }
+          }
+
+          const fee = feeFromBuild || '0';
+          evalResult = {
+            valid: true,
+            fee,
+            feeAda: lovelaceToAda(fee),
+            executionUnits: (totalMemory > 0 || totalCpu > 0) ? { memory: totalMemory, cpu: totalCpu } : undefined,
+          };
+        } catch (evalErr) {
+          // evaluateTransaction failed — still return fee if we built the tx
+          if (feeFromBuild) {
+            evalResult = {
+              valid: true,
+              fee: feeFromBuild,
+              feeAda: lovelaceToAda(feeFromBuild),
+              error: `Script evaluation unavailable: ${(evalErr as Error).message}. Fee estimate is from transaction building.`,
+            };
+          } else {
+            evalResult = {
+              valid: false,
+              fee: '0',
+              feeAda: '0',
+              error: `Evaluation failed: ${(evalErr as Error).message}`,
+            };
+          }
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: `# Dry Run Result
+
+Valid: ${evalResult.valid ? 'Yes' : 'No'}
+Estimated Fee: ${evalResult.feeAda} ADA (${evalResult.fee} lovelace)
+${evalResult.executionUnits ? `Execution Units: Memory ${evalResult.executionUnits.memory}, CPU ${evalResult.executionUnits.cpu}` : ''}
+${evalResult.error ? `\nNote: ${evalResult.error}` : ''}
+
+No transaction was submitted to the network.`,
+          }],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          content: [{
+            type: "text",
+            text: `Dry run failed: ${error.message}`,
+          }],
+        };
+      }
+    }
+  );
+
+  // vector_get_transaction_history — Get transaction history via Koios
+  // @ts-ignore: MCP SDK deep type instantiation
+  server.tool(
+    "vector_get_transaction_history",
+    "Get transaction history for a Vector address via Koios indexed queries",
+    {
+      address: z.string().optional().describe("Vector address to query. If omitted, uses the agent's wallet."),
+      limit: z.number().min(1).max(50).optional().describe("Number of transactions to return (default: 20, max: 50)"),
+      offset: z.number().min(0).optional().describe("Offset for pagination (default: 0)"),
+    },
+    async ({ address, limit, offset }) => {
+      try {
+        let queryAddress = address;
+        if (!queryAddress) {
+          const lucid = await initLucid();
+          queryAddress = await lucid.wallet.address();
+        }
+
+        const provider = new OgmiosProvider({
+          ogmiosUrl: VECTOR_OGMIOS_URL,
+          submitUrl: VECTOR_SUBMIT_URL,
+          koiosUrl: VECTOR_KOIOS_URL,
+        });
+
+        const txs = await provider.getTransactionHistory(queryAddress, offset || 0, limit || 20);
+
+        if (txs.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: `No transactions found for ${queryAddress}`,
+            }],
+          };
+        }
+
+        const txList = txs.map((tx, i) => {
+          const feeAda = tx.fee ? lovelaceToAda(tx.fee) : 'N/A';
+          return `${i + 1}. ${tx.txHash}\n   Block: ${tx.blockHeight} | Time: ${tx.blockTime} | Fee: ${feeAda} ADA`;
+        }).join('\n\n');
+
+        return {
+          content: [{
+            type: "text",
+            text: `# Transaction History for ${queryAddress}
+
+Showing ${txs.length} transaction(s) (offset: ${offset || 0}):
+
+${txList}
+
+[View on Explorer](${VECTOR_EXPLORER_URL}/address/${queryAddress})`,
+          }],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to get transaction history: ${error.message}
+
+**Troubleshooting Tips:**
+1. Ensure Koios is configured and reachable: ${VECTOR_KOIOS_URL}
+2. Verify the address is valid
+3. Check the block explorer for this address`,
+          }],
+        };
+      }
+    }
+  );
+
+  // vector_deploy_contract — Deploy a Plutus/Aiken smart contract
+  // @ts-ignore: MCP SDK deep type instantiation
+  server.tool(
+    "vector_deploy_contract",
+    "Deploy a Plutus/Aiken smart contract to Vector by sending funds to its script address",
+    {
+      scriptCbor: z.string().describe("Compiled Plutus/Aiken script in CBOR hex format"),
+      scriptType: z.enum(["PlutusV1", "PlutusV2", "PlutusV3"]).describe("Script version"),
+      initialDatum: z.string().optional().describe("Initial datum as CBOR hex. Use 'd87980' for void/unit datum. Defaults to void if omitted."),
+      lovelaceAmount: z.number().optional().describe("ADA to lock at the script address in lovelace (default: 2,000,000 = 2 ADA)"),
+    },
+    async ({ scriptCbor, scriptType, initialDatum, lovelaceAmount }) => {
+      try {
+        const result = await deployContract(
+          scriptCbor,
+          scriptType,
+          initialDatum || null,
+          lovelaceAmount || 2_000_000,
+        );
+
+        return {
+          content: [{
+            type: "text",
+            text: `# Smart Contract Deployed
+
+Transaction Hash: ${result.txHash}
+Script Address: ${result.scriptAddress}
+Script Hash: ${result.scriptHash}
+Script Type: ${result.scriptType}
+
+Funds locked at the script address. Use vector_interact_contract to interact with this contract.
+
+[View on Explorer](${result.links.explorer})`,
+          }],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to deploy contract: ${error.message}
+
+**Troubleshooting Tips:**
+1. Verify the script CBOR is valid hex (compiled Aiken or Plutus output)
+2. Ensure wallet has sufficient ADA for the locked amount + fees
+3. Check that the script type matches the compiled version (PlutusV1/V2/V3)
+4. Check spend limits with vector_get_spend_limits`,
+          }],
+        };
+      }
+    }
+  );
+
+  // vector_interact_contract — Interact with a deployed smart contract
+  // @ts-ignore: MCP SDK deep type instantiation
+  server.tool(
+    "vector_interact_contract",
+    "Interact with a deployed Plutus/Aiken smart contract — lock funds or spend from it",
+    {
+      scriptCbor: z.string().describe("Compiled Plutus/Aiken script in CBOR hex"),
+      scriptType: z.enum(["PlutusV1", "PlutusV2", "PlutusV3"]).describe("Script version"),
+      action: z.enum(["spend", "lock"]).describe("'spend' to collect UTxOs from the script, 'lock' to send funds to it"),
+      redeemer: z.string().optional().describe("Redeemer as CBOR hex (required for spend, use 'd87980' for void)"),
+      datum: z.string().optional().describe("Datum as CBOR hex (required for lock, use 'd87980' for void)"),
+      lovelaceAmount: z.number().optional().describe("Lovelace to lock (for lock action, default: 2,000,000 = 2 ADA)"),
+      utxoRef: z.object({
+        txHash: z.string(),
+        outputIndex: z.number(),
+      }).optional().describe("Specific UTxO to spend from (optional, otherwise spends all UTxOs at script address)"),
+      assets: z.record(z.string()).optional().describe("Additional native assets for lock action: { 'policyId+assetNameHex': 'quantity' }"),
+    },
+    async ({ scriptCbor, scriptType, action, redeemer, datum, lovelaceAmount, utxoRef, assets }) => {
+      try {
+        const result = await interactWithContract(
+          scriptCbor,
+          scriptType,
+          action,
+          redeemer || null,
+          datum || null,
+          lovelaceAmount || 2_000_000,
+          utxoRef || null,
+          assets || null,
+        );
+
+        const actionVerb = result.action === 'spend' ? 'collected from' : 'locked at';
+
+        return {
+          content: [{
+            type: "text",
+            text: `# Contract Interaction Successful
+
+Transaction Hash: ${result.txHash}
+Action: ${result.action}
+Script Address: ${result.scriptAddress}
+
+Funds ${actionVerb} the script address.
+
+[View on Explorer](${result.links.explorer})`,
+          }],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to interact with contract: ${error.message}
+
+**Troubleshooting Tips:**
+1. For 'spend': ensure the script address has UTxOs and the redeemer satisfies the validator
+2. For 'lock': ensure wallet has sufficient ADA and the datum matches the script's expectations
+3. Spending requires collateral — ensure wallet has a pure-ADA UTxO (no native tokens)
+4. Verify the script CBOR matches the deployed script exactly
+5. Check spend limits with vector_get_spend_limits`,
           }],
         };
       }

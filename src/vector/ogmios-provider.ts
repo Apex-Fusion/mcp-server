@@ -247,6 +247,94 @@ export class OgmiosProvider implements Provider {
     return false;
   }
 
+  /**
+   * Evaluate a transaction without submitting (dry run).
+   * Returns execution units for script validation.
+   */
+  async evaluateTransaction(txCborHex: string): Promise<any> {
+    return this.rpc('evaluateTransaction', {
+      transaction: { cbor: txCborHex },
+    });
+  }
+
+  /**
+   * Get transaction history for an address via Koios.
+   */
+  async getTransactionHistory(
+    address: string,
+    offset: number = 0,
+    limit: number = 20,
+  ): Promise<any[]> {
+    if (!this.koiosUrl) {
+      throw new Error(
+        'Koios URL is not configured. Transaction history requires Koios indexer. ' +
+        'Set VECTOR_KOIOS_URL in your environment.'
+      );
+    }
+
+    // Step 1: Get tx hashes for the address
+    const txListResponse = await fetch(`${this.koiosUrl}/api/v1/address_txs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ _addresses: [address], _after_block_height: 0 }),
+    });
+
+    if (!txListResponse.ok) {
+      const text = await txListResponse.text();
+      throw new Error(`Koios address_txs query failed (${txListResponse.status}): ${text}`);
+    }
+
+    const txList: any[] = await txListResponse.json();
+
+    // Apply pagination
+    const paginatedTxs = txList.slice(offset, offset + limit);
+
+    if (paginatedTxs.length === 0) {
+      return [];
+    }
+
+    // Step 2: Fetch full tx details
+    const txHashes = paginatedTxs.map((tx: any) => tx.tx_hash);
+    const txInfoResponse = await fetch(`${this.koiosUrl}/api/v1/tx_info`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ _tx_hashes: txHashes }),
+    });
+
+    if (!txInfoResponse.ok) {
+      // Fall back to basic tx list without details
+      return paginatedTxs.map((tx: any) => ({
+        txHash: tx.tx_hash,
+        blockHeight: tx.block_height || 0,
+        blockTime: tx.block_time
+          ? new Date(tx.block_time * 1000).toISOString()
+          : '',
+        fee: '0',
+      }));
+    }
+
+    const txInfos: any[] = await txInfoResponse.json();
+
+    return txInfos.map((info: any) => ({
+      txHash: info.tx_hash,
+      blockHeight: info.block_height || 0,
+      blockTime: info.tx_timestamp
+        ? new Date(info.tx_timestamp * 1000).toISOString()
+        : info.block_time
+          ? new Date(info.block_time * 1000).toISOString()
+          : '',
+      fee: info.fee || '0',
+      inputs: (info.inputs || []).map((inp: any) => ({
+        address: inp.payment_addr?.bech32 || inp.address || '',
+        amount: inp.value || '0',
+      })),
+      outputs: (info.outputs || []).map((out: any) => ({
+        address: out.payment_addr?.bech32 || out.address || '',
+        amount: out.value || '0',
+      })),
+    }));
+  }
+
   async submitTx(tx: string): Promise<string> {
     // tx is a hex-encoded CBOR transaction
     // submit-api expects raw CBOR bytes with Content-Type: application/cbor

@@ -58,3 +58,75 @@ export interface AuditEntry {
   recipient: string;
   action: string;
 }
+
+// --- Build Transaction ---
+
+export interface TxOutput {
+  address: string;
+  lovelace: number;
+  assets?: Record<string, string>; // unit -> quantity
+}
+
+export interface VectorBuildTransactionResult {
+  txCbor: string;
+  txHash: string;
+  fee: string;
+  feeAda: string;
+  outputCount: number;
+  totalAda: string;
+  submitted: boolean;
+  links?: {
+    explorer: string;
+  };
+}
+
+// --- Dry Run ---
+
+export interface VectorDryRunResult {
+  valid: boolean;
+  fee: string;
+  feeAda: string;
+  executionUnits?: {
+    memory: number;
+    cpu: number;
+  };
+  error?: string;
+}
+
+// --- Transaction History ---
+
+export interface VectorTransactionSummary {
+  txHash: string;
+  blockHeight: number;
+  blockTime: string;
+  fee: string;
+}
+
+export interface VectorTransactionHistoryResult {
+  address: string;
+  transactions: VectorTransactionSummary[];
+  total: number;
+}
+
+// --- Deploy Contract ---
+
+export interface VectorDeployContractResult {
+  txHash: string;
+  scriptAddress: string;
+  scriptHash: string;
+  scriptType: string;
+  links: {
+    explorer: string;
+  };
+}
+
+// --- Interact Contract ---
+
+export interface VectorInteractContractResult {
+  txHash: string;
+  scriptAddress: string;
+  action: 'spend' | 'lock';
+  links: {
+    explorer: string;
+  };
+}
