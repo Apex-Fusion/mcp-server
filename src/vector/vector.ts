@@ -8,6 +8,8 @@ import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
 import { OgmiosProvider } from './ogmios-provider.js';
 import { safetyLayer } from './safety.js';
+import { rateLimiter } from './rate-limiter.js';
+import { registerAgentNetworkTools } from './agent-network.js';
 import type {
   VectorToken,
   VectorWalletInfo,
@@ -528,6 +530,10 @@ export function registerVectorTools(server: McpServer) {
       address: z.string().describe("Vector address to check (addr1...)"),
     },
     async ({ address }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
       try {
         const provider = new OgmiosProvider({
           ogmiosUrl: VECTOR_OGMIOS_URL,
@@ -596,6 +602,10 @@ ${tokens.length > 0 ? `Token Holdings (${tokens.length}):\n${tokenList}` : 'No t
     "Get the agent's Vector wallet address, balance, and token holdings",
     {},
     async () => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
       try {
         const walletInfo = await getWalletInfo();
 
@@ -641,6 +651,10 @@ ${walletInfo.tokens.length > 0 ? `## Token Holdings (${walletInfo.tokens.length}
       address: z.string().optional().describe("Vector address to query UTxOs for. If omitted, uses the agent's wallet."),
     },
     async ({ address }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
       try {
         let utxos;
         let queryAddress: string;
@@ -656,7 +670,7 @@ ${walletInfo.tokens.length > 0 ? `## Token Holdings (${walletInfo.tokens.length}
         } else {
           const lucid = await initLucid();
           queryAddress = await lucid.wallet.address();
-          utxos = await lucid.wallet.getUtxos();
+          utxos = await lucid.utxosAt(queryAddress);
         }
 
         if (utxos.length === 0) {
@@ -696,20 +710,59 @@ ${utxoList}`,
     }
   );
 
-  // vector_send_apex — Send APEX with safety limits
+  // vector_send_apex — Send APEX with safety limits (or craft unsigned TX)
   // @ts-ignore: MCP SDK deep type instantiation
   server.tool(
     "vector_send_apex",
-    "Send ADA from the agent's wallet to a recipient address (respects spend limits)",
+    "Send ADA from the agent's wallet to a recipient address. Set unsigned_only=true to return unsigned CBOR without submitting (transaction-crafter mode).",
     {
       recipientAddress: z.string().describe("Recipient Vector address (addr1...)"),
       amount: z.number().min(1).describe("Amount of ADA to send"),
       metadata: z.string().optional().describe("Optional transaction metadata in JSON format"),
+      unsigned_only: z.boolean().optional().default(false).describe("If true, return unsigned TX CBOR without signing or submitting"),
     },
-    async ({ recipientAddress, amount, metadata }) => {
+    async ({ recipientAddress, amount, metadata, unsigned_only }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
       try {
-        const result = await sendAda(recipientAddress, amount, metadata);
+        if (unsigned_only) {
+          const lovelaceAmount = BigInt(Math.floor(amount * 1_000_000));
+          const lucid = await initLucid();
+          // @ts-ignore
+          let txBuilder = lucid.newTx().payToAddress(recipientAddress, { lovelace: lovelaceAmount });
+          if (metadata) {
+            const parsedMetadata = typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
+            // @ts-ignore
+            txBuilder = txBuilder.attachMetadata(674, parsedMetadata);
+          }
+          // @ts-ignore
+          const tx = await txBuilder.complete();
+          // @ts-ignore
+          const fee = tx.fee;
+          // @ts-ignore
+          const txCbor = tx.toString();
+          return {
+            content: [{
+              type: "text",
+              text: `# Unsigned Transaction (Transaction-Crafter Mode)
 
+**Amount:** ${amount} ADA (${lovelaceAmount} lovelace)
+**To:** ${recipientAddress}
+**Estimated Fee:** ${lovelaceToAda(fee)} ADA
+
+**Unsigned TX CBOR:**
+\`\`\`
+${txCbor}
+\`\`\`
+
+This transaction has NOT been submitted. Sign and submit it separately.`,
+            }],
+          };
+        }
+
+        const result = await sendAda(recipientAddress, amount, metadata);
         return {
           content: [{
             type: "text",
@@ -741,22 +794,65 @@ Amount: ${result.amount} ADA
     }
   );
 
-  // vector_send_tokens — Send native tokens with safety limits
+  // vector_send_tokens — Send native tokens with safety limits (or craft unsigned TX)
   // @ts-ignore: MCP SDK deep type instantiation
   server.tool(
     "vector_send_tokens",
-    "Send Vector native tokens from the agent's wallet to a recipient address",
+    "Send Vector native tokens from the agent's wallet to a recipient address. Set unsigned_only=true to return unsigned CBOR without submitting.",
     {
       recipientAddress: z.string().describe("Recipient Vector address (addr1...)"),
       policyId: z.string().describe("Token policy ID"),
       assetName: z.string().describe("Asset name (can be empty for policy-only tokens)"),
       amount: z.string().describe("Amount of tokens to send"),
       adaAmount: z.number().optional().describe("Optional ADA to include (uses minimum required if not specified)"),
+      unsigned_only: z.boolean().optional().default(false).describe("If true, return unsigned TX CBOR without signing or submitting"),
     },
-    async ({ recipientAddress, policyId, assetName, amount, adaAmount }) => {
+    async ({ recipientAddress, policyId, assetName, amount, adaAmount, unsigned_only }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
       try {
-        const result = await sendTokens(recipientAddress, policyId, assetName, amount, adaAmount);
+        if (unsigned_only) {
+          const lucid = await initLucid();
+          let assetNameHex = assetName;
+          if (assetName && !/^[0-9a-fA-F]+$/.test(assetName)) {
+            assetNameHex = fromText(assetName);
+          }
+          const unit = `${policyId}${assetNameHex}`;
+          const outputLovelace = adaAmount
+            ? BigInt(Math.floor(adaAmount * 1_000_000))
+            : BigInt(2_000_000);
+          // @ts-ignore
+          const tx = await lucid.newTx()
+            .payToAddress(recipientAddress, { lovelace: outputLovelace, [unit]: BigInt(amount) })
+            .complete();
+          // @ts-ignore
+          const fee = tx.fee;
+          // @ts-ignore
+          const txCbor = tx.toString();
+          return {
+            content: [{
+              type: "text",
+              text: `# Unsigned Token Transaction (Transaction-Crafter Mode)
 
+**Token:** ${formatAssetName(assetNameHex) || policyId.substring(0,8) + '...'}
+**Amount:** ${amount}
+**To:** ${recipientAddress}
+**Included ADA:** ${lovelaceToAda(outputLovelace)} ADA
+**Estimated Fee:** ${lovelaceToAda(fee)} ADA
+
+**Unsigned TX CBOR:**
+\`\`\`
+${txCbor}
+\`\`\`
+
+This transaction has NOT been submitted. Sign and submit it separately.`,
+            }],
+          };
+        }
+
+        const result = await sendTokens(recipientAddress, policyId, assetName, amount, adaAmount);
         return {
           content: [{
             type: "text",
@@ -801,6 +897,10 @@ Included ADA: ${result.ada} ADA
     "Check current spend limits and remaining daily budget",
     {},
     async () => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
       try {
         const status = safetyLayer.getSpendStatus();
         const log = safetyLayer.getAuditLog();
@@ -850,6 +950,10 @@ ${log.length > 0 ? `## Recent Transactions (last ${Math.min(5, log.length)}):\n$
       submit: z.boolean().optional().describe("If true, sign and submit the transaction. If false/omitted, return unsigned CBOR for review."),
     },
     async ({ outputs, metadata, submit }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
       try {
         const result = await buildTransaction(outputs, metadata, submit);
 
@@ -916,6 +1020,10 @@ Use vector_dry_run with this CBOR to simulate, or call vector_build_transaction 
       metadata: z.string().optional().describe("Optional JSON metadata when building from outputs"),
     },
     async ({ txCbor, outputs, metadata }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
       try {
         let cborToEvaluate = txCbor;
         let feeFromBuild: string | null = null;
@@ -1039,6 +1147,10 @@ No transaction was submitted to the network.`,
       offset: z.number().min(0).optional().describe("Offset for pagination (default: 0)"),
     },
     async ({ address, limit, offset }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
       try {
         let queryAddress = address;
         if (!queryAddress) {
@@ -1109,6 +1221,10 @@ ${txList}
       lovelaceAmount: z.number().optional().describe("ADA to lock at the script address in lovelace (default: 2,000,000 = 2 ADA)"),
     },
     async ({ scriptCbor, scriptType, initialDatum, lovelaceAmount }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
       try {
         const result = await deployContract(
           scriptCbor,
@@ -1169,6 +1285,10 @@ Funds locked at the script address. Use vector_interact_contract to interact wit
       assets: z.record(z.string()).optional().describe("Additional native assets for lock action: { 'policyId+assetNameHex': 'quantity' }"),
     },
     async ({ scriptCbor, scriptType, action, redeemer, datum, lovelaceAmount, utxoRef, assets }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
       try {
         const result = await interactWithContract(
           scriptCbor,
@@ -1215,4 +1335,8 @@ Funds ${actionVerb} the script address.
       }
     }
   );
+
+  // Agent network tools (register, discover, message, profile) live in agent-network.ts
+  // to isolate C (Cardano WASM) imports from tsc's complex type inference
+  registerAgentNetworkTools(server);
 }

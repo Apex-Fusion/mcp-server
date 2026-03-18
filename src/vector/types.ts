@@ -130,3 +130,39 @@ export interface VectorInteractContractResult {
     explorer: string;
   };
 }
+
+// --- Agent Network ---
+
+export interface AgentProfile {
+  agentId: string;        // did:vector:agent:{policyId}:{nftAssetName}
+  name: string;
+  description: string;
+  capabilities: string[];
+  framework: string;
+  endpoint: string;
+  registeredAt: number;   // POSIX ms timestamp
+  utxoRef?: string;       // tx_hash#index of registry UTxO
+  ownerVkeyHash?: string; // owner verification key hash (hex)
+}
+
+export interface AgentRegistrationResult {
+  agentId: string;
+  nftAssetName: string;
+  txHash: string;
+  links: { explorer: string };
+}
+
+export interface AgentMessageResult {
+  txHash: string;
+  recipientAddress: string;
+  messageType: string;
+  links: { explorer: string };
+}
+
+// --- Unsigned TX (transaction-crafter mode) ---
+
+export interface UnsignedTxResult {
+  txCbor: string;
+  fee: string;
+  feeAda: string;
+}
