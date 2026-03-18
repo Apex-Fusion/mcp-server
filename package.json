@@ -8,7 +8,8 @@
   },
   "scripts": {
     "clean": "rm -rf build",
-    "build": "npm run clean && NODE_OPTIONS='--max-old-space-size=12288' tsc && chmod +x build/index.js",
+    "build": "tsup && chmod +x build/index.js",
+    "typecheck": "tsc --noEmit --incremental",
     "start": "node build/index.js"
   },
   "files": [
@@ -50,6 +51,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.1",
+    "tsup": "^8.5.1",
     "typescript": "^5.7.3"
   }
 }

@@ -11,7 +11,8 @@
     "rootDir": "src",
     "allowJs": true,
     "checkJs": false,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "incremental": true
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "build"]

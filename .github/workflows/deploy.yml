@@ -11,6 +11,9 @@ jobs:
       contents: read
       packages: write
 
+    env:
+      IMAGE: ghcr.io/apex-fusion/web3-mcp
+
     steps:
       - uses: actions/checkout@v4
 
@@ -39,8 +42,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
 
       - name: Deploy to Hetzner VM
         run: |
@@ -49,7 +52,7 @@ jobs:
           ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no \
             ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }} \
             "echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin && \
-             docker pull ghcr.io/${{ github.repository }}:${{ github.sha }} && \
+             docker pull ${{ env.IMAGE }}:${{ github.sha }} && \
              docker stop vector-mcp || true && \
              docker rm vector-mcp || true && \
              docker run -d \
@@ -57,5 +60,5 @@ jobs:
                --restart unless-stopped \
                -p 122.0.0.1:3000:3000 \
                --env-file /etc/vector-mcp/env \
-               ghcr.io/${{ github.repository }}:${{ github.sha }}"
+               ${{ env.IMAGE }}:${{ github.sha }}"
           rm /tmp/deploy_key
