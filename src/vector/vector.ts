@@ -98,7 +98,7 @@ async function initLucid() {
 export async function getWalletInfo(): Promise<VectorWalletInfo> {
   const lucid = await initLucid();
   const address = await lucid.wallet.address();
-  const utxos = await lucid.wallet.getUtxos();
+  const utxos = await lucid.utxosAt(address);
 
   let adaBalance = '0';
   let tokenBalances: VectorToken[] = [];
