@@ -58,7 +58,7 @@ jobs:
              docker run -d \
                --name vector-mcp \
                --restart unless-stopped \
-               -p 122.0.0.1:3000:3000 \
+               -p 127.0.0.1:3000:3000 \
                --env-file /etc/vector-mcp/env \
                ${{ env.IMAGE }}:${{ github.sha }}"
           rm /tmp/deploy_key
