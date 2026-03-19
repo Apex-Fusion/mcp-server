@@ -159,6 +159,27 @@ export interface AgentMessageResult {
   links: { explorer: string };
 }
 
+export interface AgentDeregistrationResult {
+  agentId: string;
+  txHash: string;
+  depositReturned: string;
+  links: { explorer: string };
+}
+
+export interface AgentUpdateResult {
+  agentId: string;
+  txHash: string;
+  updatedFields: string[];
+  links: { explorer: string };
+}
+
+export interface AgentTransferResult {
+  agentId: string;
+  txHash: string;
+  newOwnerAddress: string;
+  links: { explorer: string };
+}
+
 // --- Unsigned TX (transaction-crafter mode) ---
 
 export interface UnsignedTxResult {

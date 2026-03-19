@@ -1,5 +1,5 @@
 // @ts-nocheck
-// Agent network tools: register, discover, message, get_profile
+// Agent network tools: register, discover, message, get_profile, update, deregister, transfer
 // ts-nocheck isolates C (Cardano WASM) imports from tsc's complex type inference
 
 import { z } from "zod";
@@ -7,6 +7,11 @@ import { Lucid, fromText, toText, Data, Constr, C } from 'lucid-cardano';
 import { OgmiosProvider } from './ogmios-provider.js';
 import { safetyLayer } from './safety.js';
 import { rateLimiter } from './rate-limiter.js';
+
+// Lucid v0.10.x lacks PlutusV3 — downcast to PlutusV2 for hashing (same algorithm)
+function lucidCompat(validator) {
+  return validator.type === 'PlutusV3' ? { ...validator, type: 'PlutusV2' } : validator;
+}
 
 // Env config (mirrors vector.ts)
 const VECTOR_OGMIOS_URL = process.env.VECTOR_OGMIOS_URL || 'https://ogmios.vector.testnet.apexfusion.org';
@@ -20,12 +25,18 @@ const REGISTRY_POLICY_ID = "5dd5118943d5aa7329696181252a6565a27dbf2c6de92b02a6aa
 const MIN_AP3X_DEPOSIT = 10_000_000n;
 const AGENT_MESSAGE_LABEL = 674;
 
-// Helpers
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 function lovelaceToAda(lovelace) {
   return (Number(BigInt(String(lovelace))) / 1_000_000).toFixed(6);
 }
+
 function explorerTxLink(txHash) {
   return `${VECTOR_EXPLORER_URL}/transaction/${txHash}`;
+}
+
+function newProvider() {
+  return new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL });
 }
 
 // Derive NFT asset name = blake2b_256(CBOR(OutputReference))
@@ -36,7 +47,7 @@ function deriveNftAssetName(txHash, outputIndex) {
   return Buffer.from(hashBytes).toString('hex');
 }
 
-function buildAgentDatum(vkeyHash, name, description, capabilities, framework, endpoint) {
+function buildAgentDatum(vkeyHash, name, description, capabilities, framework, endpoint, registeredAt) {
   return Data.to(new Constr(0, [
     new Constr(0, [vkeyHash]),
     fromText(name),
@@ -44,7 +55,7 @@ function buildAgentDatum(vkeyHash, name, description, capabilities, framework, e
     capabilities.map(c => fromText(c)),
     fromText(framework),
     fromText(endpoint),
-    BigInt(Date.now()),
+    BigInt(registeredAt ?? Date.now()),
   ]));
 }
 
@@ -69,31 +80,107 @@ function parseAgentDatum(datumCbor, utxoRef, assets) {
       utxoRef,
       ownerVkeyHash: vkeyHash,
     };
-  } catch {
+  } catch (err) {
+    console.warn(`parseAgentDatum failed for ${utxoRef}:`, err?.message || err);
     return null;
   }
 }
 
-async function initLucid(mnemonic: string, accountIndex: number = 0) {
-  const provider = new OgmiosProvider({
-    ogmiosUrl: VECTOR_OGMIOS_URL,
-    submitUrl: VECTOR_SUBMIT_URL,
-    koiosUrl: VECTOR_KOIOS_URL,
-  });
+// ─── DID & Agent Resolution ──────────────────────────────────────────────────
+
+function parseDid(agentId) {
+  const parts = agentId.split(':');
+  if (parts.length !== 5 || parts[0] !== 'did' || parts[1] !== 'vector' || parts[2] !== 'agent') {
+    throw new Error('Invalid agent DID format. Expected: did:vector:agent:{policyId}:{nftAssetName}');
+  }
+  if (!/^[a-f0-9]+$/.test(parts[3]) || !/^[a-f0-9]+$/.test(parts[4])) {
+    throw new Error('Invalid agent DID: policyId and assetName must be hex strings.');
+  }
+  return { policyId: parts[3], assetName: parts[4], unit: `${parts[3]}${parts[4]}` };
+}
+
+async function resolveAgentUtxo(provider, agentId) {
+  const { unit } = parseDid(agentId);
+  const utxo = await provider.getUtxoByUnit(unit);
+  if (!utxo) throw new Error(`Agent not found: no UTxO holds NFT ${unit}. The agent may not exist or may have deregistered.`);
+  if (!utxo.datum) throw new Error('Registry UTxO found but has no inline datum.');
+  const profile = parseAgentDatum(utxo.datum, `${utxo.txHash}#${utxo.outputIndex}`, utxo.assets);
+  if (!profile) throw new Error('Could not parse agent datum. The on-chain data may be malformed.');
+  return { profile, utxo, nftUnit: unit };
+}
+
+function verifyOwnership(profile, walletVkeyHash) {
+  if (profile.ownerVkeyHash !== walletVkeyHash) {
+    throw new Error('Ownership check failed: your wallet does not own this agent. The agent\'s owner verification key does not match your wallet\'s payment key.');
+  }
+}
+
+// ─── Validation ──────────────────────────────────────────────────────────────
+
+function validateEndpoint(endpoint) {
+  if (!endpoint) return; // empty string is allowed
+  try {
+    new URL(endpoint);
+  } catch {
+    throw new Error(`Invalid endpoint URL: "${endpoint}". Must be a valid URL (e.g. https://example.com/api) or empty string.`);
+  }
+}
+
+function validateCapabilities(capabilities) {
+  for (const cap of capabilities) {
+    if (typeof cap !== 'string' || cap.trim().length === 0) {
+      throw new Error('Each capability must be a non-empty string.');
+    }
+  }
+}
+
+// ─── Lucid Init ──────────────────────────────────────────────────────────────
+
+async function initLucid(mnemonic, accountIndex = 0) {
+  const provider = newProvider();
   const lucid = await Lucid.new(provider, 'Mainnet');
   if (!mnemonic) throw new Error('mnemonic is required');
   const trimmed = mnemonic.trim();
   const words = trimmed.split(/\s+/);
-  if (words.length !== 15 && words.length !== 24) {
-    throw new Error(`Invalid mnemonic: Expected 15 or 24 words, got ${words.length}`);
+  const validLengths = [12, 15, 18, 21, 24];
+  if (!validLengths.includes(words.length)) {
+    throw new Error(`Invalid mnemonic: Expected 12, 15, 18, 21 or 24 words, got ${words.length}`);
   }
   lucid.selectWalletFromSeed(trimmed, { accountIndex });
+
+  // Store the full wallet address so credential-based UTxO lookups resolve correctly
+  const address = await lucid.wallet.address();
+  provider.setWalletAddress(address);
+
   return lucid;
 }
 
+// Cached registry address (derived from script hash, doesn't need a wallet)
+let _registryAddress = null;
+async function getRegistryAddress() {
+  if (_registryAddress) return _registryAddress;
+  const provider = newProvider();
+  const lucid = await Lucid.new(provider, 'Mainnet');
+  const registryScript = { type: 'PlutusV3', script: REGISTRY_SCRIPT_CBOR };
+  _registryAddress = lucid.utils.validatorToAddress(lucidCompat(registryScript));
+  return _registryAddress;
+}
+
+// ─── Rate limit wrapper ──────────────────────────────────────────────────────
+
+function checkRateLimit() {
+  const rateCheck = rateLimiter.check();
+  if (!rateCheck.allowed) {
+    return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+  }
+  return null;
+}
+
+// ─── Tool Registration ───────────────────────────────────────────────────────
+
 export function registerAgentNetworkTools(server) {
 
-  // vector_get_agent_profile
+  // vector_get_agent_profile (read-only — no mnemonic needed)
   server.tool(
     "vector_get_agent_profile",
     "Get a registered agent's profile from the on-chain registry by DID (did:vector:agent:...)",
@@ -101,22 +188,11 @@ export function registerAgentNetworkTools(server) {
       agent_id: z.string().describe("Agent DID: did:vector:agent:{policyId}:{nftAssetName}"),
     },
     async ({ agent_id }) => {
-      const rateCheck = rateLimiter.check();
-      if (!rateCheck.allowed) {
-        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
-      }
+      const rateLimited = checkRateLimit();
+      if (rateLimited) return rateLimited;
       try {
-        const parts = agent_id.split(':');
-        if (parts.length !== 5 || parts[0] !== 'did' || parts[1] !== 'vector' || parts[2] !== 'agent') {
-          throw new Error('Invalid agent DID format. Expected: did:vector:agent:{policyId}:{nftAssetName}');
-        }
-        const unit = `${parts[3]}${parts[4]}`;
-        const provider = new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL });
-        const utxo = await provider.getUtxoByUnit(unit);
-        if (!utxo) throw new Error(`Agent not found: no UTxO holds NFT ${unit}. The agent may not exist or may have deregistered.`);
-        if (!utxo.datum) throw new Error(`Registry UTxO found but has no inline datum.`);
-        const profile = parseAgentDatum(utxo.datum, `${utxo.txHash}#${utxo.outputIndex}`, utxo.assets);
-        if (!profile) throw new Error(`Could not parse agent datum.`);
+        const provider = newProvider();
+        const { profile } = await resolveAgentUtxo(provider, agent_id);
         const capList = profile.capabilities.length > 0
           ? profile.capabilities.map(c => `- ${c}`).join('\n')
           : '- (none listed)';
@@ -154,26 +230,21 @@ ${capList}
     }
   );
 
-  // vector_discover_agents
+  // vector_discover_agents (read-only — no mnemonic needed)
   server.tool(
     "vector_discover_agents",
     "Discover registered agents in the Vector on-chain registry, optionally filtered by capability or framework",
     {
-      mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic (used to derive the registry address)"),
       capability: z.string().optional().describe("Filter by capability tag (e.g. 'investing', 'research')"),
       framework: z.string().optional().describe("Filter by framework (e.g. 'OpenClaw', 'LangChain', 'CrewAI')"),
       limit: z.number().optional().default(20).describe("Maximum number of agents to return (default: 20)"),
     },
-    async ({ mnemonic, capability, framework, limit }) => {
-      const rateCheck = rateLimiter.check();
-      if (!rateCheck.allowed) {
-        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
-      }
+    async ({ capability, framework, limit }) => {
+      const rateLimited = checkRateLimit();
+      if (rateLimited) return rateLimited;
       try {
-        const lucid = await initLucid(mnemonic);
-        const registryScript = { type: "PlutusV3", script: REGISTRY_SCRIPT_CBOR };
-        const registryAddress = lucid.utils.validatorToAddress(registryScript);
-        const provider = new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL });
+        const registryAddress = await getRegistryAddress();
+        const provider = newProvider();
         const utxos = await provider.getUtxos(registryAddress);
         const profiles = [];
         for (const utxo of utxos) {
@@ -227,11 +298,12 @@ ${capList}
       endpoint: z.string().describe("A2A communication endpoint URL (or empty string if not applicable)"),
     },
     async ({ mnemonic, name, description, capabilities, framework, endpoint }) => {
-      const rateCheck = rateLimiter.check();
-      if (!rateCheck.allowed) {
-        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
-      }
+      const rateLimited = checkRateLimit();
+      if (rateLimited) return rateLimited;
       try {
+        validateEndpoint(endpoint);
+        validateCapabilities(capabilities);
+
         const safetyCheck = safetyLayer.checkTransaction(Number(MIN_AP3X_DEPOSIT));
         if (!safetyCheck.allowed) throw new Error(`Safety limit exceeded: ${safetyCheck.reason}`);
 
@@ -252,14 +324,15 @@ ${capList}
         const nftUnit = `${REGISTRY_POLICY_ID}${nftAssetName}`;
         const datum = buildAgentDatum(vkeyHash, name, description, capabilities, framework, endpoint);
         const registryScript = { type: "PlutusV3", script: REGISTRY_SCRIPT_CBOR };
-        const registryAddress = lucid.utils.validatorToAddress(registryScript);
+        const registryAddress = lucid.utils.validatorToAddress(lucidCompat(registryScript));
         const registerRedeemer = Data.to(new Constr(0, [new Constr(0, [seedUtxo.txHash, BigInt(seedUtxo.outputIndex)])]));
 
         const tx = await lucid.newTx()
           .collectFrom([seedUtxo])
           .mintAssets({ [nftUnit]: 1n }, registerRedeemer)
-          .attachMintingPolicy(registryScript)
+          .attachMintingPolicy(lucidCompat(registryScript))
           .payToContract(registryAddress, { inline: datum }, { lovelace: MIN_AP3X_DEPOSIT, [nftUnit]: 1n })
+          .addSigner(walletAddress)
           .complete();
         const signedTx = await tx.sign().complete();
         const txHash = await signedTx.submit();
@@ -300,6 +373,253 @@ Save your Agent DID — you'll need it to update, deregister, or let other agent
     }
   );
 
+  // vector_update_agent
+  server.tool(
+    "vector_update_agent",
+    "Update a registered agent's profile fields (name, description, capabilities, framework, endpoint). Only the specified fields are changed; others are preserved.",
+    {
+      mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the agent's owner wallet"),
+      agent_id: z.string().describe("Agent DID to update: did:vector:agent:{policyId}:{nftAssetName}"),
+      name: z.string().min(1).max(64).optional().describe("New agent name"),
+      description: z.string().max(256).optional().describe("New description"),
+      capabilities: z.array(z.string()).optional().describe("New capability tags (replaces existing list)"),
+      framework: z.string().optional().describe("New framework identifier"),
+      endpoint: z.string().optional().describe("New A2A endpoint URL (or empty string to clear)"),
+    },
+    async ({ mnemonic, agent_id, name, description, capabilities, framework, endpoint }) => {
+      const rateLimited = checkRateLimit();
+      if (rateLimited) return rateLimited;
+      try {
+        if (name === undefined && description === undefined && capabilities === undefined && framework === undefined && endpoint === undefined) {
+          throw new Error('At least one field must be provided to update (name, description, capabilities, framework, or endpoint).');
+        }
+        if (endpoint !== undefined) validateEndpoint(endpoint);
+        if (capabilities !== undefined) validateCapabilities(capabilities);
+
+        const lucid = await initLucid(mnemonic);
+        const walletAddress = await lucid.wallet.address();
+        const vkeyHash = lucid.utils.getAddressDetails(walletAddress).paymentCredential?.hash;
+        if (!vkeyHash) throw new Error('Cannot derive payment key hash from wallet address');
+
+        const provider = newProvider();
+        const { profile, utxo, nftUnit } = await resolveAgentUtxo(provider, agent_id);
+        verifyOwnership(profile, vkeyHash);
+
+        // Merge: use new values where provided, keep old values otherwise
+        const newName = name ?? profile.name;
+        const newDesc = description ?? profile.description;
+        const newCaps = capabilities ?? profile.capabilities;
+        const newFramework = framework ?? profile.framework;
+        const newEndpoint = endpoint ?? profile.endpoint;
+
+        const newDatum = buildAgentDatum(vkeyHash, newName, newDesc, newCaps, newFramework, newEndpoint, profile.registeredAt);
+        const registryScript = { type: 'PlutusV3', script: REGISTRY_SCRIPT_CBOR };
+        const registryAddress = lucid.utils.validatorToAddress(lucidCompat(registryScript));
+        const spendRedeemer = Data.to(new Constr(0, [])); // Update
+
+        const tx = await lucid.newTx()
+          .collectFrom([utxo], spendRedeemer)
+          .attachSpendingValidator(lucidCompat(registryScript))
+          .payToContract(registryAddress, { inline: newDatum }, { lovelace: MIN_AP3X_DEPOSIT, [nftUnit]: 1n })
+          .addSigner(walletAddress)
+          .complete();
+        const signedTx = await tx.sign().complete();
+        const txHash = await signedTx.submit();
+        safetyLayer.recordTransaction(txHash, 0, registryAddress);
+
+        const updatedFields = [];
+        if (name !== undefined) updatedFields.push('name');
+        if (description !== undefined) updatedFields.push('description');
+        if (capabilities !== undefined) updatedFields.push('capabilities');
+        if (framework !== undefined) updatedFields.push('framework');
+        if (endpoint !== undefined) updatedFields.push('endpoint');
+
+        return {
+          content: [{
+            type: "text",
+            text: `# Agent Updated Successfully
+
+**Agent DID:** ${agent_id}
+**Updated fields:** ${updatedFields.join(', ')}
+**Transaction:** ${txHash}
+
+[View on Explorer](${explorerTxLink(txHash)})
+
+The agent's profile has been updated on-chain. The identity NFT and deposit are unchanged.`,
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to update agent: ${err.message}
+
+**Troubleshooting Tips:**
+1. Verify the agent DID is correct
+2. Your wallet must be the agent's current owner
+3. Ensure wallet has enough ADA for transaction fees
+4. Check spend limits with vector_get_spend_limits`,
+          }],
+        };
+      }
+    }
+  );
+
+  // vector_deregister_agent
+  server.tool(
+    "vector_deregister_agent",
+    "Deregister an agent from the Vector registry. Burns the identity NFT and returns the 10 AP3X deposit to your wallet.",
+    {
+      mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the agent's owner wallet"),
+      agent_id: z.string().describe("Agent DID to deregister: did:vector:agent:{policyId}:{nftAssetName}"),
+    },
+    async ({ mnemonic, agent_id }) => {
+      const rateLimited = checkRateLimit();
+      if (rateLimited) return rateLimited;
+      try {
+        const lucid = await initLucid(mnemonic);
+        const walletAddress = await lucid.wallet.address();
+        const vkeyHash = lucid.utils.getAddressDetails(walletAddress).paymentCredential?.hash;
+        if (!vkeyHash) throw new Error('Cannot derive payment key hash from wallet address');
+
+        const provider = newProvider();
+        const { profile, utxo, nftUnit } = await resolveAgentUtxo(provider, agent_id);
+        verifyOwnership(profile, vkeyHash);
+
+        const registryScript = { type: 'PlutusV3', script: REGISTRY_SCRIPT_CBOR };
+        const spendRedeemer = Data.to(new Constr(1, [])); // Deregister
+        const mintRedeemer = Data.to(new Constr(1, []));  // Burn
+
+        const tx = await lucid.newTx()
+          .collectFrom([utxo], spendRedeemer)
+          .attachSpendingValidator(lucidCompat(registryScript))
+          .mintAssets({ [nftUnit]: -1n }, mintRedeemer)
+          .attachMintingPolicy(lucidCompat(registryScript))
+          .addSigner(walletAddress)
+          .complete();
+        const signedTx = await tx.sign().complete();
+        const txHash = await signedTx.submit();
+        safetyLayer.recordTransaction(txHash, 0, walletAddress);
+
+        return {
+          content: [{
+            type: "text",
+            text: `# Agent Deregistered Successfully
+
+**Agent DID:** ${agent_id}
+**Name:** ${profile.name}
+**Deposit returned:** ${lovelaceToAda(MIN_AP3X_DEPOSIT)} AP3X
+**Transaction:** ${txHash}
+
+[View on Explorer](${explorerTxLink(txHash)})
+
+The agent's identity NFT has been burned and the 10 AP3X deposit has been returned to your wallet.`,
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to deregister agent: ${err.message}
+
+**Troubleshooting Tips:**
+1. Verify the agent DID is correct
+2. Your wallet must be the agent's current owner
+3. Ensure wallet has enough ADA for transaction fees
+4. Use vector_get_agent_profile to check the agent's current state`,
+          }],
+        };
+      }
+    }
+  );
+
+  // vector_transfer_agent
+  server.tool(
+    "vector_transfer_agent",
+    "Transfer agent ownership to a new address. The new owner must have a verification key credential (not a script address).",
+    {
+      mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the current owner's wallet"),
+      agent_id: z.string().describe("Agent DID to transfer: did:vector:agent:{policyId}:{nftAssetName}"),
+      new_owner_address: z.string().describe("Bech32 address of the new owner (must be a verification key address, not a script address)"),
+    },
+    async ({ mnemonic, agent_id, new_owner_address }) => {
+      const rateLimited = checkRateLimit();
+      if (rateLimited) return rateLimited;
+      try {
+        const lucid = await initLucid(mnemonic);
+        const walletAddress = await lucid.wallet.address();
+        const vkeyHash = lucid.utils.getAddressDetails(walletAddress).paymentCredential?.hash;
+        if (!vkeyHash) throw new Error('Cannot derive payment key hash from wallet address');
+
+        // Validate new owner address
+        let newOwnerDetails;
+        try {
+          newOwnerDetails = lucid.utils.getAddressDetails(new_owner_address);
+        } catch {
+          throw new Error(`Invalid new owner address: "${new_owner_address}". Must be a valid bech32 address.`);
+        }
+        if (newOwnerDetails.paymentCredential?.type !== 'Key') {
+          throw new Error('New owner address must be a verification key credential, not a script address. The on-chain contract rejects script credentials as owners.');
+        }
+        const newOwnerVkeyHash = newOwnerDetails.paymentCredential.hash;
+
+        const provider = newProvider();
+        const { profile, utxo, nftUnit } = await resolveAgentUtxo(provider, agent_id);
+        verifyOwnership(profile, vkeyHash);
+
+        // Build datum with new owner, everything else preserved
+        const newDatum = buildAgentDatum(
+          newOwnerVkeyHash, profile.name, profile.description,
+          profile.capabilities, profile.framework, profile.endpoint,
+          profile.registeredAt
+        );
+        const registryScript = { type: 'PlutusV3', script: REGISTRY_SCRIPT_CBOR };
+        const registryAddress = lucid.utils.validatorToAddress(lucidCompat(registryScript));
+        const spendRedeemer = Data.to(new Constr(0, [])); // Update (transfer uses Update redeemer)
+
+        const tx = await lucid.newTx()
+          .collectFrom([utxo], spendRedeemer)
+          .attachSpendingValidator(lucidCompat(registryScript))
+          .payToContract(registryAddress, { inline: newDatum }, { lovelace: MIN_AP3X_DEPOSIT, [nftUnit]: 1n })
+          .addSigner(walletAddress)
+          .complete();
+        const signedTx = await tx.sign().complete();
+        const txHash = await signedTx.submit();
+        safetyLayer.recordTransaction(txHash, 0, registryAddress);
+
+        return {
+          content: [{
+            type: "text",
+            text: `# Agent Transferred Successfully
+
+**Agent DID:** ${agent_id}
+**Name:** ${profile.name}
+**Previous owner:** ${walletAddress}
+**New owner:** ${new_owner_address}
+**Transaction:** ${txHash}
+
+[View on Explorer](${explorerTxLink(txHash)})
+
+Ownership has been transferred. The new owner can now update, transfer, or deregister this agent.`,
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to transfer agent: ${err.message}
+
+**Troubleshooting Tips:**
+1. Verify the agent DID is correct
+2. Your wallet must be the agent's current owner
+3. The new owner address must be a verification key address (not a script)
+4. Ensure wallet has enough ADA for transaction fees`,
+          }],
+        };
+      }
+    }
+  );
+
   // vector_message_agent
   server.tool(
     "vector_message_agent",
@@ -311,21 +631,12 @@ Save your Agent DID — you'll need it to update, deregister, or let other agent
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the sending wallet"),
     },
     async ({ agent_id, message_type, payload, mnemonic }) => {
-      const rateCheck = rateLimiter.check();
-      if (!rateCheck.allowed) {
-        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
-      }
+      const rateLimited = checkRateLimit();
+      if (rateLimited) return rateLimited;
       try {
-        const parts = agent_id.split(':');
-        if (parts.length !== 5 || parts[0] !== 'did' || parts[1] !== 'vector' || parts[2] !== 'agent') {
-          throw new Error('Invalid agent DID format. Expected: did:vector:agent:{policyId}:{nftAssetName}');
-        }
-        const unit = `${parts[3]}${parts[4]}`;
-        const provider = new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL });
-        const utxo = await provider.getUtxoByUnit(unit);
-        if (!utxo || !utxo.datum) throw new Error(`Agent not found: ${agent_id}. The agent may not be registered or may have deregistered.`);
-        const profile = parseAgentDatum(utxo.datum, `${utxo.txHash}#${utxo.outputIndex}`, utxo.assets);
-        if (!profile?.ownerVkeyHash) throw new Error('Could not parse agent owner from registry datum');
+        const provider = newProvider();
+        const { profile } = await resolveAgentUtxo(provider, agent_id);
+        if (!profile.ownerVkeyHash) throw new Error('Could not parse agent owner from registry datum');
 
         const lucid = await initLucid(mnemonic);
         const senderAddress = await lucid.wallet.address();

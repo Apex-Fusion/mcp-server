@@ -25,12 +25,21 @@ export class OgmiosProvider implements Provider {
   private ogmiosUrl: string;
   private submitUrl: string;
   private koiosUrl: string | undefined;
+  private walletAddress: string | undefined;
 
   constructor(config: OgmiosProviderConfig) {
     // Strip trailing slashes for consistent URL building
     this.ogmiosUrl = config.ogmiosUrl.replace(/\/+$/, '');
     this.submitUrl = config.submitUrl.replace(/\/+$/, '');
     this.koiosUrl = config.koiosUrl?.replace(/\/+$/, '');
+  }
+
+  /**
+   * Store the wallet's full bech32 address so credential-based lookups
+   * (used internally by Lucid during tx building) can resolve to it.
+   */
+  setWalletAddress(address: string): void {
+    this.walletAddress = address;
   }
 
   /**
@@ -119,8 +128,15 @@ export class OgmiosProvider implements Provider {
     let address: string;
     if (typeof addressOrCredential === 'string') {
       address = addressOrCredential;
+    } else if (this.walletAddress) {
+      // Lucid's wallet internally calls getUtxos(paymentCredential) during tx building.
+      // Ogmios requires a full bech32 address, so use the stored wallet address.
+      address = this.walletAddress;
     } else {
-      throw new Error('Credential-based UTxO lookup not supported via Ogmios. Use an address string.');
+      throw new Error(
+        'Credential-based UTxO lookup requires a wallet address. ' +
+        'Call provider.setWalletAddress(addr) after selecting a wallet.'
+      );
     }
 
     const result = await this.rpc('queryLedgerState/utxo', { addresses: [address] });

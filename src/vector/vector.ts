@@ -2,6 +2,18 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Lucid, fromText, Data, applyDoubleCborEncoding } from 'lucid-cardano';
 import type { SpendingValidator } from 'lucid-cardano';
+
+/**
+ * Lucid v0.10.x lacks PlutusV3 support. This helper downcasts PlutusV3 to
+ * PlutusV2 for hashing/address derivation (same blake2b-224 algorithm).
+ * Use this when passing validators to any Lucid method.
+ */
+function lucidCompat(validator: SpendingValidator): SpendingValidator {
+  if ((validator.type as string) === 'PlutusV3') {
+    return { ...validator, type: 'PlutusV2' as const };
+  }
+  return validator;
+}
 import * as dotenv from 'dotenv';
 import { resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -80,8 +92,9 @@ async function initLucid(mnemonic: string, accountIndex: number = 0) {
   const trimmedMnemonic = mnemonic.trim();
   const words = trimmedMnemonic.split(/\s+/);
 
-  if (words.length !== 15 && words.length !== 24) {
-    throw new Error(`Invalid mnemonic: Expected 15 or 24 words, got ${words.length}`);
+  const validLengths = [12, 15, 18, 21, 24];
+  if (!validLengths.includes(words.length)) {
+    throw new Error(`Invalid mnemonic: Expected 12, 15, 18, 21 or 24 words, got ${words.length}`);
   }
 
   lucid.selectWalletFromSeed(trimmedMnemonic, { accountIndex });
@@ -90,6 +103,9 @@ async function initLucid(mnemonic: string, accountIndex: number = 0) {
   if (!address) {
     throw new Error('Failed to derive address from mnemonic');
   }
+
+  // Store the full wallet address so credential-based UTxO lookups resolve correctly
+  provider.setWalletAddress(address);
 
   return lucid;
 }
@@ -390,9 +406,9 @@ export async function deployContract(
   };
 
   // @ts-ignore
-  const scriptAddress = lucid.utils.validatorToAddress(validator);
+  const scriptAddress = lucid.utils.validatorToAddress(lucidCompat(validator));
   // @ts-ignore
-  const scriptHash = lucid.utils.validatorToScriptHash(validator);
+  const scriptHash = lucid.utils.validatorToScriptHash(lucidCompat(validator));
 
   const datum = initialDatum || Data.void();
 
@@ -438,7 +454,7 @@ export async function interactWithContract(
   };
 
   // @ts-ignore
-  const scriptAddress = lucid.utils.validatorToAddress(validator);
+  const scriptAddress = lucid.utils.validatorToAddress(lucidCompat(validator));
 
   if (action === 'lock') {
     const safetyCheck = safetyLayer.checkTransaction(lovelaceAmount);
@@ -490,7 +506,7 @@ export async function interactWithContract(
     // @ts-ignore
     let tx = lucid.newTx()
       .collectFrom(scriptUtxos, redeemerData)
-      .attachSpendingValidator(validator)
+      .attachSpendingValidator(lucidCompat(validator))
       .addSigner(walletAddress);
 
     try {
@@ -501,7 +517,7 @@ export async function interactWithContract(
       // @ts-ignore
       tx = await lucid.newTx()
         .collectFrom(scriptUtxos, redeemerData)
-        .attachSpendingValidator(validator)
+        .attachSpendingValidator(lucidCompat(validator))
         .addSigner(walletAddress)
         .complete({ nativeUplc: false });
     }

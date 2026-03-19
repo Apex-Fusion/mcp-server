@@ -10,7 +10,8 @@
     "clean": "rm -rf build",
     "build": "tsup && chmod +x build/index.js",
     "typecheck": "tsc --noEmit --incremental",
-    "start": "node build/index.js"
+    "start": "node build/index.js",
+    "test": "npm run build && node --import tsx --test test/run.test.ts"
   },
   "files": [
     "build"
@@ -52,6 +53,7 @@
   "devDependencies": {
     "@types/node": "^22.13.1",
     "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.3"
   }
 }
