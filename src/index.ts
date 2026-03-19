@@ -27,15 +27,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { registerVectorTools } from "./vector/index.js";
 
-// Create server instance
-const server = new McpServer({
-  name: "vector-mcp-server",
-  version: "1.0.0",
-});
+function createMcpServer() {
+  const server = new McpServer({
+    name: "vector-mcp-server",
+    version: "1.0.0",
+  });
+  registerVectorTools(server);
+  return server;
+}
 
-// Register Vector tools
-console.error('Registering Vector tools...');
-registerVectorTools(server);
+console.error('Vector MCP Server starting...');
 
 const PORT = parseInt(process.env.PORT || '3000');
 const transports = new Map<string, SSEServerTransport>();
@@ -45,9 +46,10 @@ const httpServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/sse') {
     const transport = new SSEServerTransport('/messages', res);
+    const session = createMcpServer();
     transports.set(transport.sessionId, transport);
     res.on('close', () => transports.delete(transport.sessionId));
-    await server.connect(transport);
+    await session.connect(transport);
   } else if (req.method === 'POST' && url.pathname === '/messages') {
     const sessionId = url.searchParams.get('sessionId');
     if (!sessionId) {
