@@ -357,10 +357,11 @@ Save your Agent DID — you'll need it to update, deregister, or let other agent
           }],
         };
       } catch (err) {
+        const errMsg = err instanceof Error ? err.message : (typeof err === 'string' ? err : JSON.stringify(err));
         return {
           content: [{
             type: "text",
-            text: `Failed to register agent: ${err.message}
+            text: `Failed to register agent: ${errMsg}
 
 **Troubleshooting Tips:**
 1. Ensure wallet has at least 12 AP3X (10 deposit + fees)
