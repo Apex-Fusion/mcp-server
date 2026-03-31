@@ -64,30 +64,39 @@ export class OgmiosProvider implements Provider {
   async getProtocolParameters(): Promise<ProtocolParameters> {
     const result = await this.rpc('queryLedgerState/protocolParameters');
 
-    // Map Ogmios v6 response to Lucid's ProtocolParameters format
-    return {
-      minFeeA: result.minFeeCoefficient,
-      minFeeB: result.minFeeConstant?.ada?.lovelace ?? result.minFeeConstant,
-      maxTxSize: result.maxTransactionSize?.bytes ?? result.maxTransactionSize,
-      maxValSize: result.maxValueSize?.bytes ?? result.maxValueSize,
-      keyDeposit: BigInt(result.stakeCredentialDeposit?.ada?.lovelace ?? result.stakeCredentialDeposit ?? 2000000),
-      poolDeposit: BigInt(result.stakePoolDeposit?.ada?.lovelace ?? result.stakePoolDeposit ?? 500000000),
-      priceMem: result.scriptExecutionPrices?.memory
-        ? this.parseFraction(result.scriptExecutionPrices.memory)
-        : (result.prices?.memory ?? 0.0577),
-      priceStep: result.scriptExecutionPrices?.cpu
-        ? this.parseFraction(result.scriptExecutionPrices.cpu)
-        : (result.prices?.steps ?? 0.0000721),
-      maxTxExMem: BigInt(result.maxExecutionUnitsPerTransaction?.memory ?? 14000000),
-      maxTxExSteps: BigInt(result.maxExecutionUnitsPerTransaction?.cpu ?? 10000000000),
-      coinsPerUtxoByte: BigInt(result.minUtxoDepositCoefficient ?? result.coinsPerUtxoByte ?? 4310),
-      collateralPercentage: result.collateralPercentage ?? 150,
-      maxCollateralInputs: result.maxCollateralInputs ?? 3,
-      costModels: this.parseCostModels(result.plutusCostModels ?? result.costModels ?? {}),
-      minFeeRefScriptCostPerByte: result.minFeeReferenceScripts?.base ?? 15,
-      drepDeposit: BigInt(result.delegateRepresentativeDeposit?.ada?.lovelace ?? 500000000),
-      govActionDeposit: BigInt(result.governanceActionDeposit?.ada?.lovelace ?? 100000000000),
-    } as ProtocolParameters;
+    try {
+      // Map Ogmios v6 response to Lucid's ProtocolParameters format
+      // Defaults are sourced from the Vector public testnet (2026-03-31)
+      return {
+        minFeeA: result.minFeeCoefficient ?? 45,
+        minFeeB: result.minFeeConstant?.ada?.lovelace
+          ?? result.minFeeConstant?.lovelace
+          ?? (typeof result.minFeeConstant === 'number' ? result.minFeeConstant : 156253),
+        maxTxSize: result.maxTransactionSize?.bytes ?? result.maxTransactionSize ?? 16384,
+        maxValSize: result.maxValueSize?.bytes ?? result.maxValueSize ?? 5000,
+        keyDeposit: BigInt(result.stakeCredentialDeposit?.ada?.lovelace ?? result.stakeCredentialDeposit ?? 500000000),
+        poolDeposit: BigInt(result.stakePoolDeposit?.ada?.lovelace ?? result.stakePoolDeposit ?? 5000000000000),
+        priceMem: result.scriptExecutionPrices?.memory
+          ? this.parseFraction(result.scriptExecutionPrices.memory)
+          : (result.prices?.memory ?? 0.0577),
+        priceStep: result.scriptExecutionPrices?.cpu
+          ? this.parseFraction(result.scriptExecutionPrices.cpu)
+          : (result.prices?.steps ?? 0.0000721),
+        maxTxExMem: BigInt(result.maxExecutionUnitsPerTransaction?.memory ?? 16000000),
+        maxTxExSteps: BigInt(result.maxExecutionUnitsPerTransaction?.cpu ?? 10000000000),
+        coinsPerUtxoByte: BigInt(result.minUtxoDepositCoefficient ?? result.coinsPerUtxoByte ?? 4310),
+        collateralPercentage: result.collateralPercentage ?? 150,
+        maxCollateralInputs: result.maxCollateralInputs ?? 3,
+        costModels: this.parseCostModels(result.plutusCostModels ?? result.costModels ?? {}),
+        minFeeRefScriptCostPerByte: result.minFeeReferenceScripts?.base ?? 15,
+        drepDeposit: BigInt(result.delegateRepresentativeDeposit?.ada?.lovelace ?? 1000000000000),
+        govActionDeposit: BigInt(result.governanceActionDeposit?.ada?.lovelace ?? 1000000000),
+      } as ProtocolParameters;
+    } catch (err) {
+      console.error('[OgmiosProvider] Protocol parameter mapping failed:', err);
+      console.error('[OgmiosProvider] Raw Ogmios result:', JSON.stringify(result, null, 2));
+      throw err;
+    }
   }
 
   private parseFraction(value: string | number): number {

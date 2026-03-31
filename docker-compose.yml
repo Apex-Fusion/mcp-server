@@ -1,0 +1,12 @@
+services:
+  vector-mcp:
+    build: .
+    container_name: vector-mcp
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - VECTOR_OGMIOS_URL=https://ogmios.vector.testnet.apexfusion.org
+      - VECTOR_KOIOS_URL=https://v2.koios.vector.testnet.apexfusion.org/
+      - VECTOR_SUBMIT_URL=https://submit.vector.testnet.apexfusion.org/api/submit/tx
+      - VECTOR_EXPLORER_URL=https://vector.testnet.apexscan.org

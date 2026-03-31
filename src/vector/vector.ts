@@ -43,7 +43,12 @@ const VECTOR_EXPLORER_URL = process.env.VECTOR_EXPLORER_URL || 'https://vector.t
 
 // Helper function to format ADA amounts
 function lovelaceToAda(lovelace: string | number | bigint): string {
-  return (Number(BigInt(String(lovelace))) / 1_000_000).toFixed(6);
+  if (lovelace === undefined || lovelace === null) return '0.000000';
+  try {
+    return (Number(BigInt(String(lovelace))) / 1_000_000).toFixed(6);
+  } catch {
+    return '0.000000';
+  }
 }
 
 // Helper function to format asset name
@@ -98,9 +103,13 @@ async function initLucid(mnemonic: string, accountIndex: number = 0) {
 
 // Get wallet info
 export async function getWalletInfo(mnemonic: string, accountIndex: number = 0): Promise<VectorWalletInfo> {
+  console.error('[getWalletInfo] Initializing Lucid...');
   const lucid = await initLucid(mnemonic, accountIndex);
+  console.error('[getWalletInfo] Getting address...');
   const address = await lucid.wallet().address();
+  console.error('[getWalletInfo] Querying UTxOs...');
   const utxos = await lucid.utxosAt(address);
+  console.error(`[getWalletInfo] Found ${utxos.length} UTxOs`);
 
   let adaBalance = '0';
   let tokenBalances: VectorToken[] = [];
