@@ -11,6 +11,7 @@ import { OgmiosProvider } from './ogmios-provider.js';
 import { safetyLayer } from './safety.js';
 import { rateLimiter } from './rate-limiter.js';
 import { registerAgentNetworkTools } from './agent-network.js';
+import { registerGovernanceTools } from './governance.js';
 import type {
   VectorToken,
   VectorWalletInfo,
@@ -1319,4 +1320,7 @@ Funds ${actionVerb} the script address.
   // Agent network tools (register, discover, message, profile) live in agent-network.ts
   // to isolate C (Cardano WASM) imports from tsc's complex type inference
   registerAgentNetworkTools(server);
+
+  // Governance Suggestion Engine tools (Game 6)
+  registerGovernanceTools(server);
 }
