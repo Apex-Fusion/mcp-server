@@ -662,8 +662,7 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
             type: "text",
             text: `# Proposal Submitted (Validated)
 
-**Transaction:** ${spendTxHash}
-**Lock TX:** ${lockTxHash}
+**Proposal TX (use this for critiques/endorsements):** ${spendTxHash}
 **Stake:** ${stakeApex} AP3X
 **Type:** ${proposalType}
 **Priority:** ${priority}
@@ -675,6 +674,8 @@ ${ipfsCid ? `**IPFS CID:** ${ipfsCid}\n**Hash (auto-computed):** ${finalHash}` :
 
 Proposal submitted with on-chain validation. Proposal token (\`prop_\`) and
 activity tracking token (\`pact_\`) minted. Visible on the Foundation dashboard.
+
+> **Note:** When submitting critiques or endorsements, use the Proposal TX hash above as the \`proposalTxHash\`.
 
 [View on Explorer](${explorerTxLink(spendTxHash)})`,
           }],
