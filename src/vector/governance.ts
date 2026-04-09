@@ -610,12 +610,14 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
         ]);
 
         // Find agent's registry NFT UTxO for DID validation (CIP-31 reference input)
+        // The NFT lives at the registry script address (locked with deposit), not the wallet
         const nftUnit = AGENT_REGISTRY_POLICY + agentDid;
-        const walletUtxos = await lucid.wallet().getUtxos();
-        const nftUtxo = walletUtxos.find(u => u.assets[nftUnit] === 1n);
-        if (!nftUtxo) {
+        let nftUtxo;
+        try {
+          nftUtxo = await provider.getUtxoByUnit(nftUnit);
+        } catch {
           throw new Error(
-            `Agent registry NFT not found in wallet. Expected token: ${AGENT_REGISTRY_POLICY.slice(0, 12)}...${agentDid.slice(0, 12)}... ` +
+            `Agent registry NFT not found on-chain. Expected token: ${AGENT_REGISTRY_POLICY.slice(0, 12)}...${agentDid.slice(0, 12)}... ` +
             `The agent may need to re-register with vector_register_agent.`
           );
         }
