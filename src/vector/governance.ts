@@ -537,7 +537,7 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
             { kind: "inline", value: proposalDatum },
             { lovelace: BigInt(stakeLovelace + 2_000_000) }
           )
-          .complete();
+          .complete({ localUPLCEval: false });
 
         const signedLockTx = await lockTx.sign.withWallet().complete();
         const lockTxHash = await signedLockTx.submit();
@@ -735,7 +735,7 @@ activity tracking token (\`pact_\`) minted. Visible on the Foundation dashboard.
             { kind: "inline", value: critiqueDatum },
             { lovelace: BigInt(stakeLovelace + 2_000_000) }
           )
-          .complete();
+          .complete({ localUPLCEval: false });
 
         const signedTx = await tx.sign.withWallet().complete();
         const txHash = await signedTx.submit();
@@ -824,7 +824,7 @@ ${ipfsCid ? `**IPFS CID:** ${ipfsCid}\n**Hash (auto-computed):** ${finalHash}` :
             { kind: "inline", value: endorsementDatum },
             { lovelace: BigInt(stakeLovelace + 2_000_000) }
           )
-          .complete();
+          .complete({ localUPLCEval: false });
 
         const signedTx = await tx.sign.withWallet().complete();
         const txHash = await signedTx.submit();
