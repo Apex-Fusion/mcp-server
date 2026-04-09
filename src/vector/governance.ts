@@ -19,6 +19,9 @@ const VECTOR_SUBMIT_URL = process.env.VECTOR_SUBMIT_URL || 'https://submit.vecto
 const VECTOR_KOIOS_URL = process.env.VECTOR_KOIOS_URL || 'https://koios.vector.testnet.apexfusion.org/';
 const VECTOR_EXPLORER_URL = process.env.VECTOR_EXPLORER_URL || 'https://vector.testnet.apexscan.org';
 
+// Agent Registry policy ID (shared across all modules)
+const AGENT_REGISTRY_POLICY = process.env.AGENT_REGISTRY_POLICY || '5dd5118943d5aa7329696181252a6565a27dbf2c6de92b02a6aae361';
+
 // Governance contract hashes (from deploy_state.json)
 // These should be set via env vars in production
 const GOV_PROPOSAL_SPEND_HASH = process.env.GOV_PROPOSAL_SPEND_HASH || 'a74fc555e9b045695be1a26bdc9131681efa6b61738413ab9b2c7ea4';
@@ -606,11 +609,23 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
           parseUtxoRef(GOV_CROSSREFS_UTXO),
         ]);
 
+        // Find agent's registry NFT UTxO for DID validation (CIP-31 reference input)
+        const nftUnit = AGENT_REGISTRY_POLICY + agentDid;
+        const walletUtxos = await lucid.wallet().getUtxos();
+        const nftUtxo = walletUtxos.find(u => u.assets[nftUnit] === 1n);
+        if (!nftUtxo) {
+          throw new Error(
+            `Agent registry NFT not found in wallet. Expected token: ${AGENT_REGISTRY_POLICY.slice(0, 12)}...${agentDid.slice(0, 12)}... ` +
+            `The agent may need to re-register with vector_register_agent.`
+          );
+        }
+
         // Build Step 2 transaction: spend locked UTxO + mint tokens
         const spendTx = await lucid.newTx()
           .collectFrom(lockedUtxos, submitRedeemer)
           .readFrom(refScriptUtxos)
           .readFrom(govRefUtxos)
+          .readFrom([nftUtxo])
           .mintAssets(
             { [propTokenUnit]: 1n, [actTokenUnit]: 1n },
             submitRedeemer
