@@ -32,7 +32,7 @@ const GOV_ENDORSEMENT_SPEND_HASH = process.env.GOV_ENDORSEMENT_SPEND_HASH || '1f
 const GOV_TREASURY_ADDRESS = process.env.GOV_TREASURY_ADDRESS || 'addr1wx434t2jc3m5uhdf7tq05xjdqu3q5z7a2lhrmn5mapsd43srh7ll8';
 
 // Reference script UTxOs (CIP-33) — for validated submit
-const GOV_PROPOSAL_SPEND_REF = process.env.GOV_PROPOSAL_SPEND_REF || 'b2f94583c438158da8020b4acaf8be5b2e1a76d42fc50bd6a2d7b31ce67a8f20#0';
+const GOV_PROPOSAL_SPEND_REF = process.env.GOV_PROPOSAL_SPEND_REF || 'f0d528777d3910ec15b0d538b60015ce07e62126a5f90205eb9032cdf25190f9#0';
 const GOV_PROPOSAL_MINT_REF = process.env.GOV_PROPOSAL_MINT_REF || '3cb52ec82479c398d96b06aa82f2a85d5ecfc128f5010cfb70cd9b276d75cb33#0';
 
 // Infrastructure UTxOs (governance reference inputs)
