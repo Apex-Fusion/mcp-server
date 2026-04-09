@@ -3,7 +3,7 @@
 // Game 6 of the Vector game theory ecosystem
 
 import { z } from "zod";
-import { Lucid, fromText, toText, Data, Constr, credentialToAddress, getAddressDetails, SLOT_CONFIG_NETWORK, slotToUnixTime } from '@lucid-evolution/lucid';
+import { Lucid, fromText, toText, Data, Constr, credentialToAddress, getAddressDetails, SLOT_CONFIG_NETWORK } from '@lucid-evolution/lucid';
 
 // Vector testnet slot config — system start 2025-07-09T10:38:04Z, 1s slots
 SLOT_CONFIG_NETWORK.Mainnet = { zeroTime: 1752057484000, zeroSlot: 0, slotLength: 1000 };
@@ -562,9 +562,9 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
         // Use Lucid's own slotToUnixTime to guarantee the POSIX→slot roundtrip is exact
         const tip2 = await provider.getNetworkTip();
         const spendSlot = tip2.slot;
-        // Vector testnet: genesis 2025-07-09T10:38:04Z, 1s slots, zeroSlot=0
-        const vectorSlotConfig = { zeroTime: 1752057484000, zeroSlot: 0, slotLength: 1000 };
-        const validFromMs = slotToUnixTime(vectorSlotConfig, spendSlot);
+        // Convert slot → POSIX ms using Vector testnet genesis (2025-07-09T10:38:04Z)
+        // This ensures validFrom converts back to exactly spendSlot after Lucid's POSIX→slot roundtrip
+        const validFromMs = 1752057484000 + spendSlot * 1000;
         const validToMs = validFromMs + 360_000;  // 6 minutes from spendSlot
 
         // Activity datum (first proposal: count=1)
