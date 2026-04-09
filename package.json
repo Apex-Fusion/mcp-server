@@ -45,11 +45,12 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1027.0",
+    "@lucid-evolution/lucid": "^0.4.29",
     "@modelcontextprotocol/sdk": "^1.4.1",
+    "@noble/hashes": "^1.7.1",
     "cross-fetch": "^4.0.0",
     "dotenv": "^16.4.5",
-    "@lucid-evolution/lucid": "^0.4.29",
-    "@noble/hashes": "^1.7.1",
     "zod": "^3.24.1"
   },
   "devDependencies": {

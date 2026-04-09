@@ -5,6 +5,7 @@
 import { z } from "zod";
 import { Lucid, fromText, toText, Data, Constr, credentialToAddress, getAddressDetails } from '@lucid-evolution/lucid';
 import { blake2b } from '@noble/hashes/blake2b';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { OgmiosProvider } from './ogmios-provider.js';
 import { safetyLayer } from './safety.js';
 import { rateLimiter } from './rate-limiter.js';
@@ -98,6 +99,62 @@ function deriveActivityTokenName(agentDid: string): string {
   const prefixHex = Buffer.from('pact_', 'utf-8').toString('hex');
   const hashSlice = Buffer.from(hashBytes).toString('hex').slice(0, 54);
   return prefixHex + hashSlice;
+}
+
+// ─── Filebase IPFS Upload ────────────────────────────────────────────────────
+
+const FILEBASE_ACCESS_KEY = process.env.FILEBASE_ACCESS_KEY || '';
+const FILEBASE_SECRET_KEY = process.env.FILEBASE_SECRET_KEY || '';
+const FILEBASE_BUCKET = process.env.FILEBASE_BUCKET || '';
+
+async function uploadToFilebase(document: string, namePrefix: string): Promise<{ cid: string; hash: string }> {
+  if (!FILEBASE_ACCESS_KEY || !FILEBASE_SECRET_KEY || !FILEBASE_BUCKET) {
+    throw new Error('Filebase not configured. Set FILEBASE_ACCESS_KEY, FILEBASE_SECRET_KEY, and FILEBASE_BUCKET env vars.');
+  }
+
+  // Canonical JSON: parse then re-stringify for deterministic bytes
+  const parsed = JSON.parse(document);
+  const canonical = JSON.stringify(parsed);
+  const docBytes = new TextEncoder().encode(canonical);
+
+  // blake2b_256 hash
+  const hashBytes = blake2b(docBytes, { dkLen: 32 });
+  const hashHex = Buffer.from(hashBytes).toString('hex');
+
+  const key = `${namePrefix}-${hashHex.slice(0, 16)}.json`;
+
+  const s3 = new S3Client({
+    region: 'us-east-1',
+    endpoint: 'https://s3.filebase.com',
+    credentials: { accessKeyId: FILEBASE_ACCESS_KEY, secretAccessKey: FILEBASE_SECRET_KEY },
+    forcePathStyle: true,
+  });
+
+  const resp = await s3.send(new PutObjectCommand({
+    Bucket: FILEBASE_BUCKET,
+    Key: key,
+    Body: canonical,
+    ContentType: 'application/json',
+  }));
+
+  // Filebase returns the CID in response metadata
+  const cid = resp.$metadata?.httpStatusCode === 200
+    ? (resp as any).VersionId || ''
+    : '';
+
+  // If CID not in response, try HeadObject to get it from x-amz-meta-cid
+  let finalCid = cid;
+  if (!finalCid) {
+    const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
+    const head = await s3.send(new HeadObjectCommand({ Bucket: FILEBASE_BUCKET, Key: key }));
+    finalCid = head.Metadata?.cid || '';
+  }
+
+  if (!finalCid) {
+    throw new Error('Filebase upload succeeded but CID not returned. Check bucket is IPFS-enabled.');
+  }
+
+  return { cid: finalCid, hash: hashHex };
 }
 
 // Parse ProposalDatum from CBOR
@@ -341,13 +398,14 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
 
   server.tool(
     "vector_governance_submit_proposal",
-    "Submit a governance proposal to the Vector Governance Suggestion Engine. Requires staking AP3X. The proposal document should be stored off-chain (IPFS/OriginTrail) and its blake2b_256 hash provided.",
+    "Submit a governance proposal to the Vector Governance Suggestion Engine. Requires staking AP3X. Provide proposalDocument (JSON string) for automatic IPFS upload via Filebase and blake2b_256 hashing, OR provide proposalHash and storageUri manually.",
     {
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the wallet"),
       agentDid: z.string().describe("Agent DID (hex) — the asset name from Agent Registry NFT"),
-      proposalHash: z.string().describe("blake2b_256 hash of proposal document (64 hex chars)"),
+      proposalDocument: z.string().optional().describe("Full proposal document as JSON string. Uploaded to IPFS via Filebase; hash and CID computed automatically. If provided, proposalHash and storageUri are ignored."),
+      proposalHash: z.string().optional().describe("blake2b_256 hash of proposal document (64 hex chars). Required if proposalDocument is not provided."),
       proposalType: z.enum(["ParameterChange", "TreasurySpend", "ProtocolUpgrade", "GameActivation", "GeneralSuggestion"]).describe("Category of the proposal"),
-      storageUri: z.string().describe("Off-chain storage URI for the full proposal (IPFS CID or OriginTrail UAL)"),
+      storageUri: z.string().optional().describe("Off-chain storage URI for the full proposal (IPFS CID or OriginTrail UAL). Required if proposalDocument is not provided."),
       stakeApex: z.number().min(25).describe("AP3X to stake (minimum 25)"),
       typeParams: z.object({
         paramName: z.string().optional(),
@@ -360,7 +418,7 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
       }).optional().describe("Type-specific parameters (required for ParameterChange and TreasurySpend)"),
       priority: z.enum(["Standard", "Emergency"]).default("Standard").describe("Priority level (Emergency requires higher stake and reputation)"),
     },
-    async ({ mnemonic, agentDid, proposalHash, proposalType, storageUri, stakeApex, typeParams, priority }) => {
+    async ({ mnemonic, agentDid, proposalDocument, proposalHash, proposalType, storageUri, stakeApex, typeParams, priority }) => {
       const rateLimited = checkRateLimit();
       if (rateLimited) return rateLimited;
 
@@ -371,7 +429,20 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
       }
 
       try {
-        if (proposalHash.length !== 64) throw new Error('proposalHash must be 64 hex characters (32 bytes)');
+        // IPFS upload: if proposalDocument provided, upload to Filebase and derive hash + URI
+        let finalHash = proposalHash;
+        let finalUri = storageUri;
+        let ipfsCid = '';
+
+        if (proposalDocument) {
+          const uploaded = await uploadToFilebase(proposalDocument, 'proposal');
+          finalHash = uploaded.hash;
+          finalUri = `ipfs://${uploaded.cid}`;
+          ipfsCid = uploaded.cid;
+        }
+
+        if (!finalHash || finalHash.length !== 64) throw new Error('proposalHash must be 64 hex characters (32 bytes). Provide proposalDocument for auto-hashing or proposalHash manually.');
+        if (!finalUri) throw new Error('storageUri is required. Provide proposalDocument for auto-upload or storageUri manually.');
 
         const provider = newProvider();
         const lucid = await Lucid(provider, 'Mainnet');
@@ -418,9 +489,9 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
         const proposalDatum = Data.to(new Constr(0, [
           agentDid,                          // proposer_did
           new Constr(0, [vkeyHash]),         // proposer_credential (VerificationKey)
-          proposalHash,                       // proposal_hash
+          finalHash,                            // proposal_hash
           typeDatum,                          // proposal_type
-          fromText(storageUri),              // storage_uri
+          fromText(finalUri),                // storage_uri
           BigInt(stakeLovelace),             // stake_amount
           BigInt(currentSlot),               // submitted_at
           BigInt(604_800_000),               // review_window (~7 days in ms)
@@ -455,8 +526,9 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
 **Stake:** ${stakeApex} AP3X
 **Type:** ${proposalType}
 **Priority:** ${priority}
-**Storage:** ${storageUri}
+**Storage:** ${finalUri}
 **Script Address:** ${proposalSpendAddress}
+${ipfsCid ? `**IPFS CID:** ${ipfsCid}\n**Hash (auto-computed):** ${finalHash}` : ''}
 
 The proposal datum is now locked at the governance script address.
 
@@ -487,18 +559,19 @@ proposal token minting requires the multi-validator flow (coming soon).`,
 
   server.tool(
     "vector_governance_critique",
-    "Submit a critique on a governance proposal. Critiques can support, oppose, or propose amendments. Requires staking AP3X.",
+    "Submit a critique on a governance proposal. Critiques can support, oppose, or propose amendments. Requires staking AP3X. Provide critiqueDocument (JSON string) for automatic IPFS upload, or critiqueHash + storageUri manually.",
     {
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the wallet"),
       agentDid: z.string().describe("Agent DID (hex)"),
       proposalTxHash: z.string().describe("TX hash of the proposal UTxO to critique"),
       proposalOutputIndex: z.number().default(0).describe("Output index of the proposal UTxO"),
-      critiqueHash: z.string().describe("blake2b_256 hash of critique document (64 hex chars)"),
+      critiqueDocument: z.string().optional().describe("Full critique document as JSON string. Uploaded to IPFS via Filebase; hash and CID computed automatically."),
+      critiqueHash: z.string().optional().describe("blake2b_256 hash of critique document (64 hex chars). Required if critiqueDocument is not provided."),
       critiqueType: z.enum(["Supportive", "Opposing", "Amendment"]).describe("Type of critique"),
-      storageUri: z.string().describe("Off-chain storage URI for the critique document"),
+      storageUri: z.string().optional().describe("Off-chain storage URI for the critique document. Required if critiqueDocument is not provided."),
       stakeApex: z.number().min(10).describe("AP3X to stake (minimum 10)"),
     },
-    async ({ mnemonic, agentDid, proposalTxHash, proposalOutputIndex, critiqueHash, critiqueType, storageUri, stakeApex }) => {
+    async ({ mnemonic, agentDid, proposalTxHash, proposalOutputIndex, critiqueDocument, critiqueHash, critiqueType, storageUri, stakeApex }) => {
       const rateLimited = checkRateLimit();
       if (rateLimited) return rateLimited;
 
@@ -509,7 +582,20 @@ proposal token minting requires the multi-validator flow (coming soon).`,
       }
 
       try {
-        if (critiqueHash.length !== 64) throw new Error('critiqueHash must be 64 hex characters');
+        // IPFS upload: if critiqueDocument provided, upload to Filebase
+        let finalHash = critiqueHash;
+        let finalUri = storageUri;
+        let ipfsCid = '';
+
+        if (critiqueDocument) {
+          const uploaded = await uploadToFilebase(critiqueDocument, 'critique');
+          finalHash = uploaded.hash;
+          finalUri = `ipfs://${uploaded.cid}`;
+          ipfsCid = uploaded.cid;
+        }
+
+        if (!finalHash || finalHash.length !== 64) throw new Error('critiqueHash must be 64 hex characters. Provide critiqueDocument or critiqueHash manually.');
+        if (!finalUri) throw new Error('storageUri is required. Provide critiqueDocument or storageUri manually.');
 
         const provider = newProvider();
         const lucid = await Lucid(provider, 'Mainnet');
@@ -521,7 +607,7 @@ proposal token minting requires the multi-validator flow (coming soon).`,
         switch (critiqueType) {
           case 'Supportive': critiqueTypeDatum = new Constr(0, []); break;
           case 'Opposing': critiqueTypeDatum = new Constr(1, []); break;
-          case 'Amendment': critiqueTypeDatum = new Constr(2, [critiqueHash]); break;
+          case 'Amendment': critiqueTypeDatum = new Constr(2, [finalHash]); break;
         }
 
         const tip = await provider.getNetworkTip?.() || { slot: 0 };
@@ -536,8 +622,8 @@ proposal token minting requires the multi-validator flow (coming soon).`,
           agentDid,                                                    // critic_did
           new Constr(0, [vkeyHash]),                                  // critic_credential
           new Constr(0, [proposalTxHash, BigInt(proposalOutputIndex)]), // proposal_ref
-          critiqueHash,                                                // critique_hash
-          fromText(storageUri),                                       // storage_uri
+          finalHash,                                                   // critique_hash
+          fromText(finalUri),                                         // storage_uri
           critiqueTypeDatum,                                          // critique_type
           BigInt(stakeLovelace),                                      // stake_amount
           BigInt(currentSlot),                                        // submitted_at
@@ -568,7 +654,8 @@ proposal token minting requires the multi-validator flow (coming soon).`,
 **Type:** ${critiqueType}
 **Stake:** ${stakeApex} AP3X
 **Proposal:** ${proposalTxHash}#${proposalOutputIndex}
-**Storage:** ${storageUri}
+**Storage:** ${finalUri}
+${ipfsCid ? `**IPFS CID:** ${ipfsCid}\n**Hash (auto-computed):** ${finalHash}` : ''}
 
 [View on Explorer](${explorerTxLink(txHash)})`,
           }],
