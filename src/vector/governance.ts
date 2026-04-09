@@ -26,7 +26,7 @@ const GOV_ENDORSEMENT_SPEND_HASH = process.env.GOV_ENDORSEMENT_SPEND_HASH || '5f
 const GOV_TREASURY_ADDRESS = process.env.GOV_TREASURY_ADDRESS || 'addr1wx434t2jc3m5uhdf7tq05xjdqu3q5z7a2lhrmn5mapsd43srh7ll8';
 
 // Reference script UTxOs (CIP-33) — for validated submit
-const GOV_PROPOSAL_SPEND_REF = process.env.GOV_PROPOSAL_SPEND_REF || '4c7de3a2ccc8b46a5929523f410d457d2ba322b1a0a0f46764d441a6185f05df#0';
+const GOV_PROPOSAL_SPEND_REF = process.env.GOV_PROPOSAL_SPEND_REF || '8d72b5f8752029c3ea599c0ca6a4ece7ac0041b08f26a56a0d608c14efc30542#0';
 const GOV_PROPOSAL_MINT_REF = process.env.GOV_PROPOSAL_MINT_REF || 'e82c188244cba737312119cc93efcb88544b3f7a12e94adad5f1360043afc3bd#0';
 
 // Infrastructure UTxOs (governance reference inputs)
@@ -576,6 +576,24 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
           parseUtxoRef(GOV_PROPOSAL_SPEND_REF),
           parseUtxoRef(GOV_PROPOSAL_MINT_REF),
         ]);
+
+        // Validate reference scripts are available (they can be accidentally consumed)
+        if (refScriptUtxos.length < 2) {
+          throw new Error(
+            `Reference script UTxOs missing: found ${refScriptUtxos.length}/2. ` +
+            `spend_ref=${GOV_PROPOSAL_SPEND_REF}, mint_ref=${GOV_PROPOSAL_MINT_REF}. ` +
+            `These UTxOs may have been consumed — redeploy with scripts/redeploy_ref_scripts.py ` +
+            `and update GOV_PROPOSAL_SPEND_REF / GOV_PROPOSAL_MINT_REF env vars.`
+          );
+        }
+        const missingScriptRef = refScriptUtxos.filter(u => !u.scriptRef);
+        if (missingScriptRef.length > 0) {
+          throw new Error(
+            `Reference script UTxOs found but missing scriptRef field for ${missingScriptRef.length} UTxO(s). ` +
+            `The UTxOs at ${missingScriptRef.map(u => u.txHash).join(', ')} exist but don't contain scripts. ` +
+            `Redeploy reference scripts and update env vars.`
+          );
+        }
 
         // Get governance infrastructure reference inputs
         const govRefUtxos = await lucid.utxosByOutRef([
