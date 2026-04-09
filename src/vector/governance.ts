@@ -507,9 +507,9 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
             typeDatum = new Constr(4, []);
         }
 
-        // Get current slot (used for Step 1 datum; will be refreshed for Step 2)
+        // Get current POSIX time for datum (Plutus validity range uses POSIX ms, not slots)
         const tip = await provider.getNetworkTip?.() || { slot: 0 };
-        const currentSlot = tip.slot || 0;
+        const currentSlot = 1752057484000 + (tip.slot || 0) * 1000; // POSIX ms
 
         // Priority datum
         const priorityDatum = priority === 'Emergency' ? new Constr(1, []) : new Constr(0, []);
@@ -573,7 +573,7 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
           agentDid,                          // agent_did
           new Constr(0, [vkeyHash]),         // agent_credential
           1n,                                 // active_proposal_count
-          BigInt(spendSlot),                  // last_proposal_slot
+          BigInt(validFromMs),                 // last_proposal_slot (POSIX ms, matches tx validity lower bound)
         ]));
 
         // Redeemer: SubmitProposal = Constructor 0
