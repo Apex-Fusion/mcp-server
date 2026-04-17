@@ -1,5 +1,5 @@
 // @ts-nocheck
-// Governance Suggestion Engine tools: submit proposal, critique, endorse, browse, analyze metrics
+// Self-Improvement Module tools: submit proposal, critique, endorse, browse, analyze metrics
 // Game 6 of the Vector game theory ecosystem
 
 import { z } from "zod";
@@ -270,12 +270,12 @@ function parseEndorsementDatum(datumCbor: string): any | null {
 
 // ─── Tool Registration ──────────────────────────────────────────────────────
 
-export function registerGovernanceTools(server) {
+export function registerSelfImprovementTools(server) {
 
-  // ─── vector_governance_browse (read-only) ───────────────────────────────
+  // ─── vector_self_improvement_browse (read-only) ───────────────────────────────
 
   server.tool(
-    "vector_governance_browse",
+    "vector_self_improvement_browse",
     "Browse governance proposals, critiques, and endorsements. Query on-chain UTxOs at governance script addresses and decode datums into human-readable format.",
     {
       entity: z.enum(["proposals", "critiques", "endorsements", "treasury"]).describe("What to browse"),
@@ -436,11 +436,11 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
     }
   );
 
-  // ─── vector_governance_submit_proposal ──────────────────────────────────
+  // ─── vector_self_improvement_submit_proposal ──────────────────────────────────
 
   server.tool(
-    "vector_governance_submit_proposal",
-    "Submit a governance proposal to the Vector Governance Suggestion Engine. Requires staking AP3X. Provide proposalDocument (JSON string) for automatic IPFS upload via Filebase and blake2b_256 hashing, OR provide proposalHash and storageUri manually.",
+    "vector_self_improvement_submit_proposal",
+    "Submit a governance proposal to the Vector Self-Improvement Module. Requires staking AP3X. Provide proposalDocument (JSON string) for automatic IPFS upload via Filebase and blake2b_256 hashing, OR provide proposalHash and storageUri manually.",
     {
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the wallet"),
       agentDid: z.string().describe("Agent DID (hex) — the asset name from Agent Registry NFT"),
@@ -704,10 +704,10 @@ activity tracking token (\`pact_\`) minted. Visible on the Foundation dashboard.
     }
   );
 
-  // ─── vector_governance_critique ─────────────────────────────────────────
+  // ─── vector_self_improvement_critique ─────────────────────────────────────────
 
   server.tool(
-    "vector_governance_critique",
+    "vector_self_improvement_critique",
     "Submit a critique on a governance proposal. Critiques can support, oppose, or propose amendments. Requires staking AP3X. Provide critiqueDocument (JSON string) for automatic IPFS upload, or critiqueHash + storageUri manually.",
     {
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the wallet"),
@@ -818,7 +818,7 @@ ${ipfsCid ? `**IPFS CID:** ${ipfsCid}\n**Hash (auto-computed):** ${finalHash}` :
 
 **Troubleshooting Tips:**
 1. Ensure wallet has at least ${stakeApex + 3} AP3X
-2. Verify the proposal UTxO exists (use vector_governance_browse)
+2. Verify the proposal UTxO exists (use vector_self_improvement_browse)
 3. critiqueHash must be 64 hex characters (blake2b_256)`,
           }],
         };
@@ -826,10 +826,10 @@ ${ipfsCid ? `**IPFS CID:** ${ipfsCid}\n**Hash (auto-computed):** ${finalHash}` :
     }
   );
 
-  // ─── vector_governance_endorse ──────────────────────────────────────────
+  // ─── vector_self_improvement_endorse ──────────────────────────────────────────
 
   server.tool(
-    "vector_governance_endorse",
+    "vector_self_improvement_endorse",
     "Endorse a governance proposal by staking AP3X. Endorsements signal support to the Foundation Council and are weighted by stake amount.",
     {
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the wallet"),
@@ -912,10 +912,10 @@ ${ipfsCid ? `**IPFS CID:** ${ipfsCid}\n**Hash (auto-computed):** ${finalHash}` :
     }
   );
 
-  // ─── vector_governance_analyze_metrics ──────────────────────────────────
+  // ─── vector_self_improvement_analyze_metrics ──────────────────────────────────
 
   server.tool(
-    "vector_governance_analyze_metrics",
+    "vector_self_improvement_analyze_metrics",
     "Analyze governance metrics: proposal activity, adoption rate, treasury health, and engagement statistics. Read-only — no mnemonic needed.",
     {
       focus: z.enum(["overview", "adoption", "treasury", "activity"]).default("overview").describe("Analysis focus area"),
