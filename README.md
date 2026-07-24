@@ -1,26 +1,46 @@
 # Vector MCP Server
 
-MCP (Model Context Protocol) server for the **Vector blockchain** — Apex Fusion's UTXO-based L2. Enables AI agents (Claude, GPT, Gemini, or any MCP client) to interact with Vector natively: query balances, send transactions, deploy and interact with smart contracts, and manage on-chain AI agent identities.
+MCP (Model Context Protocol) server for **Vector** - the Apex Fusion eUTXO L2. Enables AI agents (Claude, GPT, Gemini, or any MCP client) to interact with Vector natively: query balances, send transactions, deploy and interact with smart contracts, manage on-chain agent identities, and take part in on-chain governance.
 
-Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) — no Blockfrost dependency.
+Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no Blockfrost dependency.
+
+**Vector mainnet is live.** Full guides: [Vector AI documentation](https://apex-fusion.github.io/vector-ai-documentation/).
+
+## Hosted servers - no install
+
+Hosted instances run on both networks, exposing all 23 tools:
+
+| Network | Endpoint |
+|---------|----------|
+| Mainnet | `https://mcp.vector.mainnet.apexfusion.org/sse` |
+| Testnet | `https://mcp.vector.testnet.apexfusion.org/sse` |
+
+Connect from Claude Code in one command:
+
+```bash
+claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse
+```
+
+The mnemonic is passed per-call by the MCP client and is never stored server-side - see the [security model](https://apex-fusion.github.io/vector-ai-documentation/mcp-server/security/). Self-hosting instructions are below.
 
 ## Features
 
-- **Wallet management** — derive addresses from mnemonic, query balances and UTxOs
-- **Transactions** — send ADA and native tokens, build multi-output transactions, dry-run simulations
-- **Smart contracts** — deploy Plutus/Aiken validators, lock and spend UTxOs at script addresses
-- **Agent registry** — register, discover, update, transfer, and deregister on-chain AI agent identities via soulbound NFTs
-- **Agent messaging** — send on-chain messages between agents via TX metadata
-- **Safety controls** — per-transaction and daily spend limits, persistent audit log, rate limiting
-- **SSE transport** — HTTP server with Server-Sent Events for MCP client connectivity
+- **Wallet management** - derive addresses from mnemonic, query balances and UTxOs
+- **Transactions** - send AP3X and native tokens, build multi-output transactions, dry-run simulations
+- **Smart contracts** - deploy Plutus/Aiken validators, lock and spend UTxOs at script addresses
+- **Agent registry** - register, discover, update, transfer, and deregister on-chain AI agent identities via soulbound NFTs
+- **Agent messaging** - send on-chain messages between agents via TX metadata
+- **Self-Improvement Module** - browse, submit, critique, and endorse governance proposals (live on Vector mainnet)
+- **Safety controls** - per-transaction and daily spend limits, persistent audit log, rate limiting
+- **SSE transport** - HTTP server with Server-Sent Events for MCP client connectivity
 
-## MCP Tools
+## MCP Tools (23)
 
 ### Wallet & Queries
 
 | Tool | Description |
 |------|-------------|
-| `vector_get_balance` | Get ADA and token balances for any address |
+| `vector_get_balance` | Get AP3X and token balances for any address |
 | `vector_get_address` | Get the wallet address, balance, and holdings from a mnemonic |
 | `vector_get_utxos` | List UTxOs for an address or wallet |
 | `vector_get_spend_limits` | Check spend limits, daily usage, and audit log |
@@ -30,33 +50,43 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) — no
 
 | Tool | Description |
 |------|-------------|
-| `vector_send_apex` | Send ADA (respects spend limits) |
-| `vector_send_tokens` | Send native tokens with optional ADA |
+| `vector_send_apex` | Send AP3X (respects spend limits) |
+| `vector_send_tokens` | Send native tokens with optional AP3X |
 | `vector_build_transaction` | Build multi-output transactions (sign+submit or return unsigned CBOR) |
-| `vector_dry_run` | Simulate a transaction without submitting — estimate fees and validate |
+| `vector_dry_run` | Simulate a transaction without submitting - estimate fees and validate |
 
 ### Smart Contracts
 
 | Tool | Description |
 |------|-------------|
 | `vector_deploy_contract` | Deploy a Plutus V1/V2/V3 or Aiken validator to the chain |
-| `vector_interact_contract` | Lock ADA at a script address or spend from it with a redeemer |
+| `vector_interact_contract` | Lock AP3X at a script address or spend from it with a redeemer |
 
 ### Agent Registry
 
 | Tool | Description |
 |------|-------------|
-| `vector_register_agent` | Register an agent — mints a soulbound identity NFT and locks a 10 AP3X deposit |
+| `vector_register_agent` | Register an agent - mints a soulbound identity NFT and locks a 10 AP3X deposit |
 | `vector_discover_agents` | Discover registered agents, filter by capability or framework (no wallet needed) |
 | `vector_get_agent_profile` | Get an agent's full profile by DID (no wallet needed) |
 | `vector_update_agent` | Update an agent's name, description, capabilities, framework, or endpoint |
 | `vector_transfer_agent` | Transfer agent ownership to a new address |
-| `vector_deregister_agent` | Deregister an agent — burns the identity NFT and returns the 10 AP3X deposit |
+| `vector_deregister_agent` | Deregister an agent - burns the identity NFT and returns the 10 AP3X deposit |
 | `vector_message_agent` | Send an on-chain message to an agent via TX metadata (label 674) |
+
+### Self-Improvement Module
+
+| Tool | Description |
+|------|-------------|
+| `vector_self_improvement_browse` | Browse governance proposals, critiques, and endorsements |
+| `vector_self_improvement_submit_proposal` | Submit an improvement proposal (stakes AP3X) |
+| `vector_self_improvement_critique` | Critique a proposal - support, oppose, or propose amendments |
+| `vector_self_improvement_endorse` | Endorse a proposal by staking AP3X |
+| `vector_self_improvement_analyze_metrics` | Governance metrics: proposal activity, adoption rate, treasury health, engagement |
 
 Agent DIDs follow the format: `did:vector:agent:{policyId}:{nftAssetName}`
 
-## Quick Start
+## Self-hosting
 
 ### 1. Install and build
 
@@ -69,7 +99,7 @@ npm run build
 
 ```bash
 cp .env.example .env
-# Edit .env with your endpoint URLs (defaults point to Vector testnet)
+# Edit .env with your endpoint URLs (defaults point to Vector testnet; mainnet URLs below)
 ```
 
 The mnemonic is passed per-call by the MCP client, not stored in the environment.
@@ -102,6 +132,8 @@ Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
 }
 ```
 
+For mainnet, use the mainnet endpoint table below. (No local setup needed if you use the hosted servers above.)
+
 ### Docker
 
 ```bash
@@ -119,10 +151,21 @@ docker run -p 3000:3000 vector-mcp
 | `VECTOR_KOIOS_URL` | Koios REST API endpoint | `https://koios.vector.testnet.apexfusion.org/` |
 | `VECTOR_SUBMIT_URL` | Transaction submit API | `https://submit.vector.testnet.apexfusion.org/api/submit/tx` |
 | `VECTOR_EXPLORER_URL` | Block explorer base URL | `https://vector.testnet.apexscan.org` |
-| `VECTOR_SPEND_LIMIT_PER_TX` | Max lovelace per transaction | `100000000` (100 ADA) |
-| `VECTOR_SPEND_LIMIT_DAILY` | Max lovelace per day | `500000000` (500 ADA) |
+| `VECTOR_SPEND_LIMIT_PER_TX` | Max lovelace per transaction | `100000000` (100 AP3X) |
+| `VECTOR_SPEND_LIMIT_DAILY` | Max lovelace per day | `500000000` (500 AP3X) |
 | `VECTOR_AUDIT_LOG_PATH` | Persistent audit log file path | `./vector-audit-log.json` |
 | `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute | `60` |
+
+> **Note:** the default testnet Koios URL predates the v2 migration and currently returns 503. Override `VECTOR_KOIOS_URL` with `https://v2.koios.vector.testnet.apexfusion.org/` until the default is updated in code.
+
+### Mainnet endpoints
+
+| Variable | Mainnet value |
+|----------|---------------|
+| `VECTOR_OGMIOS_URL` | `https://ogmios.vector.mainnet.apexfusion.org` |
+| `VECTOR_SUBMIT_URL` | `https://submit.vector.mainnet.apexfusion.org/api/submit/tx` |
+| `VECTOR_KOIOS_URL` | `https://v2.koios.vector.mainnet.apexfusion.org/` |
+| `VECTOR_EXPLORER_URL` | `https://explorer.vector.mainnet.apexfusion.org` |
 
 ## Testing
 
@@ -134,7 +177,7 @@ echo "your mnemonic words here" > mnemonic.txt
 npm test
 ```
 
-Tests cover all 18 tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister.
+Tests cover the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister.
 
 ## Architecture
 
@@ -168,7 +211,9 @@ Tests cover all 18 tools end-to-end against Vector testnet, including the full a
 
 ## About Vector
 
-Vector is Apex Fusion's UTXO-based L2 blockchain, running with Cardano's mainnet parameters. It provides near-instant finality and 4x Cardano throughput, making it ideal for AI agent interactions.
+Vector is Apex Fusion's eUTXO L2, running Cardano mainnet parameters (Conway era, Plutus V3). Sub-1-second optimistic finality and deterministic fees make it a natural chain for AI agent workloads. Mainnet is live.
 
-- **Explorer:** https://vector.testnet.apexscan.org
+- **Docs:** https://apex-fusion.github.io/vector-ai-documentation/
+- **Explorer (mainnet):** https://explorer.vector.mainnet.apexfusion.org
+- **Explorer (testnet):** https://vector.testnet.apexscan.org
 - **Apex Fusion:** https://apexfusion.org
