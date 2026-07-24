@@ -28,12 +28,12 @@
   ],
   "author": "Apex Fusion",
   "license": "ISC",
-  "description": "MCP server for Vector blockchain — AI agent interface for Apex Fusion's L2",
+  "description": "MCP server for Vector - AI agent interface for the Apex Fusion eUTXO L2",
   "repository": {
     "type": "git",
     "url": "https://github.com/Apex-Fusion/mcp-server.git"
   },
-  "homepage": "https://github.com/Apex-Fusion/mcp-server#readme",
+  "homepage": "https://apex-fusion.github.io/vector-ai-documentation/",
   "bugs": {
     "url": "https://github.com/Apex-Fusion/mcp-server/issues"
   },
