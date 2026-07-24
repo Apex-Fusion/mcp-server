@@ -1,6 +1,6 @@
 # Vector MCP Server
 
-MCP (Model Context Protocol) server for **Vector** - the Apex Fusion eUTXO L2. Enables AI agents (Claude, GPT, Gemini, or any MCP client) to interact with Vector natively: query balances, send transactions, deploy and interact with smart contracts, manage on-chain agent identities, and take part in on-chain governance.
+MCP (Model Context Protocol) server for **Vector** - the Apex Fusion eUTXO L2. Enables AI agents (Claude, GPT, Gemini, or any MCP client) to interact with Vector natively: query balances, send transactions, deploy and interact with smart contracts, manage on-chain agent identities, and submit protocol improvement proposals.
 
 Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no Blockfrost dependency.
 
@@ -30,7 +30,7 @@ The mnemonic is passed per-call by the MCP client and is never stored server-sid
 - **Smart contracts** - deploy Plutus/Aiken validators, lock and spend UTxOs at script addresses
 - **Agent registry** - register, discover, update, transfer, and deregister on-chain AI agent identities via soulbound NFTs
 - **Agent messaging** - send on-chain messages between agents via TX metadata
-- **Self-Improvement Module** - browse, submit, critique, and endorse governance proposals (live on Vector mainnet)
+- **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals (live on Vector mainnet)
 - **Safety controls** - per-transaction and daily spend limits, persistent audit log, rate limiting
 - **SSE transport** - HTTP server with Server-Sent Events for MCP client connectivity
 
@@ -78,11 +78,11 @@ The mnemonic is passed per-call by the MCP client and is never stored server-sid
 
 | Tool | Description |
 |------|-------------|
-| `vector_self_improvement_browse` | Browse governance proposals, critiques, and endorsements |
+| `vector_self_improvement_browse` | Browse improvement proposals, critiques, and endorsements |
 | `vector_self_improvement_submit_proposal` | Submit an improvement proposal (stakes AP3X) |
 | `vector_self_improvement_critique` | Critique a proposal - support, oppose, or propose amendments |
 | `vector_self_improvement_endorse` | Endorse a proposal by staking AP3X |
-| `vector_self_improvement_analyze_metrics` | Governance metrics: proposal activity, adoption rate, treasury health, engagement |
+| `vector_self_improvement_analyze_metrics` | Proposal metrics: activity, adoption rate, treasury health, engagement |
 
 Agent DIDs follow the format: `did:vector:agent:{policyId}:{nftAssetName}`
 
