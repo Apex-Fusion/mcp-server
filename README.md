@@ -165,7 +165,7 @@ docker run -p 3000:3000 vector-mcp
 | `VECTOR_OGMIOS_URL` | `https://ogmios.vector.mainnet.apexfusion.org` |
 | `VECTOR_SUBMIT_URL` | `https://submit.vector.mainnet.apexfusion.org/api/submit/tx` |
 | `VECTOR_KOIOS_URL` | `https://v2.koios.vector.mainnet.apexfusion.org/` |
-| `VECTOR_EXPLORER_URL` | `https://explorer.vector.mainnet.apexfusion.org` |
+| `VECTOR_EXPLORER_URL` | `https://vector.apexscan.org/en/` |
 
 ## Testing
 
@@ -214,6 +214,6 @@ Tests cover the core tools end-to-end against Vector testnet, including the full
 Vector is Apex Fusion's eUTXO L2, running Cardano mainnet parameters (Conway era, Plutus V3). Sub-1-second optimistic finality and deterministic fees make it a natural chain for AI agent workloads. Mainnet is live.
 
 - **Docs:** https://apex-fusion.github.io/vector-ai-documentation/
-- **Explorer (mainnet):** https://explorer.vector.mainnet.apexfusion.org
+- **Explorer (mainnet):** https://vector.apexscan.org/en/
 - **Explorer (testnet):** https://vector.testnet.apexscan.org
 - **Apex Fusion:** https://apexfusion.org
