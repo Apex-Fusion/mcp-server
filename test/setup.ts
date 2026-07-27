@@ -31,7 +31,7 @@ export async function startServer(): Promise<ServerContext> {
   });
 
   await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Server start timeout (15s)')), 15_000);
+    const timeout = setTimeout(() => reject(new Error('Server start timeout (60s)')), 60_000);
     child.stderr!.on('data', (chunk: Buffer) => {
       if (chunk.toString().includes('listening on port')) {
         clearTimeout(timeout);

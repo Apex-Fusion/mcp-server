@@ -29,3 +29,8 @@ jobs:
         run: npm run test:unit
         env:
           NODE_OPTIONS: --max-old-space-size=12288
+
+      - name: Tool inventory smoke test
+        run: npm run test:smoke
+        env:
+          NODE_OPTIONS: --max-old-space-size=12288

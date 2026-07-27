@@ -14,7 +14,8 @@
     "start": "node build/index.js",
     "test": "npm run test:unit",
     "test:unit": "node --import tsx --test test/unit/*.test.ts",
-    "test:integration": "npm run build && node --import tsx --test test/integration/*.test.ts"
+    "test:integration": "npm run build && node --import tsx --test test/integration/*.test.ts",
+    "test:smoke": "npm run build && node --import tsx --test test/smoke/*.test.ts"
   },
   "files": [
     "build"
