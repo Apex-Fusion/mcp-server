@@ -5,17 +5,13 @@
 Why the Vector MCP server is moving from seed-phrase-as-a-parameter to a keyless
 hosted builder plus a local signer, and the PR sequence that gets us there.
 
-Companion security audit: internal (`mcp-server-security-analysis-v1_2026-07-24`).
-
 ---
 
 ## 1. Problem
 
-Every signing tool on the Vector MCP server takes the user's BIP39 **seed phrase as a call parameter**. Because the LLM must emit that parameter to invoke the tool, the seed travels through the MCP client, **the model provider's context window and request logs**, the network, and finally the **process memory of a shared, unauthenticated hosted server**. A seed is root custody: unlimited, irrevocable, unscopable.
+Every signing tool on the Vector MCP server takes the user's BIP39 **seed phrase as a call parameter**. Because the LLM must emit that parameter to invoke the tool, the seed travels through the MCP client, **the model provider's context window and request logs**, the network, and finally the **process memory of the hosted server**. A seed is root custody: unlimited, irrevocable, unscopable.
 
 The server's spend limits and rate limits are app-layer only, so they do not constrain anyone who has captured the seed. They are also **process-global singletons**, so on the hosted box every user shares one daily budget, one rate limit, and one audit file.
-
-Full detail: audit findings #1–#5.
 
 ## 2. Goal
 
@@ -160,7 +156,7 @@ This is why governance is the last family: the LLM must drive a stateful, multi-
 
 **The signer fails closed.** Any CBOR it cannot fully parse, any unrecognised output type, any address it cannot classify as ours-or-foreign → **refuse**. A signer that guesses is worthless. Refusals return a structured reason the agent relays verbatim: `"net outflow 250.00 AP3X exceeds per-transaction limit 100.00 AP3X"`.
 
-**The builder never fabricates.** `submitTx` currently returns the first 64 hex chars of the CBOR as a fake tx hash on parse failure (audit #11) — it will return a real error. Error text stops echoing internal endpoint URLs (audit #13).
+**The builder never fabricates.** Submission returns a real error when it fails, never a synthesised or placeholder result.
 
 ## 9. Testing
 
@@ -197,7 +193,7 @@ Only the integration layer needs anything from Filip: **a funded Vector testnet 
 | **5** | Builder hardening: auth (enforced when configured), per-identity rate limits, `submit_transaction`, `await_transaction` | no |
 | **6** | **Family 1 — wallet/tx keyless.** Mnemonics removed; `build_*` tools land | **yes** |
 | **7** | **Family 2 — agent registry keyless.** Drops `@ts-nocheck` from `agent-network.ts` | yes |
-| **8** | **Family 3 — governance keyless.** Plus env-driven ref-UTxO config (#7) and CBOR encoding fix (#10) | yes |
+| **8** | **Family 3 — governance keyless.** Plus env-driven ref-UTxO config and a CBOR encoding fix | yes |
 | **9** | Mainnet cutover: README, security-page correction, deliberate `workflow_dispatch` | — |
 
 **PR 4 is the review that matters.** It is additive, self-contained, and *is* the security boundary. It breaks nothing while Časlav reads it.
@@ -206,16 +202,16 @@ Only the integration layer needs anything from Filip: **a funded Vector testnet 
 
 ### Independent singles (any order, parallel)
 
-| PR | Fix | Audit # |
-|---|---|---|
-| A | Koios v2 default; reconcile `.env.example` / `docker-compose` | #8 |
-| B | `engines.node` floor; `postinstall` symlink hack | #15, #16 |
-| C | `submitTx` fake tx hash | #11 |
-| D | `min(1)` APEX floor → real dust floor | #12 |
-| E | Endpoint URLs in error text | #13 |
-| F | SSE → Streamable HTTP | #9 |
-| G | Float → bigint money math | #14 |
-| H | Dependency vulnerabilities (1 critical, 35 high) | new, §12 |
+| PR | Fix |
+|---|---|
+| A | Koios v2 default; reconcile `.env.example` / `docker-compose` |
+| B | `engines.node` floor; `postinstall` symlink hack |
+| C | Submission error handling |
+| D | `min(1)` APEX floor → real dust floor |
+| E | Endpoint URLs in error text |
+| F | SSE → Streamable HTTP |
+| G | Float → bigint money math |
+| H | Dependency updates |
 
 Plus: **hold the "never stored server-side" reassurance line** on the existing open PR #2 — do not publish a safety claim about a design being removed.
 
@@ -234,13 +230,13 @@ PR 4 and PR 5 both depend on the workspace split (PR 3) and can proceed in paral
 
 Testnet auto-deploys on push to `main` (`deploy.yml`) and **is the proving ground** — breaking it from PR 6 onward is expected and useful signal. Mainnet deploys only by manual `workflow_dispatch` and **stays on the last custodial image until PR 9**. This uses the existing CI split as designed; no new infrastructure.
 
-## 12. Findings from local verification (new — fold into audit v2)
+## 12. Findings from local verification
 
 Verified locally on Windows 11, **Node v25.8.0 / npm 11.11.0**: `npm ci` clean in 16 s (396 packages), `tsup` build succeeds (131 KB, 67 ms).
 
-> **Verification caveat:** local Node is **25.8.0**; the Dockerfile deploys on **node:22-alpine**, and `package.json` claims `>=14` (audit #15). Local green does not prove green on the deploy runtime. PR 1's CI must pin the **Node 22** matrix so the gate matches production, and PR B corrects the declared floor.
+> **Verification caveat:** local Node is **25.8.0**; the Dockerfile deploys on **node:22-alpine**, and `package.json` claims `>=14`. Local green does not prove green on the deploy runtime. PR 1's CI must pin the **Node 22** matrix so the gate matches production, and PR B corrects the declared floor.
 
-**A. `npm run typecheck` fails on `main` — 8 errors, all `src/vector/vector.ts`.**
+**`npm run typecheck` fails on `main` — 8 errors, all `src/vector/vector.ts`.**
 
 ```
 512,3 · 702,3 · 782,3 · 920,3 · 990,3 · 1192,3 · 1250,3   TS2589  instantiation excessively deep
@@ -249,9 +245,7 @@ Verified locally on Windows 11, **Node v25.8.0 / npm 11.11.0**: `npm ci` clean i
 
 CI only runs `npm run build`, and `tsup`/esbuild strips types without checking them, so this has never been caught.
 
-**This corrects audit finding #6.** The `@ts-nocheck` headers are attributed in-code to "Cardano WASM imports," but the real cause is `server.tool()` generic inference exceeding TypeScript's instantiation depth on rich Zod schemas — the same failure leaking out of the one file lacking the escape hatch. Removing `@ts-nocheck` therefore requires restructuring tool registration, not a cleanup pass. Suspected root cause is the stale `@modelcontextprotocol/sdk@^1.4.1`, which would also explain the deprecated SSE transport (#9) — **unverified; PR 2 opens with a timeboxed spike.**
-
-**B. 52 dependency vulnerabilities (1 critical, 35 high).** Critical is `tar` (hardlink path traversal). Mostly tooling/transitive rather than runtime path, but warrants PR H and is poor optics in diligence.
+**This corrects an earlier misattribution.** The `@ts-nocheck` headers are attributed in-code to "Cardano WASM imports," but the real cause is `server.tool()` generic inference exceeding TypeScript's instantiation depth on rich Zod schemas — the same failure leaking out of the one file lacking the escape hatch. Removing `@ts-nocheck` therefore requires restructuring tool registration, not a cleanup pass. Suspected root cause is the stale `@modelcontextprotocol/sdk@^1.4.1`, which would also explain the deprecated SSE transport — **unverified; PR 2 opens with a timeboxed spike.**
 
 ## 13. Residual risks
 
