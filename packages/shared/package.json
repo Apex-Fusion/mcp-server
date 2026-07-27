@@ -1,0 +1,17 @@
+{
+  "name": "@apexfusion/vector-mcp-shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./tx": "./src/tx.ts",
+    "./types": "./src/types.ts",
+    "./config": "./src/config.ts",
+    "./provider": "./src/provider.ts"
+  },
+  "dependencies": {
+    "@lucid-evolution/lucid": "^0.4.29",
+    "@noble/hashes": "^1.7.1",
+    "cross-fetch": "^4.0.0"
+  }
+}
