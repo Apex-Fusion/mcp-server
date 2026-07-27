@@ -24,7 +24,9 @@ import type {
 
 // Direct .env loading
 const __filename = fileURLToPath(import.meta.url);
-const projectRoot = resolve(__filename, '../../../../..');
+// From the bundled entrypoint at packages/builder/build/index.js, four levels
+// up from the file lands on the repo root (build -> builder -> packages -> root).
+const projectRoot = resolve(__filename, '../../../..');
 const envPath = resolve(projectRoot, '.env');
 
 if (existsSync(envPath)) {
