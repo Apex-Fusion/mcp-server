@@ -178,14 +178,17 @@ docker run -p 3000:3000 vector-mcp
 ## Testing
 
 ```bash
-# Set the wallet mnemonic (file or env var)
-echo "your mnemonic words here" > mnemonic.txt
-# or: export VECTOR_MNEMONIC="your mnemonic words here"
-
-npm test
+npm run test:unit
 ```
 
-Tests cover the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister.
+No wallet, no network — pure logic only (CBOR encode/decode assertions). This is what CI runs on every PR.
+
+```bash
+echo "your mnemonic words here" > mnemonic.txt
+npm run test:integration
+```
+
+Requires `mnemonic.txt` in the repo root containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister. Never runs in CI.
 
 ## Architecture
 
