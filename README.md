@@ -21,7 +21,14 @@ Connect from Claude Code in one command:
 claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse
 ```
 
-The mnemonic is passed per-call by the MCP client and is never stored server-side - see the [security model](https://apex-fusion.github.io/vector-ai-documentation/mcp-server/security/). Self-hosting instructions are below.
+> **Security notice — custody.** Signing tools currently take your wallet mnemonic as a
+> tool-call parameter. It therefore passes through your MCP client, your model provider,
+> and the hosted server's memory — it is not written to disk, but it is exposed. Use only
+> a hot wallet holding funds you can afford to lose, and prefer self-hosting until the
+> non-custodial migration lands. See
+> [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md).
+
+Self-hosting instructions are below.
 
 ## Features
 
@@ -102,7 +109,8 @@ cp .env.example .env
 # Edit .env with your endpoint URLs (defaults point to Vector testnet; mainnet URLs below)
 ```
 
-The mnemonic is passed per-call by the MCP client, not stored in the environment.
+The mnemonic is passed per-call by the MCP client rather than stored in the environment. This
+avoids environment dumps, but does not make it private — see the security notice above.
 
 ### 3. Run
 
