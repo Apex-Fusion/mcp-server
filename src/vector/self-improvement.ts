@@ -2,7 +2,7 @@
 // Self-Improvement Module tools: submit proposal, critique, endorse, browse, analyze metrics
 // Game 6 of the Vector game theory ecosystem
 
-import { z } from "zod";
+import { z } from "zod/v4";
 import { Lucid, fromText, toText, Data, Constr, credentialToAddress, getAddressDetails, SLOT_CONFIG_NETWORK } from '@lucid-evolution/lucid';
 
 // Vector slot config - resolved from chain via Ogmios queryNetwork/startTime
