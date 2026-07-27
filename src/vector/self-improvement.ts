@@ -713,6 +713,10 @@ activity tracking token (\`pact_\`) minted. Visible on the Foundation dashboard.
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the wallet"),
       agentDid: z.string().describe("Agent DID (hex)"),
       proposalTxHash: z.string().describe("TX hash of the proposal UTxO to critique"),
+      // Note: a bare .default() without .optional() is reported as *required* by the
+      // SDK's isSchemaOptional() under zod/v4 (it returned optional under v3). That
+      // helper is only used for server.prompt() argument listing, which this codebase
+      // does not use — harmless for server.tool(), but relevant if prompts are added.
       proposalOutputIndex: z.number().default(0).describe("Output index of the proposal UTxO"),
       critiqueDocument: z.string().optional().describe("Full critique document as JSON string. Uploaded to IPFS via Filebase; hash and CID computed automatically."),
       critiqueHash: z.string().optional().describe("blake2b_256 hash of critique document (64 hex chars). Required if critiqueDocument is not provided."),

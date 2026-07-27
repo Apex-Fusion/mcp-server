@@ -92,7 +92,7 @@ describe('tool inventory smoke test', () => {
     const added = actualNames.filter((name) => !EXPECTED_TOOLS.includes(name));
     const removed = EXPECTED_TOOLS.filter((name) => !actualNames.includes(name));
 
-    assert.deepEqual(
+    assert.deepStrictEqual(
       actualNames,
       EXPECTED_TOOLS,
       'Tool inventory drifted from the checked-in snapshot in test/smoke/tool-inventory.test.ts.\n' +
@@ -109,7 +109,7 @@ describe('tool schema snapshot', () => {
     const missingFromSnapshot = actualNames.filter((name) => !snapshotNames.includes(name));
     const staleInSnapshot = snapshotNames.filter((name) => !actualNames.includes(name));
 
-    assert.deepEqual(
+    assert.deepStrictEqual(
       snapshotNames,
       actualNames,
       'test/smoke/tool-schemas.snapshot.json keys do not match the live tool set.\n' +
@@ -119,7 +119,7 @@ describe('tool schema snapshot', () => {
     );
   });
 
-  // One assertion per tool (rather than a single deepEqual over the whole
+  // One assertion per tool (rather than a single deepStrictEqual over the whole
   // 23-tool map) so a failure names the specific tool and shows a readable
   // diff of just that tool's schema, instead of "objects differ" over an
   // unreadable combined structure.
@@ -130,7 +130,7 @@ describe('tool schema snapshot', () => {
         live,
         `Tool "${toolName}" is in the snapshot but was not returned by the live server's listTools().`
       );
-      assert.deepEqual(
+      assert.deepStrictEqual(
         live.inputSchema,
         schemaSnapshot[toolName],
         `inputSchema for "${toolName}" differs from the checked-in snapshot in test/smoke/tool-schemas.snapshot.json.\n` +
