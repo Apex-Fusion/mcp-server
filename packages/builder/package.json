@@ -4,14 +4,17 @@
   "private": false,
   "type": "module",
   "description": "MCP server for Vector - AI agent interface for the Apex Fusion eUTXO L2",
-  "bin": { "vector-mcp-builder": "./build/index.js" },
-  "files": ["build"],
+  "bin": {
+    "vector-mcp-builder": "./build/index.js"
+  },
+  "files": [
+    "build"
+  ],
   "scripts": {
     "build": "tsup && chmod +x build/index.js",
     "start": "node build/index.js"
   },
   "dependencies": {
-    "@apexfusion/vector-mcp-shared": "*",
     "@aws-sdk/client-s3": "^3.1027.0",
     "@lucid-evolution/lucid": "^0.4.29",
     "@modelcontextprotocol/sdk": "^1.4.1",
@@ -19,5 +22,8 @@
     "cross-fetch": "^4.0.0",
     "dotenv": "^16.4.5",
     "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@apexfusion/vector-mcp-shared": "*"
   }
 }

@@ -128,7 +128,7 @@ Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
   "mcpServers": {
     "vector": {
       "command": "node",
-      "args": ["/path/to/vector-mcp-server/build/index.js"],
+      "args": ["/path/to/vector-mcp-server/packages/builder/build/index.js"],
       "env": {
         "VECTOR_OGMIOS_URL": "https://ogmios.vector.testnet.apexfusion.org",
         "VECTOR_SUBMIT_URL": "https://submit.vector.testnet.apexfusion.org/api/submit/tx",
@@ -188,11 +188,11 @@ npm run test:smoke
 Builds the server, boots it, and asserts the exposed tool inventory matches the checked-in snapshot. No wallet, no external network. CI runs this and `test:unit` on every PR.
 
 ```bash
-echo "your mnemonic words here" > mnemonic.txt
+echo "your mnemonic words here" > packages/builder/mnemonic.txt
 npm run test:integration
 ```
 
-Requires `mnemonic.txt` in the repo root containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister. Never runs in CI.
+Requires `mnemonic.txt` in `packages/builder/` containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister. Never runs in CI.
 
 ## Architecture
 
