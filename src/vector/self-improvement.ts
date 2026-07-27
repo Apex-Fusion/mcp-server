@@ -5,7 +5,7 @@
 import { z } from "zod";
 import { Lucid, fromText, toText, Data, Constr, credentialToAddress, getAddressDetails, SLOT_CONFIG_NETWORK } from '@lucid-evolution/lucid';
 
-// Vector slot config — resolved from chain via Ogmios queryNetwork/startTime
+// Vector slot config - resolved from chain via Ogmios queryNetwork/startTime
 // Cached after first query so SLOT_CONFIG_NETWORK is set before Lucid needs it
 let vectorZeroTime: number | null = null;
 
@@ -25,13 +25,13 @@ import { rateLimiter } from './rate-limiter.js';
 // Env config
 const VECTOR_OGMIOS_URL = process.env.VECTOR_OGMIOS_URL || 'https://ogmios.vector.testnet.apexfusion.org';
 const VECTOR_SUBMIT_URL = process.env.VECTOR_SUBMIT_URL || 'https://submit.vector.testnet.apexfusion.org/api/submit/tx';
-const VECTOR_KOIOS_URL = process.env.VECTOR_KOIOS_URL || 'https://koios.vector.testnet.apexfusion.org/';
+const VECTOR_KOIOS_URL = process.env.VECTOR_KOIOS_URL || 'https://v2.koios.vector.testnet.apexfusion.org/';
 const VECTOR_EXPLORER_URL = process.env.VECTOR_EXPLORER_URL || 'https://vector.testnet.apexscan.org';
 
 // Agent Registry policy ID (shared across all modules)
 const AGENT_REGISTRY_POLICY = process.env.AGENT_REGISTRY_POLICY || 'be1a0a2912da180757ed3cd61b56bb8eab0188c19dc3c0e3912d2c01';
 
-// Governance contract hashes (from deploy_state.json)
+// Module contract hashes (from deploy_state.json)
 // These should be set via env vars in production
 const GOV_PROPOSAL_SPEND_HASH = process.env.GOV_PROPOSAL_SPEND_HASH || 'f815f51a76002d6a973e83fecf60f45473e040acee85c631fcce134d';
 const GOV_PROPOSAL_MINT_HASH = process.env.GOV_PROPOSAL_MINT_HASH || 'e8f38052352a3d20c5fe025e2a02d615826a154b26f2239286b8d565';
@@ -40,11 +40,11 @@ const GOV_CRITIQUE_MINT_HASH = process.env.GOV_CRITIQUE_MINT_HASH || '2e252a8989
 const GOV_ENDORSEMENT_SPEND_HASH = process.env.GOV_ENDORSEMENT_SPEND_HASH || '5fc449848d85f30287e5bc0bd2b3e95d872ef97be27f1480c12f1a9d';
 const GOV_TREASURY_ADDRESS = process.env.GOV_TREASURY_ADDRESS || 'addr1wx434t2jc3m5uhdf7tq05xjdqu3q5z7a2lhrmn5mapsd43srh7ll8';
 
-// Reference script UTxOs (CIP-33) — for validated submit
+// Reference script UTxOs (CIP-33) - for validated submit
 const GOV_PROPOSAL_SPEND_REF = process.env.GOV_PROPOSAL_SPEND_REF || 'c70a410c9c0c543a0a1103049680b89cbf6fd2277e8469c4d52632dc52b80996#0';
 const GOV_PROPOSAL_MINT_REF = process.env.GOV_PROPOSAL_MINT_REF || 'c40b64fff5c4056689354076aa3d06431d786a4f8f0c1e492e70261d2309e50a#0';
 
-// Infrastructure UTxOs (governance reference inputs)
+// Infrastructure UTxOs (module reference inputs)
 const GOV_PARAMS_UTXO = process.env.GOV_PARAMS_UTXO || '2c082e833649175b4a543a5a0cf61f9b736acdfa0d315d1184645185e9a52796#0';
 const GOV_ORACLE_UTXO = process.env.GOV_ORACLE_UTXO || '7a23dfdf9468dd35cee3cad03008f2538c86834d4e5140e0ffaf2ff93e7c04a7#0';
 const GOV_CROSSREFS_UTXO = process.env.GOV_CROSSREFS_UTXO || '96a4acff8be0fb96b3839ee6c9c1fa75809b94f4967218eaf813ac56b939c4b2#0';
@@ -276,7 +276,7 @@ export function registerSelfImprovementTools(server) {
 
   server.tool(
     "vector_self_improvement_browse",
-    "Browse governance proposals, critiques, and endorsements. Query on-chain UTxOs at governance script addresses and decode datums into human-readable format.",
+    "Browse improvement proposals, critiques, and endorsements. Query on-chain UTxOs at the module's script addresses and decode datums into human-readable format.",
     {
       entity: z.enum(["proposals", "critiques", "endorsements", "treasury"]).describe("What to browse"),
       state: z.string().optional().describe("Filter proposals by state: Open, Amended, Adopted, Rejected, Expired, Withdrawn"),
@@ -388,7 +388,7 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
           return {
             content: [{
               type: "text",
-              text: `# Governance Proposals (${items.length} found)\n\n${lines.join('\n\n') || 'No proposals match the filters.'}`,
+              text: `# Improvement Proposals (${items.length} found)\n\n${lines.join('\n\n') || 'No proposals match the filters.'}`,
             }],
           };
         } else if (entity === "critiques") {
@@ -424,10 +424,10 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
         return {
           content: [{
             type: "text",
-            text: `Failed to browse governance data: ${err.message}
+            text: `Failed to browse proposal data: ${err.message}
 
 **Troubleshooting Tips:**
-1. Verify the governance contracts are deployed on testnet
+1. Verify the module contracts are deployed on this network
 2. Check that Ogmios is reachable at ${VECTOR_OGMIOS_URL}
 3. The script addresses may not have any UTxOs yet`,
           }],
@@ -440,10 +440,10 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
 
   server.tool(
     "vector_self_improvement_submit_proposal",
-    "Submit a governance proposal to the Vector Self-Improvement Module. Requires staking AP3X. Provide proposalDocument (JSON string) for automatic IPFS upload via Filebase and blake2b_256 hashing, OR provide proposalHash and storageUri manually.",
+    "Submit an improvement proposal to the Vector Self-Improvement Module. Requires staking AP3X. Provide proposalDocument (JSON string) for automatic IPFS upload via Filebase and blake2b_256 hashing, OR provide proposalHash and storageUri manually.",
     {
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the wallet"),
-      agentDid: z.string().describe("Agent DID (hex) — the asset name from Agent Registry NFT"),
+      agentDid: z.string().describe("Agent DID (hex) - the asset name from Agent Registry NFT"),
       proposalDocument: z.string().optional().describe("Full proposal document as JSON string. Uploaded to IPFS via Filebase; hash and CID computed automatically. If provided, proposalHash and storageUri are ignored."),
       proposalHash: z.string().optional().describe("blake2b_256 hash of proposal document (64 hex chars). Required if proposalDocument is not provided."),
       proposalType: z.enum(["ParameterChange", "TreasurySpend", "ProtocolUpgrade", "GameActivation", "GeneralSuggestion"]).describe("Category of the proposal"),
@@ -601,7 +601,7 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
           throw new Error(
             `Reference script UTxOs missing: found ${refScriptUtxos.length}/2. ` +
             `spend_ref=${GOV_PROPOSAL_SPEND_REF}, mint_ref=${GOV_PROPOSAL_MINT_REF}. ` +
-            `These UTxOs may have been consumed — redeploy with scripts/redeploy_ref_scripts.py ` +
+            `These UTxOs may have been consumed - redeploy with scripts/redeploy_ref_scripts.py ` +
             `and update GOV_PROPOSAL_SPEND_REF / GOV_PROPOSAL_MINT_REF env vars.`
           );
         }
@@ -614,7 +614,7 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
           );
         }
 
-        // Get governance infrastructure reference inputs
+        // Get module infrastructure reference inputs
         const govRefUtxos = await lucid.utxosByOutRef([
           parseUtxoRef(GOV_PARAMS_UTXO),
           parseUtxoRef(GOV_ORACLE_UTXO),
@@ -708,7 +708,7 @@ activity tracking token (\`pact_\`) minted. Visible on the Foundation dashboard.
 
   server.tool(
     "vector_self_improvement_critique",
-    "Submit a critique on a governance proposal. Critiques can support, oppose, or propose amendments. Requires staking AP3X. Provide critiqueDocument (JSON string) for automatic IPFS upload, or critiqueHash + storageUri manually.",
+    "Submit a critique on an improvement proposal. Critiques can support, oppose, or propose amendments. Requires staking AP3X. Provide critiqueDocument (JSON string) for automatic IPFS upload, or critiqueHash + storageUri manually.",
     {
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the wallet"),
       agentDid: z.string().describe("Agent DID (hex)"),
@@ -830,7 +830,7 @@ ${ipfsCid ? `**IPFS CID:** ${ipfsCid}\n**Hash (auto-computed):** ${finalHash}` :
 
   server.tool(
     "vector_self_improvement_endorse",
-    "Endorse a governance proposal by staking AP3X. Endorsements signal support to the Foundation Council and are weighted by stake amount.",
+    "Endorse an improvement proposal by staking AP3X. Endorsements signal support to the Foundation Council and are weighted by stake amount.",
     {
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the wallet"),
       agentDid: z.string().describe("Agent DID (hex)"),
@@ -861,7 +861,7 @@ ${ipfsCid ? `**IPFS CID:** ${ipfsCid}\n**Hash (auto-computed):** ${finalHash}` :
         const tip = await provider.getNetworkTip?.() || { slot: 0 };
         const currentSlot = tip.slot || 0;
 
-        // Build GovernanceEndorsementDatum
+        // Build the endorsement datum
         const endorsementDatum = Data.to(new Constr(0, [
           agentDid,                                                     // endorser_did
           new Constr(0, [vkeyHash]),                                   // endorser_credential
@@ -916,7 +916,7 @@ ${ipfsCid ? `**IPFS CID:** ${ipfsCid}\n**Hash (auto-computed):** ${finalHash}` :
 
   server.tool(
     "vector_self_improvement_analyze_metrics",
-    "Analyze governance metrics: proposal activity, adoption rate, treasury health, and engagement statistics. Read-only — no mnemonic needed.",
+    "Analyze proposal metrics: proposal activity, adoption rate, treasury health, and engagement statistics. Read-only - no mnemonic needed.",
     {
       focus: z.enum(["overview", "adoption", "treasury", "activity"]).default("overview").describe("Analysis focus area"),
     },
@@ -985,7 +985,7 @@ ${Number(treasuryTotal) < 2_500_000_000 ? '**WARNING:** Treasury below 2,500 AP3
         return {
           content: [{
             type: "text",
-            text: `# Governance Metrics${focus !== 'overview' ? ` (${focus})` : ''}
+            text: `# Proposal Metrics${focus !== 'overview' ? ` (${focus})` : ''}
 
 ## Proposals
 - **Total on-chain:** ${totalCount}
@@ -1009,11 +1009,11 @@ ${Number(treasuryTotal) < 2_500_000_000 ? '\n**WARNING:** Treasury below alert t
         return {
           content: [{
             type: "text",
-            text: `Failed to analyze governance metrics: ${err.message}
+            text: `Failed to analyze proposal metrics: ${err.message}
 
 **Troubleshooting Tips:**
 1. Verify Ogmios endpoint is reachable
-2. The governance contracts may not be deployed yet`,
+2. The module contracts may not be deployed yet`,
           }],
         };
       }

@@ -13,14 +13,14 @@ const envPath = resolve(__dirname, '../.env');
 console.error('Looking for .env file at:', envPath);
 console.error('.env file exists:', existsSync(envPath));
 
-// Load environment variables (non-fatal if missing — env vars can be passed directly)
+// Load environment variables (non-fatal if missing - env vars can be passed directly)
 if (existsSync(envPath)) {
   const result = config({ path: envPath });
   if (result.error) {
     console.error('Warning: Error loading .env file:', result.error);
   }
 } else {
-  console.error('No .env file found — using environment variables directly');
+  console.error('No .env file found - using environment variables directly');
 }
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
