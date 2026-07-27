@@ -181,7 +181,13 @@ docker run -p 3000:3000 vector-mcp
 npm run test:unit
 ```
 
-No wallet, no network — pure logic only (CBOR encode/decode assertions). This is what CI runs on every PR.
+No wallet, no network — pure logic only (CBOR encode/decode assertions).
+
+```bash
+npm run test:smoke
+```
+
+Builds the server, boots it, and asserts the exposed tool inventory matches the checked-in snapshot. No wallet, no external network. CI runs this and `test:unit` on every PR.
 
 ```bash
 echo "your mnemonic words here" > mnemonic.txt
