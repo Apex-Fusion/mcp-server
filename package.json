@@ -12,7 +12,9 @@
     "build": "tsup && chmod +x build/index.js",
     "typecheck": "tsc --noEmit --incremental",
     "start": "node build/index.js",
-    "test": "npm run build && node --import tsx --test test/run.test.ts"
+    "test": "npm run test:unit",
+    "test:unit": "node --import tsx --test test/unit/*.test.ts",
+    "test:integration": "npm run build && node --import tsx --test test/integration/*.test.ts"
   },
   "files": [
     "build"

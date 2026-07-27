@@ -1,6 +1,6 @@
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startServer, stopServer, callTool, getMnemonic, wait, ServerContext } from './setup.ts';
+import { startServer, stopServer, callTool, getMnemonic, wait, ServerContext } from '../setup.ts';
 
 // Always-succeeds PlutusV2 validator (accepts any datum/redeemer/context, returns True)
 const ALWAYS_SUCCEEDS_V2 = '49480100002221200101';
