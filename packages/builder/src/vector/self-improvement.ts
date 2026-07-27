@@ -18,15 +18,12 @@ async function ensureSlotConfig(provider: OgmiosProvider): Promise<number> {
 }
 import { blake2b } from '@noble/hashes/blake2b';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import { OgmiosProvider } from './ogmios-provider.js';
+import { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
+import {
+  VECTOR_OGMIOS_URL, VECTOR_SUBMIT_URL, VECTOR_KOIOS_URL, VECTOR_EXPLORER_URL, explorerTxLink,
+} from '@apexfusion/vector-mcp-shared/config';
 import { safetyLayer } from './safety.js';
 import { rateLimiter } from './rate-limiter.js';
-
-// Env config
-const VECTOR_OGMIOS_URL = process.env.VECTOR_OGMIOS_URL || 'https://ogmios.vector.testnet.apexfusion.org';
-const VECTOR_SUBMIT_URL = process.env.VECTOR_SUBMIT_URL || 'https://submit.vector.testnet.apexfusion.org/api/submit/tx';
-const VECTOR_KOIOS_URL = process.env.VECTOR_KOIOS_URL || 'https://v2.koios.vector.testnet.apexfusion.org/';
-const VECTOR_EXPLORER_URL = process.env.VECTOR_EXPLORER_URL || 'https://vector.testnet.apexscan.org';
 
 // Agent Registry policy ID (shared across all modules)
 const AGENT_REGISTRY_POLICY = process.env.AGENT_REGISTRY_POLICY || 'be1a0a2912da180757ed3cd61b56bb8eab0188c19dc3c0e3912d2c01';
@@ -82,10 +79,6 @@ const CRITIQUE_TYPE_NAMES: Record<number, string> = {
 
 function newProvider() {
   return new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL });
-}
-
-function explorerTxLink(txHash: string) {
-  return `${VECTOR_EXPLORER_URL}/transaction/${txHash}`;
 }
 
 function lovelaceToApex(lovelace: number | bigint): string {

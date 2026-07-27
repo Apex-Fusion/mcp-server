@@ -4,15 +4,14 @@
 import { z } from "zod/v4";
 import { Lucid, fromText, toText, Data, Constr, validatorToAddress, validatorToScriptHash, getAddressDetails, credentialToAddress } from '@lucid-evolution/lucid';
 import { blake2b } from '@noble/hashes/blake2b';
-import { OgmiosProvider } from './ogmios-provider.js';
+import { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
+import { metadataStr, lovelaceToAda, deriveNftAssetName } from '@apexfusion/vector-mcp-shared/tx';
+import {
+  VECTOR_OGMIOS_URL, VECTOR_SUBMIT_URL, VECTOR_KOIOS_URL, VECTOR_EXPLORER_URL, explorerTxLink,
+} from '@apexfusion/vector-mcp-shared/config';
+export { deriveNftAssetName };
 import { safetyLayer } from './safety.js';
 import { rateLimiter } from './rate-limiter.js';
-
-// Env config (mirrors vector.ts)
-const VECTOR_OGMIOS_URL = process.env.VECTOR_OGMIOS_URL || 'https://ogmios.vector.testnet.apexfusion.org';
-const VECTOR_SUBMIT_URL = process.env.VECTOR_SUBMIT_URL || 'https://submit.vector.testnet.apexfusion.org/api/submit/tx';
-const VECTOR_KOIOS_URL = process.env.VECTOR_KOIOS_URL || 'https://v2.koios.vector.testnet.apexfusion.org/';
-const VECTOR_EXPLORER_URL = process.env.VECTOR_EXPLORER_URL || 'https://vector.testnet.apexscan.org';
 
 // Registry constants - agent-registry v2 (audited, compliant)
 // Source blueprint: vector-ai-agents/agent-registry/deploy/agent-registry/plutus.json
@@ -23,69 +22,8 @@ const AGENT_MESSAGE_LABEL = 674;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// Cardano metadata strings must be ≤ 64 bytes. Chunk long strings into arrays.
-function metadataStr(s: string): string | string[] {
-  if (s.length <= 64) return s;
-  const chunks: string[] = [];
-  for (let i = 0; i < s.length; i += 64) {
-    chunks.push(s.slice(i, i + 64));
-  }
-  return chunks;
-}
-
-function lovelaceToAda(lovelace) {
-  return (Number(BigInt(String(lovelace))) / 1_000_000).toFixed(6);
-}
-
-function explorerTxLink(txHash) {
-  return `${VECTOR_EXPLORER_URL}/transaction/${txHash}`;
-}
-
 function newProvider() {
   return new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL });
-}
-
-// Derive NFT asset name = blake2b_256(CBOR(OutputReference))
-// v2 (Conway) requires INDEFINITE-length CBOR for the constructor field array
-// (`D8 79 9F … FF`), matching Aiken's `cbor.serialise`. Lucid's Data.to emits
-// definite-length arrays (`D8 79 82 …`) which v2 rejects, so we hand-roll the
-// outer constructor and let Lucid encode the inner fields.
-function cborUint(n: bigint): Buffer {
-  if (n < 0n) throw new Error('output_index must be non-negative');
-  if (n < 24n) return Buffer.from([Number(n)]);
-  if (n < 0x100n) return Buffer.from([0x18, Number(n)]);
-  if (n < 0x10000n) return Buffer.from([0x19, Number(n >> 8n) & 0xff, Number(n) & 0xff]);
-  if (n < 0x100000000n) {
-    const b = Buffer.alloc(5); b[0] = 0x1a; b.writeUInt32BE(Number(n), 1); return b;
-  }
-  const b = Buffer.alloc(9); b[0] = 0x1b; b.writeBigUInt64BE(n, 1); return b;
-}
-
-function cborBytes(hex: string): Buffer {
-  const raw = Buffer.from(hex, 'hex');
-  const len = raw.length;
-  let header: Buffer;
-  if (len < 24) header = Buffer.from([0x40 | len]);
-  else if (len < 0x100) header = Buffer.from([0x58, len]);
-  else if (len < 0x10000) { header = Buffer.alloc(3); header[0] = 0x59; header.writeUInt16BE(len, 1); }
-  else { header = Buffer.alloc(5); header[0] = 0x5a; header.writeUInt32BE(len, 1); }
-  return Buffer.concat([header, raw]);
-}
-
-export function deriveNftAssetName(txHash: string, outputIndex: number): string {
-  // Constr 0 with indefinite-length inner array:
-  //   D8 79         (tag 121 = constr 0)
-  //   9F            (indefinite array begin)
-  //   <bytes(tx_hash)> <uint(output_index)>
-  //   FF            (break)
-  const outRefCbor = Buffer.concat([
-    Buffer.from([0xd8, 0x79, 0x9f]),
-    cborBytes(txHash),
-    cborUint(BigInt(outputIndex)),
-    Buffer.from([0xff]),
-  ]);
-  const hashBytes = blake2b(outRefCbor, { dkLen: 32 });
-  return Buffer.from(hashBytes).toString('hex');
 }
 
 function buildAgentDatum(vkeyHash, name, description, capabilities, framework, endpoint, registeredAt) {

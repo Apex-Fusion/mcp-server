@@ -7,26 +7,24 @@ import * as dotenv from 'dotenv';
 import { resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
-import { OgmiosProvider } from './ogmios-provider.js';
+import { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
+import { lovelaceToAda, formatAssetName } from '@apexfusion/vector-mcp-shared/tx';
+import {
+  VECTOR_OGMIOS_URL, VECTOR_SUBMIT_URL, VECTOR_KOIOS_URL, VECTOR_EXPLORER_URL, explorerTxLink,
+} from '@apexfusion/vector-mcp-shared/config';
 import { safetyLayer } from './safety.js';
 import { rateLimiter } from './rate-limiter.js';
 import { registerAgentNetworkTools } from './agent-network.js';
 import { registerSelfImprovementTools } from './self-improvement.js';
 import type {
-  VectorToken,
-  VectorWalletInfo,
-  VectorAdaTransactionResult,
-  VectorTokenTransactionResult,
-  TxOutput,
-  VectorBuildTransactionResult,
-  VectorDryRunResult,
-  VectorDeployContractResult,
+  VectorToken, VectorWalletInfo, VectorAdaTransactionResult, VectorTokenTransactionResult,
+  TxOutput, VectorBuildTransactionResult, VectorDryRunResult, VectorDeployContractResult,
   VectorInteractContractResult,
-} from './types.js';
+} from '@apexfusion/vector-mcp-shared/types';
 
 // Direct .env loading
 const __filename = fileURLToPath(import.meta.url);
-const projectRoot = resolve(__filename, '../../../..');
+const projectRoot = resolve(__filename, '../../../../..');
 const envPath = resolve(projectRoot, '.env');
 
 if (existsSync(envPath)) {
@@ -34,39 +32,6 @@ if (existsSync(envPath)) {
   if (result.error) {
     console.error('Error loading .env file:', result.error);
   }
-}
-
-// Configuration from environment variables
-const VECTOR_OGMIOS_URL = process.env.VECTOR_OGMIOS_URL || 'https://ogmios.vector.testnet.apexfusion.org';
-const VECTOR_SUBMIT_URL = process.env.VECTOR_SUBMIT_URL || 'https://submit.vector.testnet.apexfusion.org/api/submit/tx';
-const VECTOR_KOIOS_URL = process.env.VECTOR_KOIOS_URL || 'https://v2.koios.vector.testnet.apexfusion.org/';
-const VECTOR_EXPLORER_URL = process.env.VECTOR_EXPLORER_URL || 'https://vector.testnet.apexscan.org';
-
-// Helper function to format AP3X amounts
-function lovelaceToAda(lovelace: string | number | bigint): string {
-  if (lovelace === undefined || lovelace === null) return '0.000000';
-  try {
-    return (Number(BigInt(String(lovelace))) / 1_000_000).toFixed(6);
-  } catch {
-    return '0.000000';
-  }
-}
-
-// Helper function to format asset name
-function formatAssetName(name: string): string {
-  try {
-    if (/^[0-9a-fA-F]+$/.test(name) && name.length > 0) {
-      return Buffer.from(name, 'hex').toString('utf8');
-    }
-    return name;
-  } catch {
-    return name;
-  }
-}
-
-// Explorer link helper
-function explorerTxLink(txHash: string): string {
-  return `${VECTOR_EXPLORER_URL}/transaction/${txHash}`;
 }
 
 // Initialize Lucid instance with Ogmios provider
