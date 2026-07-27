@@ -39,7 +39,6 @@ Success criteria:
 | Rollout | Testnet auto-deploys and may break; mainnet held until complete |
 | Testing | **TDD** — tests written first |
 | Auth | Enforced when `MCP_AUTH_TOKENS` is configured |
-| Delivery | Claude implements and opens PRs; David/Časlav review and merge |
 
 ## 4. Architecture
 
@@ -178,8 +177,6 @@ TDD throughout: failing test before implementation, every PR.
 - Daily limit accumulation across multiple signs → enforced
 - Fee included in net outflow
 
-Only the integration layer needs anything from Filip: **a funded Vector testnet wallet**.
-
 ## 10. PR sequence
 
 ### Spine (ordered)
@@ -196,7 +193,7 @@ Only the integration layer needs anything from Filip: **a funded Vector testnet 
 | **8** | **Family 3 — governance keyless.** Plus env-driven ref-UTxO config and a CBOR encoding fix | yes |
 | **9** | Mainnet cutover: README, security-page correction, deliberate `workflow_dispatch` | — |
 
-**PR 4 is the review that matters.** It is additive, self-contained, and *is* the security boundary. It breaks nothing while Časlav reads it.
+**PR 4 is the review that matters.** It is additive, self-contained, and *is* the security boundary. It breaks nothing while it is reviewed.
 
 **PR 2 rationale:** `main` does not currently typecheck (§12). Gating CI on a red tree is impossible, so the gate is established before any refactor lands on top of it.
 
@@ -212,8 +209,6 @@ Only the integration layer needs anything from Filip: **a funded Vector testnet 
 | F | SSE → Streamable HTTP |
 | G | Float → bigint money math |
 | H | Dependency updates |
-
-Plus: **hold the "never stored server-side" reassurance line** on the existing open PR #2 — do not publish a safety claim about a design being removed.
 
 ### Dependency graph
 
@@ -261,5 +256,4 @@ v1 mitigation: all asset movements are decoded, logged, and returned in the poli
 
 ## 14. Open items
 
-1. **Funded Vector testnet wallet** needed from Filip for integration-layer verification. Without it, pre-PR testing proves CBOR structure but not chain acceptance.
-2. **PR 2 spike result** determines whether the SDK upgrade is in scope or the type errors are patched directly.
+1. **PR 2 spike result** determines whether the SDK upgrade is in scope or the type errors are patched directly.
