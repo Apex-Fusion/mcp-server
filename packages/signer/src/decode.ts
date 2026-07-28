@@ -67,13 +67,12 @@ export function decodeTransaction(cborHex: string): DecodedTx {
   // re-serialising and comparing against the input detects any unconsumed
   // suffix. Compared case-insensitively: valid uppercase-hex input round-trips
   // through CML as lowercase, which would otherwise read as a mismatch.
-  // Verified empirically (not just by this module's own tests, which lack an
-  // asset-bearing or multi-shape fixture) across: the clean fixture, the
-  // fixture with trailing bytes appended, a fixture-derived transaction with a
-  // real vkey witness attached (the shape sign.ts will produce), and a
-  // fixture-derived transaction with an added output (a structural change) —
-  // strict equality held for every legitimate case and failed only, in the
-  // "input longer than reserialised" direction, for the trailing-bytes case.
+  // The risk of comparing strictly is a false positive: if CML re-encoded any
+  // legitimate transaction differently, the signer would refuse to sign it at
+  // all. That was checked against the encodings this ecosystem actually uses —
+  // including the indefinite-length CBOR the agent registry hand-rolls (see
+  // shared/tx.ts), metadata, Plutus scripts and datums, and non-canonical
+  // integers — and the encoding survived every round trip.
   if (tx.to_cbor_hex().toLowerCase() !== cborHex.toLowerCase()) {
     throw new Error(
       'Transaction could not be decoded: input was not fully consumed (unrecognised trailing data)'
