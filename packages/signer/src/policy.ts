@@ -24,14 +24,27 @@ function ada(lovelace: bigint): string {
   return (Number(lovelace) / 1_000_000).toFixed(6);
 }
 
-// A blank entry is not a usable address. `''.split(',')` on an empty string
-// yields `['']`, not `[]` — a realistic way an upstream config/env-parsing bug
-// could hand this module a non-empty array that names no real address. Left
-// unfiltered, `ownAddresses.length === 0` would miss that case (the array
-// isn't empty), the blank entry would never match a real output, and the
-// module would proceed as if it knew an own address when it does not.
+// A blank entry is not a usable address — and neither is one built entirely
+// from characters that merely look blank. `''.split(',')` on an empty string
+// yields `['']`, not `[]`, a realistic way an upstream config/env-parsing bug
+// could hand this module a non-empty array that names no real address; a
+// literal '' is the obvious case, but `.trim()` alone does not generalise
+// past it, since it only strips the ECMAScript WhiteSpace set (which
+// includes NBSP U+00A0 and BOM U+FEFF). Plenty of other invisible characters
+// survive it: U+200B ZERO WIDTH SPACE and U+2060 WORD JOINER are Unicode
+// category Cf (format), not Zs (space separator), so `.trim()` leaves them
+// untouched. A denylist of "invisible" codepoints is not a fix — there are
+// dozens of Cf/Cc codepoints and more get added — so this checks positively
+// instead: an entry only counts as a known own address if, after trimming,
+// it starts with the 'addr' prefix every Cardano/Vector payment address
+// actually uses. Nothing built purely from blank or invisible characters can
+// satisfy that, without needing to enumerate any of them.
+function looksLikeAddress(address: string): boolean {
+  return address.trim().startsWith('addr');
+}
+
 function knownAddresses(ownAddresses: string[]): string[] {
-  return ownAddresses.filter((address) => address.trim().length > 0);
+  return ownAddresses.filter(looksLikeAddress);
 }
 
 /**
@@ -60,6 +73,22 @@ export function computeOutflow(
   return { netOutflowLovelace: leaving + tx.fee, assetMovements };
 }
 
+/**
+ * Decides whether to sign `tx`, bounding lovelace outflow only.
+ *
+ * `SpendLimits` has no asset-value dimension: `assetMovements` (native
+ * assets leaving to a foreign address, e.g. NFTs or token balances) is
+ * computed and reported on the returned `PolicyDecision` for visibility, but
+ * it never gates `allowed`. A transaction can move an entire native-asset
+ * balance out of the wallet and still receive `allowed: true` as long as the
+ * lovelace side of that same transaction stays under both limits — e.g. an
+ * NFT sent with only the minimum UTxO deposit attached. This is a deliberate
+ * v1 scope boundary, not an oversight: adding asset-value limits is future
+ * work, and would need `SpendLimits` itself to grow a corresponding field.
+ * A caller must not read `allowed: true` from this function as approval of
+ * whatever `assetMovements` contains — only as approval of the lovelace
+ * amount in `netOutflowLovelace`.
+ */
 export function evaluate(
   tx: DecodedTx,
   ownAddresses: string[],

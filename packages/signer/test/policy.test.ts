@@ -167,6 +167,94 @@ describe('evaluate — ownAddresses containing only blank entries', () => {
   });
 });
 
+describe('evaluate — ownAddresses entries built from invisible Unicode characters', () => {
+  // `.trim()` alone is not enough to detect "not a real address": it strips
+  // the ECMAScript WhiteSpace set (which includes NBSP U+00A0 and BOM
+  // U+FEFF) but not every invisible character. U+200B ZERO WIDTH SPACE and
+  // U+2060 WORD JOINER are Unicode category Cf (format), not Zs (space
+  // separator) or part of ECMAScript's WhiteSpace production, so trimming
+  // either one leaves a non-empty string — a trim-then-check-length filter
+  // alone would let either slip past exactly the way '' used to. (U+00A0 and
+  // U+FEFF, by contrast, ARE stripped by .trim() and were never actually a
+  // gap here — verified directly before writing these tests: only U+200B and
+  // U+2060 reproduce it.) A denylist of "invisible" codepoints is not the
+  // fix: there are dozens of Cf/Cc codepoints and more get added, so this is
+  // a positive check instead — an entry only counts as a known own address
+  // if, after trimming, it starts with the 'addr' prefix every
+  // Cardano/Vector payment address actually uses. Nothing built purely from
+  // invisible characters can satisfy that.
+  // Built via fromCharCode rather than a literal escape so the codepoint is
+  // unambiguous in source and cannot be misrendered by an editor or diff tool.
+  const ZERO_WIDTH_SPACE = String.fromCharCode(0x200b);
+  const WORD_JOINER = String.fromCharCode(0x2060);
+
+  test('a single ZERO WIDTH SPACE (U+200B) entry is treated as no known own address', () => {
+    const d = evaluate(
+      tx({ outputs: [{ address: FOREIGN, lovelace: 5_000_000n, assets: [] }] }),
+      [ZERO_WIDTH_SPACE], LIMITS, 0n
+    );
+    assert.equal(d.allowed, false);
+    assert.match(d.reason!, /own address/i);
+  });
+
+  test('a single WORD JOINER (U+2060) entry is treated as no known own address', () => {
+    const d = evaluate(
+      tx({ outputs: [{ address: FOREIGN, lovelace: 5_000_000n, assets: [] }] }),
+      [WORD_JOINER], LIMITS, 0n
+    );
+    assert.equal(d.allowed, false);
+    assert.match(d.reason!, /own address/i);
+  });
+
+  test('a genuine addr1... address is still accepted (the positive check does not over-reject)', () => {
+    const r = computeOutflow(
+      tx({ outputs: [{ address: OWN, lovelace: 5_000_000n, assets: [] }] }),
+      [OWN]
+    );
+    assert.equal(r.netOutflowLovelace, 200_000n, 'a real own address must still be recognised as change');
+  });
+});
+
+describe('computeOutflow — the filter applies at the Set-construction site itself, not only in evaluate()', () => {
+  // evaluate()'s fail-closed guard and computeOutflow()'s own Set both call
+  // knownAddresses(), but nothing above exercises them independently: every
+  // prior blank/invisible-entry test either goes through evaluate() (whose
+  // guard would refuse before computeOutflow's classification could matter)
+  // or pairs a blank ownAddresses entry with a *real* output address (which
+  // would pass either way, filtered or not). That leaves a real gap: if a
+  // future edit filtered ownAddresses in evaluate()'s guard but left
+  // computeOutflow's `new Set(ownAddresses)` unfiltered, nothing here would
+  // catch it, because a blank entry in an otherwise-unfiltered Set only
+  // matters when something can actually match it — i.e. when an output
+  // address is *also* blank. decode.ts can never produce that: every output
+  // address comes from `o.address().to_bech32()`, which throws before an
+  // empty or blank address could ever reach a DecodedOutput (see decode.ts's
+  // per-output try/catch). So this is unreachable through the real pipeline
+  // — but computeOutflow is an exported pure function with its own contract,
+  // and that contract must hold regardless of what the current pipeline
+  // happens to be able to construct.
+  test('a blank output address is counted as outflow, not matched as change via a blank ownAddresses entry', () => {
+    const r = computeOutflow(
+      tx({ outputs: [{ address: '', lovelace: 5_000_000n, assets: [] }] }),
+      ['']
+    );
+    assert.equal(
+      r.netOutflowLovelace,
+      5_200_000n,
+      'a blank output address must never be classified as change, even against a blank ownAddresses entry'
+    );
+  });
+
+  test('an output address built from an invisible character is counted as outflow, not matched as change', () => {
+    const ZERO_WIDTH_SPACE = String.fromCharCode(0x200b);
+    const r = computeOutflow(
+      tx({ outputs: [{ address: ZERO_WIDTH_SPACE, lovelace: 5_000_000n, assets: [] }] }),
+      [ZERO_WIDTH_SPACE]
+    );
+    assert.equal(r.netOutflowLovelace, 5_200_000n);
+  });
+});
+
 describe('evaluate — exact limit boundaries, one lovelace either side', () => {
   test('one lovelace under the per-transaction limit is allowed', () => {
     const d = evaluate(
