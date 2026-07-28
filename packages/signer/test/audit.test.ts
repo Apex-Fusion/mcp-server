@@ -157,6 +157,29 @@ describe('committedTodayLovelace — netOutflowLovelace parsing', () => {
       'a negative entry must never subtract from the committed total'
     );
   });
+
+  test('a malformed amount does not abort processing of later signed entries (mutation guard: continue vs break)', () => {
+    // Every other bad-amount test above appends the malformed entry LAST, so
+    // it cannot tell a `continue` (skip this entry, keep summing) from a
+    // `break` (stop summing entirely) — nothing follows the bad entry in
+    // those tests to be lost either way. Reviewed and confirmed as a real
+    // coverage gap: mutating the `continue` inside the BigInt catch block
+    // (committedTodayLovelace()'s parse-failure branch) to a `break` still
+    // passed all 30 tests. Putting the bad entry FIRST, followed by entries
+    // that must still count, is what actually distinguishes the two: a
+    // `break` here would silently stop at the first entry and report 0
+    // instead of 12,000,000 — an under-report of everything after the bad
+    // entry, not just the bad entry itself.
+    const log = new AuditLog(logPath);
+    log.append(entry({ netOutflowLovelace: 'not-a-number' }));
+    log.append(entry({ netOutflowLovelace: '5000000' }));
+    log.append(entry({ netOutflowLovelace: '7000000' }));
+    assert.equal(
+      log.committedTodayLovelace(),
+      12_000_000n,
+      'entries after a malformed one must still be summed, not silently dropped'
+    );
+  });
 });
 
 describe('committedTodayLovelace — timestamp handling', () => {
@@ -333,6 +356,34 @@ describe('append() — write failure', () => {
       /audit log write failed/i
     );
     assert.equal(log.recent(10).length, 1);
+  });
+});
+
+describe('append() — durable writes (temp file + rename)', () => {
+  // append() writes to `${filePath}.tmp` and renames it over filePath rather
+  // than writing filePath directly, so that a process kill mid-write costs
+  // at most the one in-flight entry instead of truncating the whole day's
+  // history (writeFileSync truncates its target the instant it opens it,
+  // before any byte is written — see the comment on append() in audit.ts).
+  // This only helps if the temp file is actually transient; if it were left
+  // behind after every successful append, load() would still never read it
+  // (load() only ever reads filePath), but it would be visible litter next
+  // to the real log and would eventually be mistaken for something meaningful.
+  test('a completed append() leaves no stray .tmp file behind', () => {
+    const log = new AuditLog(logPath);
+    log.append(entry());
+    assert.equal(existsSync(logPath), true);
+    assert.equal(existsSync(`${logPath}.tmp`), false);
+  });
+
+  test('no stray .tmp file accumulates across repeated appends, and the log still reloads correctly', () => {
+    const log = new AuditLog(logPath);
+    log.append(entry({ txHash: 'c'.repeat(64) }));
+    log.append(entry({ txHash: 'd'.repeat(64) }));
+    log.append(entry({ txHash: 'e'.repeat(64) }));
+    assert.equal(existsSync(`${logPath}.tmp`), false);
+    assert.equal(JSON.parse(readFileSync(logPath, 'utf8')).length, 3);
+    assert.equal(new AuditLog(logPath).recent(10).length, 3);
   });
 });
 

@@ -19,7 +19,17 @@
 // of bug most likely to be handled upstream by assuming zero — which would
 // silently defeat the daily limit. append() is the one exception: see its
 // own comment for why a write failure there throws instead of swallowing.
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+//
+// CONTRACT for callers of append(): it can throw. If you wrap it in
+// try/catch — a reasonable instinct, since an uncaught throw from an audit
+// module makes for an ugly tool-call failure — catching that throw must NOT
+// be followed by still returning a signature you already produced. append()
+// is normally called immediately after a transaction is signed; catching its
+// throw and returning the signature anyway reproduces exactly the failure
+// this module exists to prevent, just one call site later: a real signature
+// reaches the caller while no durable record of it exists on disk, so the
+// next process's committedTodayLovelace() will never count it.
+import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 
 export interface AuditEntry {
   timestamp: string;
@@ -79,6 +89,11 @@ export class AuditLog {
     }
   }
 
+  /**
+   * Persists `entry`. Can throw if the log cannot be durably written — see
+   * the CONTRACT note at the top of this file before wrapping this in
+   * try/catch.
+   */
   append(entry: AuditEntry): void {
     // Pushed before the write is attempted: if the write below fails, this
     // process's own in-memory state (committedTodayLovelace(), recent())
@@ -86,27 +101,44 @@ export class AuditLog {
     // would under-count even within this same process, which would be worse
     // than the cross-restart gap discussed below.
     this.entries.push(entry);
+
+    // Written to a temp file and renamed into place, rather than written
+    // directly to this.filePath, to survive a process kill mid-write (power
+    // loss, OOM kill — not a normal error path, but a real one for a
+    // long-running signer). Writing this.filePath directly has two problems
+    // a temp file avoids: writeFileSync truncates its target the moment it
+    // opens it, before a single byte is written, so a kill right after that
+    // truncation would destroy the entire existing log, not just fail to add
+    // the new entry; and even a completed write can leave the file
+    // half-written if the kill lands mid-syscall. Neither can happen to
+    // this.filePath here, because this.filePath is never opened for writing
+    // at all — only tmpPath is. The rename that publishes tmpPath over
+    // this.filePath is a single directory-entry update on the same
+    // filesystem, which POSIX and Windows both perform atomically: a kill
+    // during the rename itself cannot leave this.filePath half-written
+    // either, it is simply still the old complete file or already the new
+    // complete one. The only entry a kill can cost is the one in flight —
+    // shrinking the worst case from "lose the whole day's history" to "lose
+    // at most this one entry", which is the same entry append() already
+    // cannot guarantee past a hard kill regardless of persistence strategy.
+    const tmpPath = `${this.filePath}.tmp`;
     try {
-      writeFileSync(this.filePath, JSON.stringify(this.entries, null, 2) + '\n');
+      writeFileSync(tmpPath, JSON.stringify(this.entries, null, 2) + '\n');
+      renameSync(tmpPath, this.filePath);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[audit] could not write ${this.filePath}: ${message}`);
-      // Deliberately rethrown rather than swallowed. Swallowing would make
-      // append() return normally — a plausible-looking success — while the
-      // entry silently exists only in this process's memory. That is fine
-      // until the next restart: a fresh AuditLog reloads from disk, does not
-      // find this entry, and committedTodayLovelace() under-reports by
-      // exactly its amount. For a 'signed' entry that is precisely the
-      // failure this module exists to prevent — it raises the effective
-      // daily cap with no visible symptom until someone goes looking. Making
-      // the write failure loud and synchronous, at the moment it happens,
-      // is the fail-closed choice: the caller finds out now, instead of a
-      // future process finding out by silently allowing more spend than
-      // intended. This does mean a write failure can surface as a thrown
-      // error at the call site (e.g. the tool call that just signed a
-      // transaction); the caller is expected to treat that as "the signature
-      // was produced but its audit record was not durably saved" and act
-      // accordingly, not to retry blindly.
+      // Deliberately rethrown rather than swallowed — see the CONTRACT note
+      // at the top of this file for what a catching caller must not do.
+      // Swallowing would make append() return normally — a plausible-
+      // looking success — while the entry silently exists only in this
+      // process's memory. That is fine until the next restart: a fresh
+      // AuditLog reloads from disk, does not find this entry, and
+      // committedTodayLovelace() under-reports by exactly its amount. For a
+      // 'signed' entry that is precisely the failure this module exists to
+      // prevent — it raises the effective daily cap with no visible symptom
+      // until someone goes looking. Making the write failure loud and
+      // synchronous, at the moment it happens, is the fail-closed choice.
       throw new Error(`Audit log write failed (entry kept in memory only, not persisted): ${message}`);
     }
   }
