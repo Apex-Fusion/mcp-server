@@ -184,7 +184,7 @@ TDD throughout: failing test before implementation, every PR.
 | PR | Content | Breaks testnet |
 |---|---|---|
 | **1** | CI harness: build + unit tests. Ships this design doc into `docs/architecture/` so reviewers have the rationale | no |
-| **2** | MCP SDK upgrade + fix 8 type errors + restructure tool registration + **typecheck becomes a hard gate** | no |
+| **2** | Fix the 8 type errors (import Zod via `zod/v4`) + **typecheck becomes a hard gate** | no |
 | **3** | Workspace scaffolding — pure `git mv`, zero logic change, validated by PR 1–2 CI | no |
 | **4** | **Signer package** (purely additive): `KeySource`, decode, `PolicyEngine`, audit, 4 tools. Heavy TDD | no |
 | **5** | Builder hardening: auth (enforced when configured), per-identity rate limits, `submit_transaction`, `await_transaction` | no |
@@ -240,7 +240,11 @@ Verified locally on Windows 11, **Node v25.8.0 / npm 11.11.0**: `npm ci` clean i
 
 CI only runs `npm run build`, and `tsup`/esbuild strips types without checking them, so this has never been caught.
 
-**This corrects an earlier misattribution.** The `@ts-nocheck` headers are attributed in-code to "Cardano WASM imports," but the real cause is `server.tool()` generic inference exceeding TypeScript's instantiation depth on rich Zod schemas — the same failure leaking out of the one file lacking the escape hatch. Removing `@ts-nocheck` therefore requires restructuring tool registration, not a cleanup pass. Suspected root cause is the stale `@modelcontextprotocol/sdk@^1.4.1`, which would also explain the deprecated SSE transport — **unverified; PR 2 opens with a timeboxed spike.**
+**This corrects an earlier misattribution.** The `@ts-nocheck` headers are attributed in-code to "Cardano WASM imports," but the real cause is `server.tool()` generic inference exceeding TypeScript's instantiation depth on rich Zod schemas — the same failure leaking out of the one file lacking the escape hatch.
+
+**Root cause, resolved (PR 2).** The initial hypothesis — a stale `@modelcontextprotocol/sdk@^1.4.1` — was wrong: `^1.4.1` is the declared *range*, and npm resolves it to 1.27.1. The actual cause is that the app imported Zod 3 (`from "zod"`) while the SDK expects Zod 4; its `ZodRawShapeCompat` dual-compat type degrades on Zod 3 schemas, and anything richer than a bare `z.string()` exceeds the instantiation limit. The TS2769 is a downstream symptom, not a second defect. Ruled out by experiment before landing the fix: upgrading the SDK to 1.29.0, a duplicate Zod in the tree, pinning Zod 3.24.4, `moduleResolution: bundler`/`nodenext`, the newer `registerTool` API, and hoisting schemas to a `const`. The fix is importing via the `zod/v4` subpath — already shipped inside `zod@3.25.76` — so no dependency change was needed.
+
+**Accepted trade-off.** `zod/v4` routes schemas through a different JSON Schema serializer than v3 (the SDK uses the vendored `zod-to-json-schema` for v3, Zod's native `toJSONSchema` for v4). Consequently **no tool advertises `additionalProperties: false` any more**, where the v3 path emitted it. All three tool modules were converted together so the 23-tool surface stays uniform rather than split. Runtime enforcement is unaffected — missing required arguments are still rejected, and extra keys were already stripped under v3. `test/smoke/tool-schemas.snapshot.json` pins the resulting surface so any further drift is deliberate.
 
 ## 13. Residual risks
 
@@ -252,8 +256,6 @@ v1 mitigation: all asset movements are decoded, logged, and returned in the poli
 
 **Prompt injection is mitigated, not eliminated.** The signer refuses transactions violating policy, but an injected LLM can still cause any transaction *within* policy. Recipient allowlisting is the next lever.
 
-**SDK upgrade may not resolve TS2589.** PR 2's scope is contingent on the spike; if the upgrade does not fix it, fall back to extracting schemas into typed constants and re-scope PR 2.
-
 ## 14. Open items
 
-1. **PR 2 spike result** determines whether the SDK upgrade is in scope or the type errors are patched directly.
+1. **`typecheck` must be added to branch protection as a required status check.** The CI job exists and goes red on a type error, but only a repository admin can make it block a merge.

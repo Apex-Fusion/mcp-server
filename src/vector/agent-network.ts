@@ -1,7 +1,7 @@
 // @ts-nocheck
 // Agent network tools: register, discover, message, get_profile, update, deregister, transfer
 
-import { z } from "zod";
+import { z } from "zod/v4";
 import { Lucid, fromText, toText, Data, Constr, validatorToAddress, validatorToScriptHash, getAddressDetails, credentialToAddress } from '@lucid-evolution/lucid';
 import { blake2b } from '@noble/hashes/blake2b';
 import { OgmiosProvider } from './ogmios-provider.js';

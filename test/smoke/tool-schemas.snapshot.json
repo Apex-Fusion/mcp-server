@@ -1,0 +1,781 @@
+{
+  "vector_build_transaction": {
+    "type": "object",
+    "properties": {
+      "outputs": {
+        "description": "Transaction outputs",
+        "minItems": 1,
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "address": {
+              "description": "Recipient Vector address",
+              "type": "string"
+            },
+            "lovelace": {
+              "description": "Amount in lovelace (1 AP3X = 1,000,000 lovelace)",
+              "type": "number"
+            },
+            "assets": {
+              "description": "Optional native assets: { 'policyId+assetNameHex': 'quantity' }",
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "address",
+            "lovelace"
+          ]
+        }
+      },
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the signing wallet",
+        "type": "string"
+      },
+      "metadata": {
+        "description": "Optional JSON metadata (attached under label 674)",
+        "type": "string"
+      },
+      "submit": {
+        "description": "If true, sign and submit the transaction. If false/omitted, return unsigned CBOR for review.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "outputs",
+      "mnemonic"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_deploy_contract": {
+    "type": "object",
+    "properties": {
+      "scriptCbor": {
+        "description": "Compiled Plutus/Aiken script in CBOR hex format",
+        "type": "string"
+      },
+      "scriptType": {
+        "description": "Script version",
+        "type": "string",
+        "enum": [
+          "PlutusV1",
+          "PlutusV2",
+          "PlutusV3"
+        ]
+      },
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the deploying wallet",
+        "type": "string"
+      },
+      "initialDatum": {
+        "description": "Initial datum as CBOR hex. Use 'd87980' for void/unit datum. Defaults to void if omitted.",
+        "type": "string"
+      },
+      "lovelaceAmount": {
+        "description": "AP3X to lock at the script address in lovelace (default: 2,000,000 = 2 AP3X)",
+        "type": "number"
+      }
+    },
+    "required": [
+      "scriptCbor",
+      "scriptType",
+      "mnemonic"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_deregister_agent": {
+    "type": "object",
+    "properties": {
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the agent's owner wallet",
+        "type": "string"
+      },
+      "agent_id": {
+        "description": "Agent DID to deregister: did:vector:agent:{policyId}:{nftAssetName}",
+        "type": "string"
+      }
+    },
+    "required": [
+      "mnemonic",
+      "agent_id"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_discover_agents": {
+    "type": "object",
+    "properties": {
+      "capability": {
+        "description": "Filter by capability tag (e.g. 'investing', 'research')",
+        "type": "string"
+      },
+      "framework": {
+        "description": "Filter by framework (e.g. 'OpenClaw', 'LangChain', 'CrewAI')",
+        "type": "string"
+      },
+      "limit": {
+        "description": "Maximum number of agents to return (default: 20)",
+        "default": 20,
+        "type": "number"
+      }
+    },
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_dry_run": {
+    "type": "object",
+    "properties": {
+      "txCbor": {
+        "description": "Hex-encoded CBOR of a built transaction to evaluate",
+        "type": "string"
+      },
+      "outputs": {
+        "description": "If no txCbor provided, build a TX from these outputs and evaluate it",
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "address": {
+              "description": "Recipient Vector address",
+              "type": "string"
+            },
+            "lovelace": {
+              "description": "Amount in lovelace",
+              "type": "number"
+            },
+            "assets": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "address",
+            "lovelace"
+          ]
+        }
+      },
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic (required when outputs is provided)",
+        "type": "string"
+      },
+      "metadata": {
+        "description": "Optional JSON metadata when building from outputs",
+        "type": "string"
+      }
+    },
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_get_address": {
+    "type": "object",
+    "properties": {
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the wallet",
+        "type": "string"
+      }
+    },
+    "required": [
+      "mnemonic"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_get_agent_profile": {
+    "type": "object",
+    "properties": {
+      "agent_id": {
+        "description": "Agent DID: did:vector:agent:{policyId}:{nftAssetName}",
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_id"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_get_balance": {
+    "type": "object",
+    "properties": {
+      "address": {
+        "description": "Vector address to check (addr1...)",
+        "type": "string"
+      }
+    },
+    "required": [
+      "address"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_get_spend_limits": {
+    "type": "object",
+    "properties": {},
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_get_transaction_history": {
+    "type": "object",
+    "properties": {
+      "address": {
+        "description": "Vector address to query. If omitted, mnemonic is required.",
+        "type": "string"
+      },
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic (required if address is omitted)",
+        "type": "string"
+      },
+      "limit": {
+        "description": "Number of transactions to return (default: 20, max: 50)",
+        "type": "number",
+        "minimum": 1,
+        "maximum": 50
+      },
+      "offset": {
+        "description": "Offset for pagination (default: 0)",
+        "type": "number",
+        "minimum": 0
+      }
+    },
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_get_utxos": {
+    "type": "object",
+    "properties": {
+      "address": {
+        "description": "Vector address to query UTxOs for. If omitted, mnemonic is required.",
+        "type": "string"
+      },
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic (required if address is omitted)",
+        "type": "string"
+      }
+    },
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_interact_contract": {
+    "type": "object",
+    "properties": {
+      "scriptCbor": {
+        "description": "Compiled Plutus/Aiken script in CBOR hex",
+        "type": "string"
+      },
+      "scriptType": {
+        "description": "Script version",
+        "type": "string",
+        "enum": [
+          "PlutusV1",
+          "PlutusV2",
+          "PlutusV3"
+        ]
+      },
+      "action": {
+        "description": "'spend' to collect UTxOs from the script, 'lock' to send funds to it",
+        "type": "string",
+        "enum": [
+          "spend",
+          "lock"
+        ]
+      },
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the wallet",
+        "type": "string"
+      },
+      "redeemer": {
+        "description": "Redeemer as CBOR hex (required for spend, use 'd87980' for void)",
+        "type": "string"
+      },
+      "datum": {
+        "description": "Datum as CBOR hex (required for lock, use 'd87980' for void)",
+        "type": "string"
+      },
+      "lovelaceAmount": {
+        "description": "Lovelace to lock (for lock action, default: 2,000,000 = 2 AP3X)",
+        "type": "number"
+      },
+      "utxoRef": {
+        "description": "Specific UTxO to spend from (optional, otherwise spends all UTxOs at script address)",
+        "type": "object",
+        "properties": {
+          "txHash": {
+            "type": "string"
+          },
+          "outputIndex": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "txHash",
+          "outputIndex"
+        ]
+      },
+      "assets": {
+        "description": "Additional native assets for lock action: { 'policyId+assetNameHex': 'quantity' }",
+        "type": "object",
+        "propertyNames": {
+          "type": "string"
+        },
+        "additionalProperties": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "scriptCbor",
+      "scriptType",
+      "action",
+      "mnemonic"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_message_agent": {
+    "type": "object",
+    "properties": {
+      "agent_id": {
+        "description": "Recipient agent DID: did:vector:agent:{policyId}:{nftAssetName}",
+        "type": "string"
+      },
+      "message_type": {
+        "description": "Type of message",
+        "type": "string",
+        "enum": [
+          "inquiry",
+          "proposal",
+          "result"
+        ]
+      },
+      "payload": {
+        "description": "Message payload (string, max 512 chars)",
+        "type": "string",
+        "maxLength": 512
+      },
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the sending wallet",
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_id",
+      "message_type",
+      "payload",
+      "mnemonic"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_register_agent": {
+    "type": "object",
+    "properties": {
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the registering wallet",
+        "type": "string"
+      },
+      "name": {
+        "description": "Agent name (e.g. 'TradingBot', 'ResearchAgent')",
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "description": {
+        "description": "Short description of the agent's purpose",
+        "type": "string",
+        "maxLength": 256
+      },
+      "capabilities": {
+        "description": "List of capability tags (e.g. ['investing', 'research', 'environmental'])",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "framework": {
+        "description": "Framework used (e.g. 'OpenClaw', 'LangChain', 'CrewAI', 'custom')",
+        "type": "string"
+      },
+      "endpoint": {
+        "description": "A2A communication endpoint URL (or empty string if not applicable)",
+        "type": "string"
+      }
+    },
+    "required": [
+      "mnemonic",
+      "name",
+      "description",
+      "capabilities",
+      "framework",
+      "endpoint"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_self_improvement_analyze_metrics": {
+    "type": "object",
+    "properties": {
+      "focus": {
+        "description": "Analysis focus area",
+        "default": "overview",
+        "type": "string",
+        "enum": [
+          "overview",
+          "adoption",
+          "treasury",
+          "activity"
+        ]
+      }
+    },
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_self_improvement_browse": {
+    "type": "object",
+    "properties": {
+      "entity": {
+        "description": "What to browse",
+        "type": "string",
+        "enum": [
+          "proposals",
+          "critiques",
+          "endorsements",
+          "treasury"
+        ]
+      },
+      "state": {
+        "description": "Filter proposals by state: Open, Amended, Adopted, Rejected, Expired, Withdrawn",
+        "type": "string"
+      },
+      "proposalType": {
+        "description": "Filter proposals by type: ParameterChange, TreasurySpend, ProtocolUpgrade, GameActivation, GeneralSuggestion",
+        "type": "string"
+      },
+      "proposerDid": {
+        "description": "Filter by proposer DID (hex)",
+        "type": "string"
+      },
+      "proposalTxHash": {
+        "description": "Filter critiques/endorsements by the proposal they reference",
+        "type": "string"
+      }
+    },
+    "required": [
+      "entity"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_self_improvement_critique": {
+    "type": "object",
+    "properties": {
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the wallet",
+        "type": "string"
+      },
+      "agentDid": {
+        "description": "Agent DID (hex)",
+        "type": "string"
+      },
+      "proposalTxHash": {
+        "description": "TX hash of the proposal UTxO to critique",
+        "type": "string"
+      },
+      "proposalOutputIndex": {
+        "description": "Output index of the proposal UTxO",
+        "default": 0,
+        "type": "number"
+      },
+      "critiqueDocument": {
+        "description": "Full critique document as JSON string. Uploaded to IPFS via Filebase; hash and CID computed automatically.",
+        "type": "string"
+      },
+      "critiqueHash": {
+        "description": "blake2b_256 hash of critique document (64 hex chars). Required if critiqueDocument is not provided.",
+        "type": "string"
+      },
+      "critiqueType": {
+        "description": "Type of critique",
+        "type": "string",
+        "enum": [
+          "Supportive",
+          "Opposing",
+          "Amendment"
+        ]
+      },
+      "storageUri": {
+        "description": "Off-chain storage URI for the critique document. Required if critiqueDocument is not provided.",
+        "type": "string"
+      },
+      "stakeApex": {
+        "description": "AP3X to stake (minimum 10)",
+        "type": "number",
+        "minimum": 10
+      }
+    },
+    "required": [
+      "mnemonic",
+      "agentDid",
+      "proposalTxHash",
+      "critiqueType",
+      "stakeApex"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_self_improvement_endorse": {
+    "type": "object",
+    "properties": {
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the wallet",
+        "type": "string"
+      },
+      "agentDid": {
+        "description": "Agent DID (hex)",
+        "type": "string"
+      },
+      "proposalTxHash": {
+        "description": "TX hash of the proposal UTxO to endorse",
+        "type": "string"
+      },
+      "proposalOutputIndex": {
+        "description": "Output index of the proposal UTxO",
+        "default": 0,
+        "type": "number"
+      },
+      "stakeApex": {
+        "description": "AP3X to stake as endorsement (minimum 5)",
+        "type": "number",
+        "minimum": 5
+      }
+    },
+    "required": [
+      "mnemonic",
+      "agentDid",
+      "proposalTxHash",
+      "stakeApex"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_self_improvement_submit_proposal": {
+    "type": "object",
+    "properties": {
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the wallet",
+        "type": "string"
+      },
+      "agentDid": {
+        "description": "Agent DID (hex) - the asset name from Agent Registry NFT",
+        "type": "string"
+      },
+      "proposalDocument": {
+        "description": "Full proposal document as JSON string. Uploaded to IPFS via Filebase; hash and CID computed automatically. If provided, proposalHash and storageUri are ignored.",
+        "type": "string"
+      },
+      "proposalHash": {
+        "description": "blake2b_256 hash of proposal document (64 hex chars). Required if proposalDocument is not provided.",
+        "type": "string"
+      },
+      "proposalType": {
+        "description": "Category of the proposal",
+        "type": "string",
+        "enum": [
+          "ParameterChange",
+          "TreasurySpend",
+          "ProtocolUpgrade",
+          "GameActivation",
+          "GeneralSuggestion"
+        ]
+      },
+      "storageUri": {
+        "description": "Off-chain storage URI for the full proposal (IPFS CID or OriginTrail UAL). Required if proposalDocument is not provided.",
+        "type": "string"
+      },
+      "stakeApex": {
+        "description": "AP3X to stake (minimum 25)",
+        "type": "number",
+        "minimum": 25
+      },
+      "typeParams": {
+        "description": "Type-specific parameters (required for ParameterChange and TreasurySpend)",
+        "type": "object",
+        "properties": {
+          "paramName": {
+            "type": "string"
+          },
+          "currentValue": {
+            "type": "number"
+          },
+          "proposedValue": {
+            "type": "number"
+          },
+          "amount": {
+            "type": "number"
+          },
+          "recipientDescription": {
+            "type": "string"
+          },
+          "upgradeHash": {
+            "type": "string"
+          },
+          "gameId": {
+            "type": "number"
+          }
+        }
+      },
+      "priority": {
+        "description": "Priority level (Emergency requires higher stake and reputation)",
+        "default": "Standard",
+        "type": "string",
+        "enum": [
+          "Standard",
+          "Emergency"
+        ]
+      }
+    },
+    "required": [
+      "mnemonic",
+      "agentDid",
+      "proposalType",
+      "stakeApex"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_send_apex": {
+    "type": "object",
+    "properties": {
+      "recipientAddress": {
+        "description": "Recipient Vector address (addr1...)",
+        "type": "string"
+      },
+      "amount": {
+        "description": "Amount of AP3X to send",
+        "type": "number",
+        "minimum": 1
+      },
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the sending wallet",
+        "type": "string"
+      },
+      "metadata": {
+        "description": "Optional transaction metadata in JSON format",
+        "type": "string"
+      },
+      "unsigned_only": {
+        "description": "If true, return unsigned TX CBOR without signing or submitting",
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "recipientAddress",
+      "amount",
+      "mnemonic"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_send_tokens": {
+    "type": "object",
+    "properties": {
+      "recipientAddress": {
+        "description": "Recipient Vector address (addr1...)",
+        "type": "string"
+      },
+      "policyId": {
+        "description": "Token policy ID",
+        "type": "string"
+      },
+      "assetName": {
+        "description": "Asset name (can be empty for policy-only tokens)",
+        "type": "string"
+      },
+      "amount": {
+        "description": "Amount of tokens to send",
+        "type": "string"
+      },
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the sending wallet",
+        "type": "string"
+      },
+      "adaAmount": {
+        "description": "Optional AP3X to include (uses minimum required if not specified)",
+        "type": "number"
+      },
+      "unsigned_only": {
+        "description": "If true, return unsigned TX CBOR without signing or submitting",
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "recipientAddress",
+      "policyId",
+      "assetName",
+      "amount",
+      "mnemonic"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_transfer_agent": {
+    "type": "object",
+    "properties": {
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the current owner's wallet",
+        "type": "string"
+      },
+      "agent_id": {
+        "description": "Agent DID to transfer: did:vector:agent:{policyId}:{nftAssetName}",
+        "type": "string"
+      },
+      "new_owner_address": {
+        "description": "Bech32 address of the new owner (must be a verification key address, not a script address)",
+        "type": "string"
+      }
+    },
+    "required": [
+      "mnemonic",
+      "agent_id",
+      "new_owner_address"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_update_agent": {
+    "type": "object",
+    "properties": {
+      "mnemonic": {
+        "description": "15 or 24-word BIP39 mnemonic for the agent's owner wallet",
+        "type": "string"
+      },
+      "agent_id": {
+        "description": "Agent DID to update: did:vector:agent:{policyId}:{nftAssetName}",
+        "type": "string"
+      },
+      "name": {
+        "description": "New agent name",
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "description": {
+        "description": "New description",
+        "type": "string",
+        "maxLength": 256
+      },
+      "capabilities": {
+        "description": "New capability tags (replaces existing list)",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "framework": {
+        "description": "New framework identifier",
+        "type": "string"
+      },
+      "endpoint": {
+        "description": "New A2A endpoint URL (or empty string to clear)",
+        "type": "string"
+      }
+    },
+    "required": [
+      "mnemonic",
+      "agent_id"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

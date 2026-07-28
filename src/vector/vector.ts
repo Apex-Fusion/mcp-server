@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v4";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Lucid, fromText, Data, applyDoubleCborEncoding, validatorToAddress, validatorToScriptHash, getAddressDetails } from '@lucid-evolution/lucid';
 import type { SpendingValidator } from '@lucid-evolution/lucid';
@@ -924,7 +924,7 @@ ${log.length > 0 ? `## Recent Transactions (last ${Math.min(5, log.length)}):\n$
       outputs: z.array(z.object({
         address: z.string().describe("Recipient Vector address"),
         lovelace: z.number().describe("Amount in lovelace (1 AP3X = 1,000,000 lovelace)"),
-        assets: z.record(z.string()).optional().describe("Optional native assets: { 'policyId+assetNameHex': 'quantity' }"),
+        assets: z.record(z.string(), z.string()).optional().describe("Optional native assets: { 'policyId+assetNameHex': 'quantity' }"),
       })).min(1).describe("Transaction outputs"),
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the signing wallet"),
       metadata: z.string().optional().describe("Optional JSON metadata (attached under label 674)"),
@@ -995,7 +995,7 @@ Use vector_dry_run with this CBOR to simulate, or call vector_build_transaction 
       outputs: z.array(z.object({
         address: z.string().describe("Recipient Vector address"),
         lovelace: z.number().describe("Amount in lovelace"),
-        assets: z.record(z.string()).optional(),
+        assets: z.record(z.string(), z.string()).optional(),
       })).optional().describe("If no txCbor provided, build a TX from these outputs and evaluate it"),
       mnemonic: z.string().optional().describe("15 or 24-word BIP39 mnemonic (required when outputs is provided)"),
       metadata: z.string().optional().describe("Optional JSON metadata when building from outputs"),
@@ -1262,7 +1262,7 @@ Funds locked at the script address. Use vector_interact_contract to interact wit
         txHash: z.string(),
         outputIndex: z.number(),
       }).optional().describe("Specific UTxO to spend from (optional, otherwise spends all UTxOs at script address)"),
-      assets: z.record(z.string()).optional().describe("Additional native assets for lock action: { 'policyId+assetNameHex': 'quantity' }"),
+      assets: z.record(z.string(), z.string()).optional().describe("Additional native assets for lock action: { 'policyId+assetNameHex': 'quantity' }"),
     },
     async ({ scriptCbor, scriptType, action, mnemonic, redeemer, datum, lovelaceAmount, utxoRef, assets }) => {
       const rateCheck = rateLimiter.check();
