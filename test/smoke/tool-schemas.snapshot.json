@@ -14,7 +14,7 @@
               "type": "string"
             },
             "lovelace": {
-              "description": "Amount in lovelace (1 ADA = 1,000,000 lovelace)",
+              "description": "Amount in lovelace (1 AP3X = 1,000,000 lovelace)",
               "type": "number"
             },
             "assets": {
@@ -78,7 +78,7 @@
         "type": "string"
       },
       "lovelaceAmount": {
-        "description": "ADA to lock at the script address in lovelace (default: 2,000,000 = 2 ADA)",
+        "description": "AP3X to lock at the script address in lovelace (default: 2,000,000 = 2 AP3X)",
         "type": "number"
       }
     },
@@ -294,7 +294,7 @@
         "type": "string"
       },
       "lovelaceAmount": {
-        "description": "Lovelace to lock (for lock action, default: 2,000,000 = 2 ADA)",
+        "description": "Lovelace to lock (for lock action, default: 2,000,000 = 2 AP3X)",
         "type": "number"
       },
       "utxoRef": {
@@ -560,7 +560,7 @@
         "type": "string"
       },
       "agentDid": {
-        "description": "Agent DID (hex) — the asset name from Agent Registry NFT",
+        "description": "Agent DID (hex) - the asset name from Agent Registry NFT",
         "type": "string"
       },
       "proposalDocument": {
@@ -644,7 +644,7 @@
         "type": "string"
       },
       "amount": {
-        "description": "Amount of ADA to send",
+        "description": "Amount of AP3X to send",
         "type": "number",
         "minimum": 1
       },
@@ -693,7 +693,7 @@
         "type": "string"
       },
       "adaAmount": {
-        "description": "Optional ADA to include (uses minimum required if not specified)",
+        "description": "Optional AP3X to include (uses minimum required if not specified)",
         "type": "number"
       },
       "unsigned_only": {
