@@ -111,6 +111,9 @@ export function resolveIdentity(
   // secret via naive comparison); it does not fit a multi-key lookup without a linear scan
   // over every configured token on every request, which is a worse trade for a risk that
   // is not actually present here.
+  // Caveat: this relies on V8 hashing the whole input before any per-key comparison, which
+  // is an engine implementation detail, not an ECMAScript guarantee - worth re-checking if
+  // this ever runs on a different JS engine.
   const identity = config.identities.get(match[1]);
   if (!identity) {
     // Never echo the supplied value.

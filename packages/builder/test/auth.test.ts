@@ -12,6 +12,16 @@ describe('loadAuthConfig', () => {
     assert.equal(loadAuthConfig({ MCP_AUTH_TOKENS: '   ' }).enabled, false);
   });
 
+  // "Whitespace" above was only ever exercised with an ASCII space. .trim() strips a much
+  // wider Unicode set (the WhiteSpace + LineTerminator productions), so pin that the same
+  // disabled path is reached for representative non-ASCII members of that set too - NBSP,
+  // BOM and the line separator all collapse to '' under trim exactly like an ASCII space.
+  test('is disabled when MCP_AUTH_TOKENS is a non-ASCII whitespace character', () => {
+    assert.equal(loadAuthConfig({ MCP_AUTH_TOKENS: '\u00A0' }).enabled, false); // NBSP
+    assert.equal(loadAuthConfig({ MCP_AUTH_TOKENS: '\uFEFF' }).enabled, false); // BOM
+    assert.equal(loadAuthConfig({ MCP_AUTH_TOKENS: '\u2028' }).enabled, false); // line separator
+  });
+
   test('parses a bare token', () => {
     const c = loadAuthConfig({ MCP_AUTH_TOKENS: 'secret-one' });
     assert.equal(c.enabled, true);
@@ -122,7 +132,7 @@ describe('loadAuthConfig — adversarial: delimiter and charset edge cases', () 
 
   test('a zero-width space (U+200B) in a token is not a bug: preserved by trim, ' +
     'excluded from neither \\s nor \\S, so config and header matching stay consistent', () => {
-    const token = 'tok-a​';
+    const token = 'tok-a\u200B'; // trailing zero-width space (U+200B)
     const c = loadAuthConfig({ MCP_AUTH_TOKENS: `bob:${token}` });
     assert.deepStrictEqual(resolveIdentity(`Bearer ${token}`, c), { ok: true, identity: 'bob' });
     // The visually-identical token WITHOUT the invisible character must NOT match.
@@ -141,7 +151,7 @@ describe('loadAuthConfig — adversarial: delimiter and charset edge cases', () 
   });
 
   test('rejects a token containing an embedded non-breaking space', () => {
-    assert.throws(() => loadAuthConfig({ MCP_AUTH_TOKENS: 'alice:tok nbsp' }), /whitespace/i);
+    assert.throws(() => loadAuthConfig({ MCP_AUTH_TOKENS: 'alice:tok\u00A0nbsp' }), /whitespace/i);
   });
 
   test('a comma inside an intended token silently fragments into extra, unintended entries ' +
@@ -196,6 +206,77 @@ describe('loadAuthConfig — adversarial: identity mapping', () => {
     assert.equal(c.identities.get('constructor'), '__proto__');
     assert.deepStrictEqual(resolveIdentity('Bearer constructor', c), { ok: true, identity: '__proto__' });
     assert.equal(Object.prototype.hasOwnProperty.call({}, 'polluted'), false);
+  });
+});
+
+describe('loadAuthConfig — adversarial: config-error messages never leak the value that triggered them', () => {
+  // Every throw site in loadAuthConfig is a candidate for exactly the leak the file's own
+  // header forbids ("A token is a secret. It must never appear in ... an error message").
+  // Each test below places a distinctive sentinel where it would be in scope for that
+  // specific throw site, confirms the right error fires (so the test can't pass by hitting
+  // some unrelated throw), and confirms the sentinel is absent from the message. See
+  // pr5-task-1-report.md for a manual mutation re-run proving each test catches its site.
+  const SENTINEL = 'SENTINEL-must-never-appear-in-any-message';
+
+  test('the empty-token error never echoes the label that triggered it', () => {
+    // Trailing colon, no token: the sentinel lands in `label`, not `token` (token is ''
+    // by definition of this failure) - `label` is the variable a careless "interpolate
+    // whatever the operator typed" edit would most plausibly reach for here.
+    assert.throws(() => loadAuthConfig({ MCP_AUTH_TOKENS: `${SENTINEL}:` }), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /empty token/i);
+      assert.ok(!err.message.includes(SENTINEL), 'must not echo the sentinel label');
+      return true;
+    });
+  });
+
+  test('the embedded-whitespace error never echoes the token that triggered it', () => {
+    assert.throws(() => loadAuthConfig({ MCP_AUTH_TOKENS: `alice:${SENTINEL} has a space` }), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /whitespace/i);
+      assert.ok(!err.message.includes(SENTINEL), 'must not echo the sentinel token');
+      return true;
+    });
+  });
+
+  test('the duplicate-token error never echoes the token that triggered it', () => {
+    assert.throws(() => loadAuthConfig({ MCP_AUTH_TOKENS: `alice:${SENTINEL},bob:${SENTINEL}` }), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /duplicate/i);
+      assert.ok(!err.message.includes(SENTINEL), 'must not echo the sentinel token');
+      return true;
+    });
+  });
+
+  test('the no-usable-tokens error never echoes the raw value that triggered it', () => {
+    // Unlike the three tests above, this throw fires only when EVERY comma-delimited
+    // segment trims to '' - which structurally means `raw` can never hold alphanumeric
+    // content at this point (any non-blank segment either succeeds, making this throw
+    // unreachable, or fails an earlier check first - see the report for the full proof).
+    // There is no way to smuggle a realistic secret in here, so the "sentinel" is a
+    // distinctive whitespace/comma pattern instead - still enough to prove the message
+    // never echoes `raw`, which is the invariant a careless `${raw}` interpolation would
+    // violate. Commas sit at both ends deliberately: loadAuthConfig's own top-level
+    // .trim() would otherwise strip a leading/trailing whitespace char, making the `raw`
+    // actually in scope at the throw site differ from this literal. All characters are
+    // written as \u escapes rather than literal bytes, deliberately - to keep this file's
+    // source free of invisible/exotic characters that are easy to mis-transcribe.
+    const distinctiveBlank = ',\t,\u00A0,\uFEFF,'; // comma, tab, comma, NBSP, comma, BOM, comma
+    assert.throws(() => loadAuthConfig({ MCP_AUTH_TOKENS: distinctiveBlank }), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /no usable/i);
+      assert.ok(!err.message.includes(distinctiveBlank), 'must not echo the raw env value verbatim');
+      // Belt-and-braces beyond the verbatim check above: a well-meaning but still-unsafe
+      // interpolation might run `raw` through JSON.stringify first (e.g. to make control
+      // characters readable in a log). That escapes the tab to the two-char sequence \t,
+      // which breaks the verbatim substring check above - but JSON.stringify leaves NBSP
+      // and BOM as literal, unescaped bytes, so checking for either of those individually
+      // still catches it. Confirmed empirically before relying on it: JSON.stringify of
+      // this exact distinctiveBlank value contains NBSP and BOM unescaped, tab escaped.
+      assert.ok(!err.message.includes('\u00A0'), 'must not echo the raw env value\'s NBSP, even JSON-escaped');
+      assert.ok(!err.message.includes('\uFEFF'), 'must not echo the raw env value\'s BOM, even JSON-escaped');
+      return true;
+    });
   });
 });
 
