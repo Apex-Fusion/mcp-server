@@ -7,8 +7,8 @@
   "scripts": {
     "postinstall": "ln -sf ../../../libsodium-sumo/dist/modules-sumo-esm/libsodium-sumo.mjs node_modules/libsodium-wrappers-sumo/dist/modules-sumo-esm/libsodium-sumo.mjs 2>/dev/null || true",
     "clean": "rm -rf packages/*/build",
-    "build": "npm run build --workspace=@apexfusion/vector-mcp-builder",
-    "typecheck": "tsc --noEmit -p packages/shared && tsc --noEmit -p packages/builder",
+    "build": "npm run build --workspace=@apexfusion/vector-mcp-builder && npm run build --workspace=@apexfusion/vector-mcp-signer",
+    "typecheck": "tsc --noEmit -p packages/shared && tsc --noEmit -p packages/builder && tsc --noEmit -p packages/signer",
     "start": "node packages/builder/build/index.js",
     "test": "npm run test:unit",
     "test:unit": "node --import tsx --test packages/*/test/*.test.ts",
