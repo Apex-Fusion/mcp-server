@@ -54,6 +54,71 @@ export async function stopServer(ctx: ServerContext): Promise<void> {
   ctx.process.kill('SIGTERM');
 }
 
+export interface RawServerHandle {
+  process: ChildProcess;
+  port: number;
+  /** Snapshot of everything the server has written to stderr so far. */
+  stderr(): string;
+}
+
+/**
+ * Spawn the built server directly, without connecting an SDK client.
+ *
+ * startServer() above always connects a default Client with no Authorization
+ * header, which is exactly right for the pre-existing suites (auth is never
+ * configured there) but wrong for auth-gating/rate-limit tests: those need
+ * MCP_AUTH_TOKENS set, several distinct Authorization headers driven by hand
+ * (including deliberately-wrong ones), and a captured stderr stream to prove
+ * no token leaks into it. A bare "add an env param" to startServer() can't
+ * serve those needs without either connecting a client that immediately 401s
+ * (auth on, no header) or changing ServerContext's shape for every existing
+ * caller - so this is a separate, additive function instead.
+ */
+export async function spawnServer(envOverrides: Record<string, string> = {}): Promise<RawServerHandle> {
+  // Different port range than startServer()'s 3100-3999, and retried on
+  // failure: this suite spawns more servers per run than the pre-existing
+  // ones, so a single random draw is more likely to collide under CI
+  // parallelism (multiple test files spawning concurrently).
+  const maxAttempts = 5;
+  let lastErr: Error | undefined;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const port = 4100 + Math.floor(Math.random() * 1800);
+    const child = spawn('node', ['build/index.js'], {
+      cwd: PROJECT_ROOT,
+      env: { ...process.env, PORT: String(port), ...envOverrides },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+
+    let stderrBuf = '';
+    child.stderr!.on('data', (chunk: Buffer) => { stderrBuf += chunk.toString(); });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Server start timeout (60s)')), 60_000);
+        const onData = () => {
+          if (stderrBuf.includes('listening on port')) {
+            clearTimeout(timeout);
+            child.stderr!.off('data', onData);
+            resolve();
+          }
+        };
+        child.stderr!.on('data', onData);
+        child.on('error', (err) => { clearTimeout(timeout); reject(err); });
+        child.on('exit', (code) => { clearTimeout(timeout); reject(new Error(`Server exited with code ${code}. stderr so far: ${stderrBuf}`)); });
+      });
+      return { process: child, port, stderr: () => stderrBuf };
+    } catch (err) {
+      lastErr = err as Error;
+      try { child.kill('SIGKILL'); } catch {}
+    }
+  }
+  throw lastErr ?? new Error('spawnServer: exhausted retries');
+}
+
+export async function stopRawServer(handle: RawServerHandle): Promise<void> {
+  handle.process.kill('SIGTERM');
+}
+
 export async function callTool(client: Client, name: string, args: Record<string, unknown> = {}): Promise<string> {
   const result = await client.callTool({ name, arguments: args });
   const content = result.content as Array<{ type: string; text?: string }>;

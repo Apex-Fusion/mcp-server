@@ -43,6 +43,11 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=12288
 
+      - name: Auth gating and rate-limit integration tests
+        run: npm run test:integration:auth
+        env:
+          NODE_OPTIONS: --max-old-space-size=12288
+
   typecheck:
     runs-on: ubuntu-latest
     timeout-minutes: 15
