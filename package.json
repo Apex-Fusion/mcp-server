@@ -13,6 +13,7 @@
     "test": "npm run test:unit",
     "test:unit": "node --import tsx --test packages/*/test/*.test.ts",
     "test:smoke": "npm run build && node --import tsx --test packages/builder/test/smoke/*.test.ts",
+    "test:smoke:signer": "npm run build && node --import tsx --test packages/signer/test/smoke/*.test.ts",
     "test:integration": "npm run build && node --import tsx --test packages/builder/test/integration/*.test.ts"
   },
   "devDependencies": {

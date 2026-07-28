@@ -43,6 +43,11 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=12288
 
+      - name: Signer smoke test
+        run: npm run test:smoke:signer
+        env:
+          NODE_OPTIONS: --max-old-space-size=12288
+
   typecheck:
     runs-on: ubuntu-latest
     timeout-minutes: 15
