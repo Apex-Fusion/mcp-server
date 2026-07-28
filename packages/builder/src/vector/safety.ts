@@ -1,14 +1,17 @@
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import type { SpendLimits, SpendStatus, AuditEntry } from './types.js';
+import type { SpendLimits, SpendStatus, AuditEntry } from '@apexfusion/vector-mcp-shared/types';
 
 const VECTOR_SPEND_LIMIT_PER_TX = parseInt(process.env.VECTOR_SPEND_LIMIT_PER_TX || '100000000'); // 100 AP3X
 const VECTOR_SPEND_LIMIT_DAILY = parseInt(process.env.VECTOR_SPEND_LIMIT_DAILY || '500000000'); // 500 AP3X
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const projectRoot = resolve(__dirname, '../..');
+// From the bundled entrypoint's directory (packages/builder/build), three levels
+// up lands on the repo root, which is where .env.example and the README document
+// the default audit log path (./vector-audit-log.json) as living.
+const projectRoot = resolve(__dirname, '../../..');
 
 export class SafetyLayer {
   private dailySpent: number = 0;

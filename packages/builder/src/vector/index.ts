@@ -11,4 +11,4 @@ export type {
   VectorTransactionHistoryResult,
   VectorDeployContractResult,
   VectorInteractContractResult,
-} from './types.js';
+} from '@apexfusion/vector-mcp-shared/types';

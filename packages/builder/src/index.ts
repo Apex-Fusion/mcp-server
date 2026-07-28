@@ -9,7 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Check for .env file
-const envPath = resolve(__dirname, '../.env');
+const envPath = resolve(__dirname, '../../../.env');
 console.error('Looking for .env file at:', envPath);
 console.error('.env file exists:', existsSync(envPath));
 

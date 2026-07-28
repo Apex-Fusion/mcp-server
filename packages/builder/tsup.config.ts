@@ -7,5 +7,6 @@ export default defineConfig({
   outDir: "build",
   clean: true,
   splitting: false,
+  noExternal: ["@apexfusion/vector-mcp-shared"],
   banner: { js: "#!/usr/bin/env node" },
 });

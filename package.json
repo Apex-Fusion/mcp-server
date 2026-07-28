@@ -1,65 +1,36 @@
 {
-  "name": "@apexfusion/mcp-server",
+  "name": "@apexfusion/mcp-server-monorepo",
   "version": "0.1.0",
-  "main": "index.js",
+  "private": true,
   "type": "module",
-  "bin": {
-    "mcp-server": "./build/index.js"
-  },
+  "workspaces": ["packages/*"],
   "scripts": {
     "postinstall": "ln -sf ../../../libsodium-sumo/dist/modules-sumo-esm/libsodium-sumo.mjs node_modules/libsodium-wrappers-sumo/dist/modules-sumo-esm/libsodium-sumo.mjs 2>/dev/null || true",
-    "clean": "rm -rf build",
-    "build": "tsup && chmod +x build/index.js",
-    "typecheck": "tsc --noEmit --incremental",
-    "start": "node build/index.js",
+    "clean": "rm -rf packages/*/build",
+    "build": "npm run build --workspace=@apexfusion/vector-mcp-builder",
+    "typecheck": "tsc --noEmit -p packages/shared && tsc --noEmit -p packages/builder",
+    "start": "node packages/builder/build/index.js",
     "test": "npm run test:unit",
-    "test:unit": "node --import tsx --test test/unit/*.test.ts",
-    "test:integration": "npm run build && node --import tsx --test test/integration/*.test.ts",
-    "test:smoke": "npm run build && node --import tsx --test test/smoke/*.test.ts"
-  },
-  "files": [
-    "build"
-  ],
-  "keywords": [
-    "vector",
-    "mcp",
-    "blockchain",
-    "cardano",
-    "apex-fusion",
-    "ai-agent",
-    "utxo"
-  ],
-  "author": "Apex Fusion",
-  "license": "ISC",
-  "description": "MCP server for Vector - AI agent interface for the Apex Fusion eUTXO L2",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/Apex-Fusion/mcp-server.git"
-  },
-  "homepage": "https://apex-fusion.github.io/vector-ai-documentation/",
-  "bugs": {
-    "url": "https://github.com/Apex-Fusion/mcp-server/issues"
-  },
-  "engines": {
-    "node": ">=14.0.0"
-  },
-  "private": false,
-  "publishConfig": {
-    "registry": "https://registry.npmjs.org/"
-  },
-  "dependencies": {
-    "@aws-sdk/client-s3": "^3.1027.0",
-    "@lucid-evolution/lucid": "^0.4.29",
-    "@modelcontextprotocol/sdk": "^1.4.1",
-    "@noble/hashes": "^1.7.1",
-    "cross-fetch": "^4.0.0",
-    "dotenv": "^16.4.5",
-    "zod": "^3.24.1"
+    "test:unit": "node --import tsx --test packages/*/test/*.test.ts",
+    "test:smoke": "npm run build && node --import tsx --test packages/builder/test/smoke/*.test.ts",
+    "test:integration": "npm run build && node --import tsx --test packages/builder/test/integration/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "ISC",
+  "author": "Apex Fusion",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Apex-Fusion/mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Apex-Fusion/mcp-server/issues"
   }
 }
