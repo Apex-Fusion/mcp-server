@@ -7,8 +7,11 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import * as CML from '@anastasia-labs/cardano-multiplatform-lib-nodejs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { MnemonicKeySource } from '../../src/keysource.ts';
 import { loadConfig } from '../../src/config.ts';
+import { signTransaction } from '../../src/sign.ts';
 
 const TEST_MNEMONIC =
   'test walk nut penalty hip pave soap entry language right filter choice';
@@ -236,6 +239,155 @@ function buildInPolicyTxCbor(payToAddress: string, feeLovelace = 200_000n, outpu
   return tx.to_cbor_hex();
 }
 
+// A minimal hand-rolled Transport, used ONLY by the stdout-purity test below.
+// StdioClientTransport (used everywhere else in this file) does not expose
+// the child process's raw stdout stream through any public API — only
+// `.stderr` and `.pid` are getters on it, by design, since a normal caller
+// should only ever see fully parsed messages. That is exactly the wrong tool
+// for this test: verified directly against the SDK's own source
+// (node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js and
+// client/stdio.js) that `ReadBuffer.readMessage()` advances its internal
+// buffer PAST a line before attempting to parse it, so a line that fails
+// `JSON.parse` is silently skipped — the read loop moves on to the next
+// line and the connection keeps working. A stray non-JSON line on stdout
+// (e.g. index.ts's banner lines written via console.log instead of
+// console.error) would therefore corrupt the protocol stream without
+// failing the handshake, without failing any tool call, and without
+// tripping any assertion that only checks "did the connection work" —
+// which is all every other test in this file does. This class exists so a
+// test can instead read every raw byte written to stdout directly and
+// assert on it, independent of the SDK's own leniency.
+//
+// Reimplements the wire format directly (JSON.stringify(message) + '\n' to
+// send; split-on-'\n', JSON.parse each line to receive) rather than
+// importing the SDK's own ReadBuffer/serializeMessage — both are internal,
+// unexported implementation details of shared/stdio.js, not part of the
+// package's public export surface (unlike client/index.js and
+// client/stdio.js, which this file already imports). The format itself is
+// simple enough (confirmed by reading the same source above) that
+// reproducing it directly here is more honest than reaching into another
+// module's internals.
+class RawCapturingStdioTransport implements Transport {
+  private child?: ChildProcess;
+  private lineBuffer = '';
+  readonly rawStdoutChunks: string[] = [];
+  onclose?: () => void;
+  onerror?: (error: Error) => void;
+  onmessage?: (message: JSONRPCMessage) => void;
+
+  constructor(
+    private readonly command: string,
+    private readonly args: string[],
+    private readonly env: NodeJS.ProcessEnv
+  ) {}
+
+  async start(): Promise<void> {
+    this.child = spawn(this.command, this.args, {
+      env: this.env,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    this.child.stdout!.on('data', (chunk: Buffer) => {
+      const chunkText = chunk.toString('utf8');
+      // Captured BEFORE any line-splitting/parsing below — this is the raw
+      // ground truth the test asserts against, deliberately independent of
+      // whatever the parsing loop below does with it.
+      this.rawStdoutChunks.push(chunkText);
+
+      this.lineBuffer += chunkText;
+      let index: number;
+      while ((index = this.lineBuffer.indexOf('\n')) !== -1) {
+        const line = this.lineBuffer.slice(0, index).replace(/\r$/, '');
+        this.lineBuffer = this.lineBuffer.slice(index + 1);
+        if (line.length === 0) continue;
+        try {
+          this.onmessage?.(JSON.parse(line) as JSONRPCMessage);
+        } catch (err) {
+          this.onerror?.(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
+    });
+    this.child.on('close', () => this.onclose?.());
+    this.child.on('error', (err) => this.onerror?.(err));
+    await new Promise<void>((resolvePromise, reject) => {
+      this.child!.once('spawn', () => resolvePromise());
+      this.child!.once('error', reject);
+    });
+  }
+
+  async send(message: JSONRPCMessage): Promise<void> {
+    const stdin = this.child?.stdin;
+    if (!stdin) throw new Error('RawCapturingStdioTransport: not connected');
+    const json = JSON.stringify(message) + '\n';
+    await new Promise<void>((resolvePromise) => {
+      if (stdin.write(json)) resolvePromise();
+      else stdin.once('drain', resolvePromise);
+    });
+  }
+
+  async close(): Promise<void> {
+    this.child?.kill();
+  }
+}
+
+describe('stdout carries ONLY the MCP protocol — direct assertion, not an incidental one', () => {
+  // Review finding (Task 7 follow-up): swapping index.ts's two startup-
+  // banner console.error calls for console.log was previously caught only
+  // incidentally, by the "startup banner (stderr)" test's
+  // `banner.length > 0` sanity check happening to fail once the banner
+  // stopped going to stderr at all — a coincidence of a DIFFERENT test's
+  // setup, not a real check of stdout. Confirmed directly against the SDK's
+  // own source (see the comment on RawCapturingStdioTransport above) that
+  // there is no implicit tripwire either: a corrupted line is silently
+  // skipped by the read loop, so the connection and every tool call in this
+  // suite would keep working normally even with genuinely corrupted stdout.
+  test('every line written to stdout, across a healthy startup and a normal tool call, is valid JSON', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'signer-smoke-stdout-'));
+    const mnemonicFile = join(dir, 'mnemonic.txt');
+    writeFileSync(mnemonicFile, TEST_MNEMONIC, { mode: 0o600 });
+
+    const transport = new RawCapturingStdioTransport('node', ['packages/signer/build/index.js'], {
+      ...process.env,
+      VECTOR_SIGNER_MNEMONIC_FILE: mnemonicFile,
+      VECTOR_SIGNER_AUDIT_LOG_PATH: join(dir, 'audit.json'),
+      VECTOR_SIGNER_SPEND_LIMIT_PER_TX: '100000000',
+      VECTOR_SIGNER_SPEND_LIMIT_DAILY: '500000000',
+    });
+    const client = new Client({ name: 'signer-smoke-stdout-purity', version: '1.0.0' });
+    try {
+      // The real handshake (initialize -> notifications/initialized), driven
+      // by the actual Client class for protocol correctness — only the
+      // transport underneath it is custom. See Client.connect() in
+      // node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js: it
+      // calls transport.start(), sends 'initialize', then
+      // 'notifications/initialized' once the response validates.
+      await client.connect(transport);
+      // One normal tool call, matching "a normal tool call" from the review.
+      await callToolText(client, 'vector_signer_get_address');
+
+      const rawOutput = transport.rawStdoutChunks.join('');
+      const lines = rawOutput
+        .split('\n')
+        .map((l) => l.replace(/\r$/, ''))
+        .filter((l) => l.length > 0);
+
+      assert.ok(lines.length >= 2, `sanity: expected at least an initialize response and a tool-call response, got ${lines.length} line(s)`);
+      for (const [i, line] of lines.entries()) {
+        assert.doesNotThrow(
+          () => JSON.parse(line),
+          `stdout line #${i} is not valid JSON — the MCP protocol stream is corrupted by a stray write: ${line.slice(0, 200)}`
+        );
+      }
+    } finally {
+      try {
+        await client.close();
+      } catch {
+        /* already closed */
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('loadConfig() — no key material configured', () => {
   test('throws a clear, specific error naming what is missing, not a vague one', () => {
     // No VECTOR_SIGNER_MNEMONIC / _MNEMONIC_FILE / _PRIVATE_KEY+_ADDRESS at
@@ -358,6 +510,46 @@ describe('decode_transaction is strictly read-only', () => {
         'decode_transaction must never write an audit entry, even when previewing a transaction that would be ALLOWED'
       );
       assert.match(after, /Committed today:\s*0\.000000 AP3X/);
+    } finally {
+      await stopSigner(server);
+    }
+  });
+
+  // Review finding (Task 7 follow-up): the audit-log check above does NOT
+  // catch a decode_transaction that has been made to genuinely sign a
+  // transaction whenever policy would have allowed it, worded to avoid the
+  // substring "sign" (e.g. "Witnessed bytes:") - that mutation writes no
+  // audit entry at all, so "No decisions recorded yet." stays true right up
+  // until real signed bytes are already sitting in the response text. This
+  // test targets that different failure mode directly: it does not depend on
+  // wording, and it does not depend on FIXTURE_CBOR happening to be refused
+  // (the mutation is only reachable when a transaction is genuinely allowed).
+  //
+  // registerReadOnlyTools() in tools.ts (see its own comment) now makes the
+  // underlying mutation impossible to write as a one-line addition in the
+  // first place - decode_transaction's handler has no `identity` or
+  // `keySource` in scope at all, structurally, not by convention. This test
+  // is the defense-in-depth layer underneath that structural guard: it pins
+  // the CURRENT behaviour directly against what real signing would actually
+  // produce, so it would still catch a future regression that re-threads
+  // signing capability into that scope some other way.
+  test('the response never contains the transaction\'s actual signed bytes, computed independently, for a transaction that would be ALLOWED', async () => {
+    const server = await spawnSigner();
+    try {
+      const tx = buildInPolicyTxCbor(TEST_IDENTITY.address);
+      // Computed independently, in the test, via the same signTransaction()
+      // the real vector_signer_sign tool uses - this is exactly what a
+      // "helpfully pre-computed" decode_transaction would produce and return,
+      // whatever label it gave those bytes.
+      const { signedCborHex } = signTransaction(tx, TEST_IDENTITY.privateKeyBech32);
+
+      const result = await callToolText(server.client, 'vector_signer_decode_transaction', { txCbor: tx });
+
+      assert.match(result, /would be ALLOWED/i, 'sanity: this fixture must actually reach the allowed branch decode_transaction previews, or the check below is vacuous');
+      assert.ok(
+        !result.includes(signedCborHex),
+        'decode_transaction must never return the transaction\'s actual signed bytes, under any wording or label'
+      );
     } finally {
       await stopSigner(server);
     }
