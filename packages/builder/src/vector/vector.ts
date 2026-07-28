@@ -13,7 +13,7 @@ import {
   VECTOR_OGMIOS_URL, VECTOR_SUBMIT_URL, VECTOR_KOIOS_URL, VECTOR_EXPLORER_URL, explorerTxLink,
 } from '@apexfusion/vector-mcp-shared/config';
 import { safetyLayer } from './safety.js';
-import { rateLimiter } from './rate-limiter.js';
+import { limiterFor } from './rate-limiter.js';
 import { registerAgentNetworkTools } from './agent-network.js';
 import { registerSelfImprovementTools } from './self-improvement.js';
 import type {
@@ -473,7 +473,8 @@ export async function interactWithContract(
 }
 
 // Register all Vector MCP tools
-export function registerVectorTools(server: McpServer) {
+export function registerVectorTools(server: McpServer, identity: string) {
+  const rateLimiter = limiterFor(identity);
 
   // vector_get_balance - Get balance for any address
   server.tool(
@@ -1286,8 +1287,8 @@ Funds ${actionVerb} the script address.
 
   // Agent network tools (register, discover, message, profile) live in agent-network.ts
   // to isolate C (Cardano WASM) imports from tsc's complex type inference
-  registerAgentNetworkTools(server);
+  registerAgentNetworkTools(server, identity);
 
   // Self-Improvement Module tools (Module 6)
-  registerSelfImprovementTools(server);
+  registerSelfImprovementTools(server, identity);
 }

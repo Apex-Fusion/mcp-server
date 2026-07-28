@@ -11,7 +11,7 @@ import {
 } from '@apexfusion/vector-mcp-shared/config';
 export { deriveNftAssetName };
 import { safetyLayer } from './safety.js';
-import { rateLimiter } from './rate-limiter.js';
+import { limiterFor } from './rate-limiter.js';
 
 // Registry constants - agent-registry v2 (audited, compliant)
 // Source blueprint: vector-ai-agents/agent-registry/deploy/agent-registry/plutus.json
@@ -156,19 +156,21 @@ async function getRegistryAddress() {
   return _registryAddress;
 }
 
-// ─── Rate limit wrapper ──────────────────────────────────────────────────────
-
-function checkRateLimit() {
-  const rateCheck = rateLimiter.check();
-  if (!rateCheck.allowed) {
-    return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
-  }
-  return null;
-}
-
 // ─── Tool Registration ───────────────────────────────────────────────────────
 
-export function registerAgentNetworkTools(server) {
+export function registerAgentNetworkTools(server, identity) {
+  const rateLimiter = limiterFor(identity);
+
+  // Rate limit wrapper - defined inside the register function (not at module
+  // scope) so this closes over the per-identity `rateLimiter` above rather
+  // than a module-wide global.
+  function checkRateLimit() {
+    const rateCheck = rateLimiter.check();
+    if (!rateCheck.allowed) {
+      return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+    }
+    return null;
+  }
 
   // vector_get_agent_profile (read-only - no mnemonic needed)
   server.tool(

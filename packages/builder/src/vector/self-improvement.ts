@@ -23,7 +23,7 @@ import {
   VECTOR_OGMIOS_URL, VECTOR_SUBMIT_URL, VECTOR_KOIOS_URL, VECTOR_EXPLORER_URL, explorerTxLink,
 } from '@apexfusion/vector-mcp-shared/config';
 import { safetyLayer } from './safety.js';
-import { rateLimiter } from './rate-limiter.js';
+import { limiterFor } from './rate-limiter.js';
 
 // Agent Registry policy ID (shared across all modules)
 const AGENT_REGISTRY_POLICY = process.env.AGENT_REGISTRY_POLICY || 'be1a0a2912da180757ed3cd61b56bb8eab0188c19dc3c0e3912d2c01';
@@ -83,14 +83,6 @@ function newProvider() {
 
 function lovelaceToApex(lovelace: number | bigint): string {
   return (Number(BigInt(String(lovelace))) / 1_000_000).toFixed(6);
-}
-
-function checkRateLimit() {
-  const rateCheck = rateLimiter.check();
-  if (!rateCheck.allowed) {
-    return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
-  }
-  return null;
 }
 
 function scriptHashToAddress(hash: string): string {
@@ -263,7 +255,20 @@ function parseEndorsementDatum(datumCbor: string): any | null {
 
 // ─── Tool Registration ──────────────────────────────────────────────────────
 
-export function registerSelfImprovementTools(server) {
+export function registerSelfImprovementTools(server, identity) {
+  const rateLimiter = limiterFor(identity);
+
+  // Rate limit wrapper - defined inside the register function (not at module
+  // scope, where it used to live alongside the other helpers above) so this
+  // closes over the per-identity `rateLimiter` above rather than a
+  // module-wide global.
+  function checkRateLimit() {
+    const rateCheck = rateLimiter.check();
+    if (!rateCheck.allowed) {
+      return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+    }
+    return null;
+  }
 
   // ─── vector_self_improvement_browse (read-only) ───────────────────────────────
 
