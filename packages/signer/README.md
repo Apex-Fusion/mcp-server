@@ -76,10 +76,11 @@ Optional:
 directories up from `build/index.js` — the monorepo root, in this repo), **not** against
 whatever directory the process happened to be started from. That makes the location
 predictable regardless of your MCP client's working directory, but it also means the file is
-easy to forget about. In particular: unlike the builder's `vector-audit-log.json`, this
-filename is **not currently listed in this repo's `.gitignore`**. If you run the signer from a
-checkout of this repo without setting `VECTOR_SIGNER_AUDIT_LOG_PATH` explicitly, check before
-you `git add` — or just set the variable and point it somewhere outside the repo.
+easy to forget about. Like the builder's `vector-audit-log.json`, this exact filename is listed
+in this repo's `.gitignore`, so a default-configured signer run from a checkout will not get its
+audit log accidentally staged. That entry only matches the default filename, though — if you
+point `VECTOR_SIGNER_AUDIT_LOG_PATH` at some other path inside the repo, check before you
+`git add`, or just set the variable to somewhere outside the repo entirely.
 
 ## Tools
 
