@@ -12,13 +12,21 @@ provider.
 - **no Provider and no Lucid instance** — signing uses CML directly
 - **submission lives on the builder**, so the signer needs no egress either
 
-`test/boundary.test.ts` enforces this over both the import graph and the manifest — it walks
-every file under `src/`, checks `package.json` for network-capable dependencies, and greps for
-ambient network globals (`fetch`, `WebSocket`, ...). It is the package's central security
-guarantee.
+`test/boundary.test.ts` checks this mechanically — it walks every file under `src/` for a
+network-capable import or an ambient network global (`fetch`, `WebSocket`, ...), and checks
+`package.json` for a network-capable dependency. That check is a text scan, not a sandbox, and
+it is scoped accordingly: it reliably catches *accidental* regressions and *casual* misuse — an
+added dependency, a forgotten forbidden import, an unthinking `fetch(...)` call, including one
+routed around the bare identifier via `globalThis['fetch']` or `globalThis.fetch`. It does not
+catch *deliberate* obfuscation. Verified directly against the hardened check: an ambient global
+reached through a plain alias (`const f = fetch; f(...)`) or a forbidden module specifier
+assembled at runtime from concatenated strings (`import('node:' + 'dns')`) both still pass.
+Closing gaps like those is a code-review responsibility, not something a fixed set of text
+patterns can guarantee — what this check actually verifies is that today's shipped `src/` has no
+*accidental or careless* network capability, not a proof that none could ever be smuggled in.
 
 `test/integration/roundtrip.test.ts` imports `@lucid-evolution/lucid` and the shared package's
-`/provider` — that does **not** weaken the guarantee above. That file lives under `test/`,
+`/provider` — that does **not** weaken the check above. That file lives under `test/`,
 which `boundary.test.ts` deliberately scans only as far as `src/`, and which the build never
 bundles (`tsup`'s only entry point is `src/index.ts`). Those imports exist so the test can
 build a real transaction the way the hosted *builder* does (no key) before handing it to the
