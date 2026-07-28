@@ -30,3 +30,14 @@ coverage/
 # Misc
 .tmp/
 .temp/
+
+# Secrets — never commit
+mnemonic.txt
+.secrets/
+*.mnemonic
+
+# Runtime state (contains transaction history)
+vector-audit-log.json
+
+# Incremental typecheck cache (npm run typecheck uses --incremental)
+*.tsbuildinfo

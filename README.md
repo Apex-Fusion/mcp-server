@@ -21,7 +21,14 @@ Connect from Claude Code in one command:
 claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse
 ```
 
-The mnemonic is passed per-call by the MCP client and is never stored server-side - see the [security model](https://apex-fusion.github.io/vector-ai-documentation/mcp-server/security/). Self-hosting instructions are below.
+> **Security notice — custody.** Signing tools currently take your wallet mnemonic as a
+> tool-call parameter. It therefore passes through your MCP client, your model provider,
+> and the hosted server's memory — it is not written to disk, but it is exposed. Use only
+> a hot wallet holding funds you can afford to lose, and prefer self-hosting until the
+> non-custodial migration lands. See
+> [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md).
+
+Self-hosting instructions are below.
 
 ## Features
 
@@ -102,7 +109,8 @@ cp .env.example .env
 # Edit .env with your endpoint URLs (defaults point to Vector testnet; mainnet URLs below)
 ```
 
-The mnemonic is passed per-call by the MCP client, not stored in the environment.
+The mnemonic is passed per-call by the MCP client rather than stored in the environment. This
+avoids environment dumps, but does not make it private — see the security notice above.
 
 ### 3. Run
 
@@ -148,15 +156,13 @@ docker run -p 3000:3000 vector-mcp
 |----------|-------------|---------|
 | `PORT` | HTTP server port | `3000` |
 | `VECTOR_OGMIOS_URL` | Ogmios HTTP JSON-RPC endpoint | `https://ogmios.vector.testnet.apexfusion.org` |
-| `VECTOR_KOIOS_URL` | Koios REST API endpoint | `https://koios.vector.testnet.apexfusion.org/` |
+| `VECTOR_KOIOS_URL` | Koios REST API endpoint | `https://v2.koios.vector.testnet.apexfusion.org/` |
 | `VECTOR_SUBMIT_URL` | Transaction submit API | `https://submit.vector.testnet.apexfusion.org/api/submit/tx` |
 | `VECTOR_EXPLORER_URL` | Block explorer base URL | `https://vector.testnet.apexscan.org` |
 | `VECTOR_SPEND_LIMIT_PER_TX` | Max lovelace per transaction | `100000000` (100 AP3X) |
 | `VECTOR_SPEND_LIMIT_DAILY` | Max lovelace per day | `500000000` (500 AP3X) |
 | `VECTOR_AUDIT_LOG_PATH` | Persistent audit log file path | `./vector-audit-log.json` |
 | `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute | `60` |
-
-> **Note:** the default testnet Koios URL predates the v2 migration and currently returns 503. Override `VECTOR_KOIOS_URL` with `https://v2.koios.vector.testnet.apexfusion.org/` until the default is updated in code.
 
 ### Mainnet endpoints
 
@@ -170,14 +176,23 @@ docker run -p 3000:3000 vector-mcp
 ## Testing
 
 ```bash
-# Set the wallet mnemonic (file or env var)
-echo "your mnemonic words here" > mnemonic.txt
-# or: export VECTOR_MNEMONIC="your mnemonic words here"
-
-npm test
+npm run test:unit
 ```
 
-Tests cover the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister.
+No wallet, no network — pure logic only (CBOR encode/decode assertions).
+
+```bash
+npm run test:smoke
+```
+
+Builds the server, boots it, and asserts the exposed tool inventory matches the checked-in snapshot. No wallet, no external network. CI runs this and `test:unit` on every PR.
+
+```bash
+echo "your mnemonic words here" > mnemonic.txt
+npm run test:integration
+```
+
+Requires `mnemonic.txt` in the repo root containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister. Never runs in CI.
 
 ## Architecture
 

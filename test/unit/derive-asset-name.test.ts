@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveNftAssetName } from '../src/vector/agent-network.ts';
+import { deriveNftAssetName } from '../../src/vector/agent-network.ts';
 
 // Parity vectors — verified against pycardano OutputReference.to_cbor() and
 // agent-sdk-py plutus_serialise_data(0, [tx_hash_bytes, idx]). All three
