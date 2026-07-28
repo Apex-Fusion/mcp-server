@@ -19,6 +19,12 @@ const FORBIDDEN_IMPORTS = [
   'node:net',
   'node:dgram',
   'node:tls',
+  // Reaching the network by shelling out (execSync('curl ...')) bypasses every
+  // other assertion here, so the process-spawning modules are forbidden too.
+  'node:child_process',
+  'child_process',
+  // Opens a debugger port.
+  'node:inspector',
 ];
 
 const SHARED_PKG = '@apexfusion/vector-mcp-shared';
@@ -42,10 +48,24 @@ const AMBIENT_NETWORK_GLOBALS: { label: string; pattern: RegExp }[] = [
   { label: 'navigator.sendBeacon', pattern: /\bnavigator\s*\.\s*sendBeacon\b/ },
 ];
 
+// Any module format that Node can execute, not just .ts — a stray .js or .mjs
+// under src/ would otherwise be invisible to every scan below.
+const SOURCE_EXTENSIONS = ['.ts', '.mts', '.cts', '.js', '.mjs', '.cjs'];
+
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-    e.isDirectory() ? sourceFiles(join(dir, e.name)) : e.name.endsWith('.ts') ? [join(dir, e.name)] : []
+    e.isDirectory()
+      ? sourceFiles(join(dir, e.name))
+      : SOURCE_EXTENSIONS.some((ext) => e.name.endsWith(ext))
+        ? [join(dir, e.name)]
+        : []
   );
+}
+
+// Module specifiers can be single-, double-, or backtick-quoted. Matching only
+// the first two left a trivial evasion.
+function quotedForms(specifier: string): string[] {
+  return [`'${specifier}'`, `"${specifier}"`, `\`${specifier}\``];
 }
 
 describe('signer has no network capability', () => {
@@ -54,7 +74,7 @@ describe('signer has no network capability', () => {
     for (const file of sourceFiles(SRC_DIR)) {
       const text = readFileSync(file, 'utf8');
       for (const bad of FORBIDDEN_IMPORTS) {
-        if (text.includes(`'${bad}'`) || text.includes(`"${bad}"`)) {
+        if (quotedForms(bad).some((form) => text.includes(form))) {
           offenders.push(`${file} imports ${bad}`);
         }
       }
@@ -64,8 +84,28 @@ describe('signer has no network capability', () => {
 
   test('package.json declares no network-capable dependency', () => {
     const pkg = JSON.parse(readFileSync(join(PKG_DIR, 'package.json'), 'utf8'));
-    const declared = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies });
-    const bad = declared.filter((d) => d === '@lucid-evolution/lucid' || d === 'cross-fetch');
+    // All four dependency kinds — optional and peer deps install too.
+    const declared = Object.keys({
+      ...pkg.dependencies,
+      ...pkg.devDependencies,
+      ...pkg.optionalDependencies,
+      ...pkg.peerDependencies,
+    });
+    const NETWORK_PACKAGES = [
+      '@lucid-evolution/lucid',
+      'cross-fetch',
+      'axios',
+      'node-fetch',
+      'undici',
+      'got',
+      'ky',
+      'superagent',
+      'request',
+      'ws',
+      'socket.io-client',
+      'eventsource',
+    ];
+    const bad = declared.filter((d) => NETWORK_PACKAGES.includes(d));
     assert.deepStrictEqual(bad, [], `network-capable dependencies declared: ${bad.join(', ')}`);
   });
 
