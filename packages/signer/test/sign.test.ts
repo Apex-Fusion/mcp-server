@@ -4,6 +4,14 @@ import * as CML from '@anastasia-labs/cardano-multiplatform-lib-nodejs';
 import { signTransaction } from '../src/sign.ts';
 import { MnemonicKeySource } from '../src/keysource.ts';
 import { decodeTransaction } from '../src/decode.ts';
+// /tx is an explicitly allowed pure subpath (boundary.test.ts's own
+// ALLOWLIST — /tx and /types are pure, /provider is network-capable). Used
+// below to build the exact same indefinite-length CBOR constructor shape
+// deriveNftAssetName() builds, via the same helper functions, rather than a
+// hand-rolled reimplementation that could subtly diverge from the real
+// encoding this ecosystem actually produces. Test-only import — sign.ts
+// itself imports nothing beyond CML.
+import { cborBytes, cborUint } from '@apexfusion/vector-mcp-shared/tx';
 
 const TEST_MNEMONIC =
   'test walk nut penalty hip pave soap entry language right filter choice';
@@ -100,6 +108,124 @@ describe('unconsumed input (trailing bytes) — sign.ts decodes independently of
   test('an uppercase-hex rendering of the same clean transaction is still accepted (no false positive from the case-insensitive consumption check)', () => {
     const result = signTransaction(FIXTURE_CBOR.toUpperCase(), KEY);
     assert.equal(result.txHashHex, decodeTransaction(FIXTURE_CBOR).txHashHex);
+  });
+});
+
+describe('indefinite-length CBOR — the agent registry\'s D8 79 9F … FF constructor encoding', () => {
+  // packages/shared/src/tx.ts's deriveNftAssetName() documents that the
+  // agent registry's Conway-era Aiken validators require INDEFINITE-length
+  // CBOR for a Plutus constructor's field array (D8 79 9F … FF) — Lucid's
+  // Data.to instead emits definite-length arrays (D8 79 82 …), which those
+  // validators reject. Both sign.ts's consumption check (above) and
+  // decode.ts's equivalent assert in a comment that CML's parse-then-
+  // reserialise round trip preserves this exact encoding rather than
+  // silently canonicalising it to definite-length — which matters because if
+  // it did NOT, the consumption check would misread that harmless
+  // re-encoding as "unrecognised trailing data" and refuse to sign every
+  // transaction using this ecosystem's own real encoding. That claim was
+  // asserted only in prose until now; this fixture makes it an executable,
+  // permanent check. (decode.ts's own test suite has the exact same untested
+  // gap — out of scope for this task's file boundary; flagged in the report
+  // for a later task to close.)
+  //
+  // Built using the SAME helper functions (cborBytes, cborUint) that
+  // packages/shared/src/tx.ts's deriveNftAssetName() itself uses to build its
+  // OutputReference constructor, for maximum fidelity to the real encoding.
+  function indefiniteLengthConstructor(): Buffer {
+    // Same shape as deriveNftAssetName's outRefCbor: tag 121 (Plutus
+    // constructor index 0), indefinite-length array open, one bytestring
+    // field (reusing FIXTURE_CBOR's own input tx hash, so this is a
+    // realistic 32-byte field rather than arbitrary filler), one small uint
+    // field, indefinite-length array close.
+    const someHash32 = 'e17a2ebab8eae3850f959290041b3bef3f3597584f8cf4a728e14777dddb8c3';
+    return Buffer.concat([
+      Buffer.from([0xd8, 0x79, 0x9f]),
+      cborBytes(someHash32),
+      cborUint(0n),
+      Buffer.from([0xff]),
+    ]);
+  }
+
+  test('sanity: the hand-rolled bytes are actually the D8 79 9F … FF shape under test', () => {
+    const hex = indefiniteLengthConstructor().toString('hex');
+    assert.ok(hex.startsWith('d8799f'), 'must open with tag 121 + indefinite-length array');
+    assert.ok(hex.endsWith('ff'), 'must close with the indefinite-length-array break byte');
+  });
+
+  describe('embedded in the transaction BODY (an inline datum on an output)', () => {
+    // Body-embedded specifically because this is the placement where the
+    // encoding actually participates in the body hash: if CML's round trip
+    // ever DID mangle this encoding, this is the fixture that would show up
+    // as a changed hash, not just a rejected consumption check.
+    function fixtureWithBodyEmbeddedDatum(): string {
+      const unsigned = CML.Transaction.from_cbor_hex(FIXTURE_CBOR);
+      const body = unsigned.body();
+      const datum = CML.PlutusData.from_cbor_hex(indefiniteLengthConstructor().toString('hex'));
+      const existingOutput = body.outputs().get(0);
+      const outputWithDatum = CML.TransactionOutput.new(
+        existingOutput.address(),
+        existingOutput.amount(),
+        CML.DatumOption.new_datum(datum),
+        undefined
+      );
+      const outputs = CML.TransactionOutputList.new();
+      outputs.add(outputWithDatum);
+      const newBody = CML.TransactionBody.new(body.inputs(), outputs, body.fee());
+      const tx = CML.Transaction.new(newBody, CML.TransactionWitnessSet.new(), true, undefined);
+      return tx.to_cbor_hex();
+    }
+
+    test('signTransaction accepts it — no false-positive "unrecognised trailing data" rejection', () => {
+      const cborHex = fixtureWithBodyEmbeddedDatum();
+      assert.doesNotThrow(() => signTransaction(cborHex, KEY));
+    });
+
+    test('the body hash is unchanged by signing', () => {
+      const cborHex = fixtureWithBodyEmbeddedDatum();
+      const { txHashHex } = signTransaction(cborHex, KEY);
+      const independentHash = CML.hash_transaction(CML.Transaction.from_cbor_hex(cborHex).body()).to_hex();
+      assert.equal(txHashHex, independentHash);
+    });
+
+    test('the indefinite-length datum itself survives signing byte-for-byte, not just the surrounding transaction', () => {
+      const cborHex = fixtureWithBodyEmbeddedDatum();
+      const { signedCborHex } = signTransaction(cborHex, KEY);
+      const survivingDatum = CML.Transaction.from_cbor_hex(signedCborHex).body().outputs().get(0).datum()!.as_datum()!;
+      assert.equal(survivingDatum.to_cbor_hex(), indefiniteLengthConstructor().toString('hex'));
+    });
+  });
+
+  describe('embedded in the WITNESS SET (a plutus_datums entry)', () => {
+    // The other placement the coordinator's reviewer independently checked.
+    // Unlike the body-embedded case, the body hash can never be affected
+    // here (plutus_datums lives on TransactionWitnessSet, not
+    // TransactionBody) — this fixture instead exercises the OTHER risk: the
+    // consumption check compares the WHOLE transaction's re-serialised CBOR,
+    // witness set included, so a mangled round trip here would still cause a
+    // false-positive rejection even though it could never show up as a
+    // changed hash.
+    function fixtureWithWitnessEmbeddedDatum(): string {
+      const unsigned = CML.Transaction.from_cbor_hex(FIXTURE_CBOR);
+      const body = unsigned.body();
+      const datum = CML.PlutusData.from_cbor_hex(indefiniteLengthConstructor().toString('hex'));
+      const witnessSet = CML.TransactionWitnessSet.new();
+      const datums = CML.PlutusDataList.new();
+      datums.add(datum);
+      witnessSet.set_plutus_datums(datums);
+      const tx = CML.Transaction.new(body, witnessSet, true, undefined);
+      return tx.to_cbor_hex();
+    }
+
+    test('signTransaction accepts it — no false-positive "unrecognised trailing data" rejection', () => {
+      const cborHex = fixtureWithWitnessEmbeddedDatum();
+      assert.doesNotThrow(() => signTransaction(cborHex, KEY));
+    });
+
+    test('the body hash is unchanged (same body as FIXTURE_CBOR — only the witness set differs)', () => {
+      const cborHex = fixtureWithWitnessEmbeddedDatum();
+      const { txHashHex } = signTransaction(cborHex, KEY);
+      assert.equal(txHashHex, decodeTransaction(FIXTURE_CBOR).txHashHex);
+    });
   });
 });
 
@@ -310,6 +436,55 @@ describe('a transaction carrying auxiliary data / metadata', () => {
     const w = CML.Transaction.from_cbor_hex(signedCborHex).witness_set().vkeywitnesses()!.get(0);
     const hashBytes = CML.TransactionHash.from_hex(txHashHex).to_raw_bytes();
     assert.equal(w.vkey().verify(hashBytes, w.ed25519_signature()), true);
+  });
+});
+
+describe('the is_valid flag is threaded through, not hardcoded', () => {
+  // is_valid lives on CML.Transaction itself, not on TransactionBody — so it
+  // is INVISIBLE to every hash-equality check elsewhere in this file
+  // (hash_transaction only ever hashes the body). A version of sign.ts that
+  // hardcodes Transaction.new(body, witnessSet, true, ...) regardless of the
+  // INPUT transaction's own is_valid() would satisfy every other test in
+  // this file, including "does not alter the transaction body — hash is
+  // unchanged", because FIXTURE_CBOR's own is_valid happens to already be
+  // true. Confirmed by mutation (see the task report): flipping the
+  // hardcoded literal from true to false still passed all 21 pre-existing
+  // tests, with zero failures.
+  //
+  // is_valid: false is Cardano's collateral-forfeit encoding: a node sets it
+  // when a script transaction is included specifically to consume collateral
+  // after a phase-2 validation failure. If the signer silently rewrote this
+  // to true, a node re-executing phase 2 would find the claimed validity
+  // mismatched and reject the transaction outright — the signer would have
+  // silently rewritten a field of the transaction it was asked to sign.
+  //
+  // Confirmed directly (throwaway probe, see the task report) that CML can
+  // construct, serialise, and correctly round-trip an is_valid: false
+  // Transaction before relying on that here.
+  function fixtureWithIsValid(isValid: boolean): string {
+    const unsigned = CML.Transaction.from_cbor_hex(FIXTURE_CBOR);
+    const tx = CML.Transaction.new(unsigned.body(), unsigned.witness_set(), isValid, undefined);
+    return tx.to_cbor_hex();
+  }
+
+  test('an is_valid: false transaction is signed with is_valid still false, not silently flipped to true', () => {
+    const cborHex = fixtureWithIsValid(false);
+    const { signedCborHex } = signTransaction(cborHex, KEY);
+    const signedTx = CML.Transaction.from_cbor_hex(signedCborHex);
+    assert.equal(signedTx.is_valid(), false);
+  });
+
+  test('an is_valid: true transaction is signed with is_valid still true (pinned explicitly, not just incidentally true because the default fixture happens to be)', () => {
+    const cborHex = fixtureWithIsValid(true);
+    const { signedCborHex } = signTransaction(cborHex, KEY);
+    const signedTx = CML.Transaction.from_cbor_hex(signedCborHex);
+    assert.equal(signedTx.is_valid(), true);
+  });
+
+  test('is_valid: false does not affect the body hash — is_valid lives on Transaction, not TransactionBody', () => {
+    const cborHex = fixtureWithIsValid(false);
+    const { txHashHex } = signTransaction(cborHex, KEY);
+    assert.equal(txHashHex, decodeTransaction(FIXTURE_CBOR).txHashHex);
   });
 });
 

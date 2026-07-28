@@ -58,7 +58,13 @@ export function signTransaction(
   vkeys.add(CML.Vkeywitness.new(sk.to_public(), signature));
   witnessSet.set_vkeywitnesses(vkeys);
 
-  const signed = CML.Transaction.new(body, witnessSet, true, tx.auxiliary_data());
+  // Threaded through from the input transaction, not hardcoded: is_valid is
+  // Cardano's collateral-forfeit flag (false marks a script transaction
+  // included specifically to consume collateral after a phase-2 validation
+  // failure). It lives on Transaction, not TransactionBody, so hardcoding it
+  // would be invisible to hash_transaction(body) and to every hash-equality
+  // check — the signer must not silently rewrite a claim a node re-checks.
+  const signed = CML.Transaction.new(body, witnessSet, tx.is_valid(), tx.auxiliary_data());
 
   return { signedCborHex: signed.to_cbor_hex(), txHashHex: txHash.to_hex() };
 }
