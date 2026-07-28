@@ -76,14 +76,36 @@ export function registerSignerTools(server: McpServer, config: SignerConfig): vo
       const decision = evaluate(tx, ownAddresses, config.limits, audit.committedTodayLovelace());
 
       if (!decision.allowed) {
-        audit.append({
-          timestamp: new Date().toISOString(),
-          txHash: tx.txHashHex,
-          decision: 'refused',
-          netOutflowLovelace: decision.netOutflowLovelace.toString(),
-          reason: decision.reason,
-          assetMovements: decision.assetMovements.length,
-        });
+        // CONTRACT (see audit.ts's own header comment): append() throws if the
+        // write to disk fails. No funds move on a refusal either way, so this
+        // is lower stakes than the signed branch below — but a refusal whose
+        // audit record silently failed to write would still hand back a
+        // clean-looking "REFUSED. <reason>" with nothing to indicate that the
+        // refusal itself is now missing from the durable log. Caught here (not
+        // left to propagate as a generic isError) specifically so the refusal
+        // text and reason are ALWAYS delivered to the caller regardless of
+        // audit health, with an appended note when the record could not be
+        // written — never silence about it, never a bare unexplained error in
+        // its place.
+        try {
+          audit.append({
+            timestamp: new Date().toISOString(),
+            txHash: tx.txHashHex,
+            decision: 'refused',
+            netOutflowLovelace: decision.netOutflowLovelace.toString(),
+            reason: decision.reason,
+            assetMovements: decision.assetMovements.length,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`[sign] audit append failed for a REFUSED tx ${tx.txHashHex}: ${message}`);
+          return text(
+            `REFUSED. ${decision.reason}\n\n` +
+              `Note: this refusal could NOT be recorded in the local audit log (${message}). ` +
+              `No funds moved and nothing was signed, but the audit trail for this refusal is incomplete ` +
+              `until the log is writable again.`
+          );
+        }
         return text(`REFUSED. ${decision.reason}`);
       }
 
@@ -94,13 +116,34 @@ export function registerSignerTools(server: McpServer, config: SignerConfig): vo
         return text(`REFUSED. Signing failed: ${err instanceof Error ? err.message : String(err)}`);
       }
 
-      audit.append({
-        timestamp: new Date().toISOString(),
-        txHash: signed.txHashHex,
-        decision: 'signed',
-        netOutflowLovelace: decision.netOutflowLovelace.toString(),
-        assetMovements: decision.assetMovements.length,
-      });
+      // HARD REQUIREMENT (audit.ts's own CONTRACT note; see also the task
+      // report): append() throws on a write failure, by design. The reflex to
+      // avoid here is `catch { warn(); return signed anyway; }` — that
+      // reproduces exactly the failure the throw exists to prevent, just one
+      // call site later: a real signature reaches the caller while no durable
+      // record of it exists on disk, so the next process's
+      // committedTodayLovelace() silently under-counts and the daily limit
+      // stops binding. `signed.signedCborHex` is therefore not read anywhere
+      // below this catch block — the only `return` that can reach it is the
+      // one after a successful append.
+      try {
+        audit.append({
+          timestamp: new Date().toISOString(),
+          txHash: signed.txHashHex,
+          decision: 'signed',
+          netOutflowLovelace: decision.netOutflowLovelace.toString(),
+          assetMovements: decision.assetMovements.length,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[sign] withholding a produced signature for tx ${signed.txHashHex}: audit append failed: ${message}`);
+        return text(
+          `REFUSED. A valid signature for this transaction was produced, but it could not be durably ` +
+            `recorded in the local audit log, so it is being withheld rather than returned to you. ` +
+            `No signed transaction has been released to any caller. Detail: ${message}\n\n` +
+            `Check that the audit log path is writable, then retry.`
+        );
+      }
 
       return text(
         `# Signed\n\nHash: ${signed.txHashHex}\n` +
