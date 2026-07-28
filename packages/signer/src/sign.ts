@@ -16,6 +16,27 @@ export function signTransaction(
     );
   }
 
+  // from_cbor_hex only requires that a *prefix* of unsignedCborHex parse as a
+  // valid transaction — it does not check that parsing consumed the whole
+  // string. This is the same gap decode.ts closes (see its comment for the
+  // full reasoning) and the check here is deliberately identical. sign.ts
+  // calls from_cbor_hex independently and does NOT inherit decode.ts's guard
+  // automatically just because the two modules share a package: confirmed
+  // empirically that, without this check, signing FIXTURE_CBOR with
+  // 'deadbeef' appended did not throw — it silently signed the shorter,
+  // valid prefix and returned a confident, fully-formed signature, with the
+  // appended bytes dropped and no indication anything was wrong. That is
+  // worse here than in decode.ts: the caller would receive a cryptographic
+  // signature over DIFFERENT, FEWER bytes than it actually asked to sign,
+  // with nothing to reveal the discrepancy. Compared case-insensitively:
+  // valid uppercase-hex input round-trips through CML as lowercase, which
+  // would otherwise read as a false-positive mismatch.
+  if (tx.to_cbor_hex().toLowerCase() !== unsignedCborHex.toLowerCase()) {
+    throw new Error(
+      'Transaction could not be decoded: input was not fully consumed (unrecognised trailing data)'
+    );
+  }
+
   let sk: CML.PrivateKey;
   try {
     sk = CML.PrivateKey.from_bech32(privateKeyBech32);
