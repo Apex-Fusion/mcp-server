@@ -97,3 +97,90 @@ describe('decodeTransaction', () => {
     });
   });
 });
+
+// Fix, verified once by a throwaway probe and never pinned by a permanent
+// test until now (see the task report): readAssets() builds each asset's
+// `unit` string as `policy.to_hex() + name.to_hex()`, specifically NOT
+// `name.to_cbor_hex().slice(2)`. name.to_cbor_hex() carries a CBOR
+// byte-string header that is 1 byte for names up to 23 bytes long but grows
+// to 2 bytes at 24 (Cardano asset names run up to 32 bytes) — a fixed
+// slice(2) strips only the first form correctly and leaves the second
+// header byte glued onto the front of the "unit" for every 24-32 byte name,
+// silently corrupting it. to_hex() returns the raw bytes with no CBOR
+// envelope at all, so it is correct at every length. Nothing in the rest of
+// this suite constructs a real multi-asset output, so this was previously
+// completely unexercised.
+describe('native asset units — asset names at and beyond the 24-byte CBOR-header boundary', () => {
+  // Deterministic, not random: sequential bytes offset by a per-fixture seed
+  // so the three names never collide and a failure is reproducible from
+  // this description alone. 28 bytes for the policy ID because ScriptHash
+  // (a Cardano policy ID) is always exactly 28 bytes, never variable.
+  function hexOfLength(byteLen: number, seed: number): string {
+    return Array.from({ length: byteLen }, (_, i) => ((i + seed) % 256).toString(16).padStart(2, '0')).join('');
+  }
+
+  const POLICY_HEX = hexOfLength(28, 0);
+  // Just under the boundary (1-byte CBOR header either way) — confirms the
+  // fix is not merely coincidentally right only at 24+ while accidentally
+  // still being right below it for some other reason.
+  const NAME_23 = hexOfLength(23, 1);
+  // Exactly the length at which CBOR's byte-string header grows from 1 byte
+  // to 2 — the precise boundary the reverted `to_cbor_hex().slice(2)` form
+  // corrupts.
+  const NAME_24 = hexOfLength(24, 50);
+  // The maximum asset name length Cardano allows.
+  const NAME_32 = hexOfLength(32, 100);
+
+  // Real CML MultiAsset construction, not a hand-rolled CBOR fixture: builds
+  // one output on top of FIXTURE_CBOR's own body/inputs/fee carrying all
+  // three asset names under one policy, then re-serialises through
+  // Transaction.new(...).to_cbor_hex() so this exercises decodeTransaction's
+  // full parse path, including its trailing-bytes consumption check, not
+  // just readAssets() in isolation.
+  function fixtureWithAssets(): string {
+    const unsigned = CML.Transaction.from_cbor_hex(FIXTURE_CBOR);
+    const body = unsigned.body();
+    const existingOutput = body.outputs().get(0);
+
+    const policy = CML.ScriptHash.from_hex(POLICY_HEX);
+    const assets = CML.MapAssetNameToCoin.new();
+    assets.insert(CML.AssetName.from_hex(NAME_23), 1_000n);
+    assets.insert(CML.AssetName.from_hex(NAME_24), 2_000n);
+    assets.insert(CML.AssetName.from_hex(NAME_32), 3_000n);
+    const multiasset = CML.MultiAsset.new();
+    multiasset.insert_assets(policy, assets);
+    const value = CML.Value.new(3_000_000n, multiasset);
+
+    const outputWithAssets = CML.TransactionOutput.new(existingOutput.address(), value, undefined, undefined);
+    const outputs = CML.TransactionOutputList.new();
+    outputs.add(outputWithAssets);
+    const newBody = CML.TransactionBody.new(body.inputs(), outputs, body.fee());
+    const tx = CML.Transaction.new(newBody, CML.TransactionWitnessSet.new(), true, undefined);
+    return tx.to_cbor_hex();
+  }
+
+  test('a 23-byte name (just under the boundary) decodes to policyHex + assetNameHex exactly', () => {
+    const { outputs } = decodeTransaction(fixtureWithAssets());
+    const unit = outputs[0].assets.find((a) => a.quantity === 1_000n)?.unit;
+    assert.equal(unit, `${POLICY_HEX}${NAME_23}`);
+  });
+
+  test('a 24-byte name (exactly at the boundary) decodes to policyHex + assetNameHex exactly, not with a stray leading CBOR header byte', () => {
+    const { outputs } = decodeTransaction(fixtureWithAssets());
+    const unit = outputs[0].assets.find((a) => a.quantity === 2_000n)?.unit;
+    assert.equal(unit, `${POLICY_HEX}${NAME_24}`);
+  });
+
+  test('a 32-byte name (the maximum Cardano allows) decodes to policyHex + assetNameHex exactly', () => {
+    const { outputs } = decodeTransaction(fixtureWithAssets());
+    const unit = outputs[0].assets.find((a) => a.quantity === 3_000n)?.unit;
+    assert.equal(unit, `${POLICY_HEX}${NAME_32}`);
+  });
+
+  test('all three assets are reported on the one output that carries them, with their quantities intact', () => {
+    const { outputs } = decodeTransaction(fixtureWithAssets());
+    assert.equal(outputs[0].assets.length, 3);
+    const quantities = outputs[0].assets.map((a) => a.quantity).sort();
+    assert.deepEqual(quantities, [1_000n, 2_000n, 3_000n]);
+  });
+});
