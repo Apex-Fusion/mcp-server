@@ -10,6 +10,22 @@
 // be derived", "invalid private key"), never the value. Every catch block
 // below is commented with why the upstream message it surfaces is safe to
 // include verbatim.
+//
+// TypeScript `private` is a COMPILE-TIME check only -- at runtime it is an
+// ordinary enumerable own property, fully visible to JSON.stringify,
+// util.inspect, console.log (which goes through util.inspect), Object.keys,
+// Object.getOwnPropertyNames, spread, and for...in. Verified by execution,
+// not assumed: `JSON.stringify(new MnemonicKeySource(m))` printed the
+// mnemonic in full under TS `private`. This package already writes
+// diagnostics to stderr elsewhere (audit.ts, index.ts) and describe()'s own
+// docstring below invites "for logs" usage -- one `console.log(keySource)`
+// instead of `console.log(keySource.describe())` away from a real leak. Key
+// material fields are therefore declared with native `#private` syntax
+// (invisible to all of the above, confirmed by execution) rather than TS
+// `private`, and both classes additionally override toJSON() and Node's
+// util.inspect.custom symbol as defence in depth, so that even an
+// accidental serialisation attempt produces describe()'s safe string
+// instead of either a leak or an uninformative `{}`.
 import { walletFromSeed } from '@lucid-evolution/wallet';
 
 export interface SigningIdentity {
@@ -23,10 +39,19 @@ export interface KeySource {
   load(): SigningIdentity;
 }
 
+// The well-known symbol Node's util.inspect (and therefore console.log, which
+// calls it) looks for. Built via Symbol.for on its registered name rather
+// than `import { inspect } from 'node:util'` so this module's import surface
+// stays exactly `@lucid-evolution/wallet` -- confirmed by execution that
+// `Symbol.for('nodejs.util.inspect.custom') === util.inspect.custom`.
+const NODE_INSPECT_CUSTOM = Symbol.for('nodejs.util.inspect.custom');
+
 const VALID_WORD_COUNTS = [12, 15, 18, 21, 24];
 
 export class MnemonicKeySource implements KeySource {
-  private readonly mnemonic: string;
+  // Native private field, not TS `private` -- see the module header. The
+  // mnemonic is the single most sensitive value in this whole package.
+  #mnemonic: string;
 
   constructor(mnemonic: string, private readonly accountIndex: number = 0) {
     // Whitespace normalisation: collapse any run of whitespace (including
@@ -50,7 +75,7 @@ export class MnemonicKeySource implements KeySource {
     // mixed-case rendering of a valid mnemonic reproduces the exact
     // canonical lowercase string byte-for-byte, and therefore derives the
     // exact same address -- never a different, also-plausible one.
-    this.mnemonic = mnemonic.trim().split(/\s+/).join(' ').toLowerCase();
+    this.#mnemonic = mnemonic.trim().split(/\s+/).join(' ').toLowerCase();
 
     // `''.split(' ')` yields `['']` (length 1), not `[]` (length 0) -- the
     // same empty-string-split gotcha documented at length in policy.ts's
@@ -58,7 +83,7 @@ export class MnemonicKeySource implements KeySource {
     // mnemonic is reported as "got 0 words", not the misleading "got 1".
     // Either way this throws and derives nothing; this only fixes what the
     // message says.
-    const words = this.mnemonic.length === 0 ? [] : this.mnemonic.split(' ');
+    const words = this.#mnemonic.length === 0 ? [] : this.#mnemonic.split(' ');
     if (!VALID_WORD_COUNTS.includes(words.length)) {
       throw new Error(
         `Invalid mnemonic: expected 12, 15, 18, 21 or 24 words, got ${words.length}.`
@@ -88,13 +113,26 @@ export class MnemonicKeySource implements KeySource {
     return `mnemonic (account index ${this.accountIndex})`;
   }
 
+  // Defence in depth beyond the #private field above: even if some future
+  // caller (or library) reaches for JSON.stringify(keySource) or
+  // console.log(keySource) instead of keySource.describe()'s intended path,
+  // both now resolve to the same safe string rather than either leaking or
+  // silently producing an uninformative `{}`.
+  toJSON(): string {
+    return this.describe();
+  }
+
+  [NODE_INSPECT_CUSTOM](): string {
+    return this.describe();
+  }
+
   load(): SigningIdentity {
     // Vector runs with the --mainnet flag, so addresses are addr1...
     let w;
     try {
-      w = walletFromSeed(this.mnemonic, { network: 'Mainnet', accountIndex: this.accountIndex });
+      w = walletFromSeed(this.#mnemonic, { network: 'Mainnet', accountIndex: this.accountIndex });
     } catch (err) {
-      // Never interpolate `this.mnemonic` here. Read bip39's source
+      // Never interpolate `this.#mnemonic` here. Read bip39's source
       // (mnemonicToEntropy, which walletFromSeed calls directly) to confirm
       // this before relying on it: every throw site in that function uses
       // one of four FIXED constant strings -- 'Invalid mnemonic' (wrong
@@ -113,8 +151,9 @@ export class MnemonicKeySource implements KeySource {
 }
 
 export class PrivateKeyKeySource implements KeySource {
-  private readonly privateKeyBech32: string;
-  private readonly address: string;
+  // Native private fields, not TS `private` -- see the module header.
+  #privateKeyBech32: string;
+  #address: string;
 
   // NOTE on a gap this constructor does NOT close: it validates that each
   // argument is independently well-formed, but never checks that `address`
@@ -122,21 +161,34 @@ export class PrivateKeyKeySource implements KeySource {
   // supplies a syntactically valid key and a syntactically valid but
   // UNRELATED address constructs and load()s successfully.
   //
-  // This is a structural limit, not an oversight. Confirming the
-  // correspondence would need to derive a public key (and, for the Base
-  // addresses walletFromSeed produces, a stake credential too -- a Base
-  // address is not a function of the payment key alone) from
-  // privateKeyBech32 and compare it against the address's embedded
-  // credential, which needs the Cardano Multiplatform Library. This module
-  // deliberately imports ONLY `@lucid-evolution/wallet` (see
-  // boundary.test.ts and the package-level import allowlist), and that
-  // package's only Provider-free export is walletFromSeed, which takes a
-  // MNEMONIC, not a raw key. Its one function that accepts a raw private
-  // key, makeWalletFromPrivateKey, requires a live Provider -- exactly the
-  // network capability this module exists to not have. There is no way to
-  // perform this check without either an out-of-scope import or a network
-  // round-trip, so it is left undone, deliberately, rather than partially
-  // done via an import this module should not have.
+  // This is a deliberate scope boundary for THIS module, not a technical
+  // impossibility -- worth being precise about, since "structural limit"
+  // language here previously read as the latter and that is not accurate.
+  // The check itself is possible with no network I/O: the Cardano
+  // Multiplatform Library can derive a public key from a raw private key
+  // and hash it into a credential entirely offline. CML is not some
+  // unavailable dependency -- it is already a DIRECT dependency of this
+  // exact package (`@anastasia-labs/cardano-multiplatform-lib-nodejs` in
+  // package.json), it is not on boundary.test.ts's forbidden-import list,
+  // and decode.ts already imports it elsewhere in this same package. So CML
+  // is not the obstacle. The actual constraint is narrower and self-
+  // imposed: this module's task brief calls for importing ONLY
+  // `@lucid-evolution/wallet`, to keep this one file's dependency surface
+  // minimal and its intent legible at a glance -- and that package's only
+  // function accepting a raw private key, makeWalletFromPrivateKey,
+  // requires a live Provider (a genuine network capability, unlike CML),
+  // which really is off-limits here. Closing this gap is therefore in
+  // reach for a future, deliberate change (a CML import, with
+  // boundary.test.ts re-verified against it) -- it is left open FOR NOW
+  // because it is out of THIS task's scope, not because it cannot be done.
+  //
+  // For the Base addresses walletFromSeed produces specifically, closing
+  // this gap fully would also need the stake credential, not just the
+  // payment one -- a Base address is not a function of the payment key
+  // alone, and this constructor never receives a stake key at all. A CML-
+  // based check could still verify the payment-credential half, which
+  // would already catch the realistic mistake (an unrelated key/address
+  // pair) even without verifying the stake half.
   //
   // What this gap does NOT do: it does not let a mismatch pass unnoticed
   // forever, and it fails in a bounded direction. Signing itself does not
@@ -172,15 +224,25 @@ export class PrivateKeyKeySource implements KeySource {
     if (!/^addr1[0-9a-z]+$/.test(trimmedAddress)) {
       throw new Error('Invalid address: expected a bech32 addr1 value.');
     }
-    this.privateKeyBech32 = trimmedKey;
-    this.address = trimmedAddress;
+    this.#privateKeyBech32 = trimmedKey;
+    this.#address = trimmedAddress;
   }
 
   describe(): string {
     return 'raw private key';
   }
 
+  // Defence in depth beyond the #private fields above -- see the matching
+  // comment on MnemonicKeySource.
+  toJSON(): string {
+    return this.describe();
+  }
+
+  [NODE_INSPECT_CUSTOM](): string {
+    return this.describe();
+  }
+
   load(): SigningIdentity {
-    return { privateKeyBech32: this.privateKeyBech32, address: this.address };
+    return { privateKeyBech32: this.#privateKeyBech32, address: this.#address };
   }
 }

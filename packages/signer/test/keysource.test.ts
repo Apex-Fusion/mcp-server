@@ -1,5 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import util from 'node:util';
 import { MnemonicKeySource, PrivateKeyKeySource } from '../src/keysource.ts';
 
 // Throwaway test mnemonic. Controls no funds. Never use outside tests.
@@ -367,5 +368,118 @@ describe('error messages never echo the rejected input, even when the input itse
       const message = err instanceof Error ? err.message : String(err);
       assert.ok(!message.includes(rejected));
     }
+  });
+});
+
+// --- Coordinator review pass ------------------------------------------------
+//
+// Independent review found one real leak the tests above did not cover, and
+// one unpinned default. Both reproduced first against the pre-fix code
+// (confirmed RED — see signer-task-5-report.md's addendum for the transcript)
+// before the fix landed.
+
+describe('key material is unreachable at RUNTIME, not just hidden from the compiler', () => {
+  // TypeScript `private` erases at compile time only. At runtime an instance
+  // built with plain `private readonly mnemonic: string` is an ordinary
+  // object with an ordinary enumerable `mnemonic` property — JSON.stringify,
+  // util.inspect (and therefore console.log, which calls it internally),
+  // Object.keys, Object.getOwnPropertyNames, spread, and for...in all see it.
+  // Reproduced directly before writing this fix: JSON.stringify() on the
+  // pre-fix class printed the mnemonic in full. This package already writes
+  // diagnostics to stderr elsewhere (audit.ts, index.ts), so this is one
+  // `console.log(keySource)` away from a real leak, not a theoretical one.
+  const mnemonicSource = new MnemonicKeySource(TEST_MNEMONIC, 2);
+  const derived = new MnemonicKeySource(TEST_MNEMONIC).load();
+  const privateKeySource = new PrivateKeyKeySource(derived.privateKeyBech32, derived.address);
+
+  // TEST_MNEMONIC's words, checked individually: a substring check for the
+  // whole phrase would miss a leak that reformats or partially reproduces it
+  // (e.g. an inspect call that line-wraps between words).
+  const MNEMONIC_WORDS = TEST_MNEMONIC.split(' ');
+
+  function assertNoLeak(rendered: string, label: string) {
+    for (const word of MNEMONIC_WORDS) {
+      assert.ok(!rendered.includes(word), `${label} must not contain the mnemonic word "${word}"`);
+    }
+    assert.ok(!rendered.includes(derived.privateKeyBech32), `${label} must not contain the private key`);
+  }
+
+  test('JSON.stringify(MnemonicKeySource instance) leaks nothing', () => {
+    assertNoLeak(JSON.stringify(mnemonicSource), 'JSON.stringify');
+  });
+
+  test('util.inspect(MnemonicKeySource instance) leaks nothing (covers console.log too, which calls util.inspect internally)', () => {
+    assertNoLeak(util.inspect(mnemonicSource), 'util.inspect');
+  });
+
+  test('Object.keys(MnemonicKeySource instance) no longer exposes the "mnemonic" property name, and accountIndex (not secret) remains', () => {
+    // Object.keys returns property NAMES, which for the secret field are
+    // never themselves derived from the mnemonic's VALUE — the meaningful
+    // assertion is that the #private field is not enumerable at all.
+    // accountIndex is explicitly not secret and is allowed to stay visible.
+    assert.deepEqual(Object.keys(mnemonicSource), ['accountIndex']);
+  });
+
+  test('Object.values(MnemonicKeySource instance) leaks nothing (the value-exposure half Object.keys alone does not test)', () => {
+    assertNoLeak(JSON.stringify(Object.values(mnemonicSource)), 'Object.values');
+  });
+
+  test('JSON.stringify(PrivateKeyKeySource instance) leaks nothing', () => {
+    assertNoLeak(JSON.stringify(privateKeySource), 'JSON.stringify');
+  });
+
+  test('util.inspect(PrivateKeyKeySource instance) leaks nothing (covers console.log too)', () => {
+    assertNoLeak(util.inspect(privateKeySource), 'util.inspect');
+  });
+
+  test('Object.keys(PrivateKeyKeySource instance) exposes no property names at all — both fields are secret', () => {
+    assert.deepEqual(Object.keys(privateKeySource), []);
+  });
+
+  test('Object.values(PrivateKeyKeySource instance) leaks nothing', () => {
+    assertNoLeak(JSON.stringify(Object.values(privateKeySource)), 'Object.values');
+  });
+
+  test('JSON.stringify still produces something useful (describe()\'s string), not an uninformative {}', () => {
+    // Defence-in-depth check: toJSON()/inspect.custom exist so an accidental
+    // serialisation attempt is still legible, not merely safe. Confirms the
+    // override actually engages rather than JSON.stringify silently falling
+    // back to `{}` because every enumerable property happened to be gone.
+    assert.equal(JSON.stringify(mnemonicSource), JSON.stringify(mnemonicSource.describe()));
+    assert.equal(JSON.stringify(privateKeySource), JSON.stringify(privateKeySource.describe()));
+  });
+});
+
+describe('MnemonicKeySource — the default account index is pinned to 0', () => {
+  // keysource.test.ts previously only ever compared an EXPLICIT 0 against an
+  // EXPLICIT 1 ("a different account index yields a different address");
+  // nothing tied the OMITTED-argument default itself to 0. A silent
+  // regression changing the default would derive a different, validly
+  // formatted wallet for every caller that omits the argument — and since
+  // policy.ts matches change outputs by exact address, that would make
+  // every real transaction look like a full outflow and get refused.
+  test('a default-constructed instance derives the identical address as an explicit accountIndex: 0', () => {
+    const defaulted = new MnemonicKeySource(TEST_MNEMONIC).load();
+    const explicit = new MnemonicKeySource(TEST_MNEMONIC, 0).load();
+    assert.equal(defaulted.address, explicit.address);
+    assert.equal(defaulted.privateKeyBech32, explicit.privateKeyBech32);
+  });
+});
+
+describe('MnemonicKeySource.load() — the error-wrap prefix is pinned', () => {
+  // Removing the try/catch around walletFromSeed entirely still lets the
+  // underlying bip39 error ("Invalid mnemonic checksum") through unwrapped,
+  // which satisfied every /checksum/i-style assertion above without the
+  // wrap actually being present. This pins the wrap itself.
+  const BAD_CHECKSUM_MNEMONIC =
+    'bulk walk nut penalty hip pave soap entry language right filter choice';
+
+  test('load() failure is prefixed with the source-attributing wrap message', () => {
+    // assert.throws matches against error.toString() ('Error: <message>'),
+    // not error.message directly, hence no leading ^ anchor here.
+    assert.throws(
+      () => new MnemonicKeySource(BAD_CHECKSUM_MNEMONIC).load(),
+      /Mnemonic could not be derived into a wallet: Invalid mnemonic checksum/
+    );
   });
 });
