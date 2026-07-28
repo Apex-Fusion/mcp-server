@@ -24,6 +24,16 @@ function ada(lovelace: bigint): string {
   return (Number(lovelace) / 1_000_000).toFixed(6);
 }
 
+// A blank entry is not a usable address. `''.split(',')` on an empty string
+// yields `['']`, not `[]` — a realistic way an upstream config/env-parsing bug
+// could hand this module a non-empty array that names no real address. Left
+// unfiltered, `ownAddresses.length === 0` would miss that case (the array
+// isn't empty), the blank entry would never match a real output, and the
+// module would proceed as if it knew an own address when it does not.
+function knownAddresses(ownAddresses: string[]): string[] {
+  return ownAddresses.filter((address) => address.trim().length > 0);
+}
+
 /**
  * Net outflow = every output that does NOT return to us, plus the fee.
  *
@@ -35,7 +45,7 @@ export function computeOutflow(
   tx: DecodedTx,
   ownAddresses: string[]
 ): { netOutflowLovelace: bigint; assetMovements: AssetMovement[] } {
-  const own = new Set(ownAddresses);
+  const own = new Set(knownAddresses(ownAddresses));
   let leaving = 0n;
   const assetMovements: AssetMovement[] = [];
 
@@ -59,8 +69,10 @@ export function evaluate(
   const { netOutflowLovelace, assetMovements } = computeOutflow(tx, ownAddresses);
 
   // Fail closed: with no own address, every output looks foreign and change
-  // cannot be identified, so any decision would be meaningless.
-  if (ownAddresses.length === 0) {
+  // cannot be identified, so any decision would be meaningless. A list
+  // containing only blank entries counts as no own address too — see
+  // knownAddresses().
+  if (knownAddresses(ownAddresses).length === 0) {
     return {
       allowed: false,
       reason: 'No own address available, so change cannot be distinguished from outflow. Refusing.',
