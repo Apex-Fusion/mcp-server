@@ -58,6 +58,28 @@ export function decodeTransaction(cborHex: string): DecodedTx {
     );
   }
 
+  // from_cbor_hex only requires that a *prefix* of cborHex parse as a valid
+  // transaction; it does not check that parsing consumed the whole string, so
+  // trailing bytes would otherwise be silently discarded and produce a
+  // confident, fully-populated result over less data than was actually
+  // supplied. CML preserves the original encoding on parse-then-reserialize
+  // (only objects built from scratch via `.new()` are canonicalised), so
+  // re-serialising and comparing against the input detects any unconsumed
+  // suffix. Compared case-insensitively: valid uppercase-hex input round-trips
+  // through CML as lowercase, which would otherwise read as a mismatch.
+  // Verified empirically (not just by this module's own tests, which lack an
+  // asset-bearing or multi-shape fixture) across: the clean fixture, the
+  // fixture with trailing bytes appended, a fixture-derived transaction with a
+  // real vkey witness attached (the shape sign.ts will produce), and a
+  // fixture-derived transaction with an added output (a structural change) —
+  // strict equality held for every legitimate case and failed only, in the
+  // "input longer than reserialised" direction, for the trailing-bytes case.
+  if (tx.to_cbor_hex().toLowerCase() !== cborHex.toLowerCase()) {
+    throw new Error(
+      'Transaction could not be decoded: input was not fully consumed (unrecognised trailing data)'
+    );
+  }
+
   const body = tx.body();
   const outputs: DecodedOutput[] = [];
   const cmlOutputs = body.outputs();

@@ -1,5 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as CML from '@anastasia-labs/cardano-multiplatform-lib-nodejs';
 import { decodeTransaction } from '../src/decode.ts';
 
 // Real unsigned transaction from Vector testnet. 1 input, 2 outputs
@@ -55,5 +56,44 @@ describe('decodeTransaction', () => {
 
   test('rejects an empty string', () => {
     assert.throws(() => decodeTransaction(''), /could not be decoded/i);
+  });
+
+  // CML's from_cbor_hex only requires that a *prefix* of the input parse as a
+  // valid transaction — it does not check that parsing consumed the whole
+  // string. Left unchecked, appending arbitrary bytes to a real transaction
+  // would silently decode as if those bytes did not exist: a confident,
+  // fully-populated result over less data than was actually supplied. That is
+  // the opposite failure mode from the tests above (which all fail to parse
+  // at all) and is exactly the kind of partial understanding this module must
+  // never hand to policy.
+  describe('unconsumed input (trailing bytes)', () => {
+    test('rejects a transaction with trailing bytes appended', () => {
+      assert.throws(() => decodeTransaction(FIXTURE_CBOR + 'deadbeef'), /could not be decoded/i);
+    });
+
+    test('still accepts the clean fixture (no false positive on legitimate input)', () => {
+      assert.doesNotThrow(() => decodeTransaction(FIXTURE_CBOR));
+    });
+
+    test('still accepts a signed transaction (fixture + a real vkey witness)', () => {
+      const unsigned = CML.Transaction.from_cbor_hex(FIXTURE_CBOR);
+      const body = unsigned.body();
+      const hash = CML.hash_transaction(body);
+      const privateKey = CML.PrivateKey.generate_ed25519();
+      const signature = privateKey.sign(hash.to_raw_bytes());
+
+      const vkeywitnesses = CML.VkeywitnessList.new();
+      vkeywitnesses.add(CML.Vkeywitness.new(privateKey.to_public(), signature));
+      const witnessSet = CML.TransactionWitnessSet.new();
+      witnessSet.set_vkeywitnesses(vkeywitnesses);
+
+      // The same shape sign.ts will produce: original body, a witness set, no
+      // auxiliary data.
+      const signed = CML.Transaction.new(body, witnessSet, true, undefined);
+
+      const decoded = decodeTransaction(signed.to_cbor_hex());
+      assert.equal(decoded.fee, 168223n);
+      assert.equal(decoded.outputs.length, 2);
+    });
   });
 });
