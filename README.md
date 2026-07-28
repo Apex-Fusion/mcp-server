@@ -156,15 +156,13 @@ docker run -p 3000:3000 vector-mcp
 |----------|-------------|---------|
 | `PORT` | HTTP server port | `3000` |
 | `VECTOR_OGMIOS_URL` | Ogmios HTTP JSON-RPC endpoint | `https://ogmios.vector.testnet.apexfusion.org` |
-| `VECTOR_KOIOS_URL` | Koios REST API endpoint | `https://koios.vector.testnet.apexfusion.org/` |
+| `VECTOR_KOIOS_URL` | Koios REST API endpoint | `https://v2.koios.vector.testnet.apexfusion.org/` |
 | `VECTOR_SUBMIT_URL` | Transaction submit API | `https://submit.vector.testnet.apexfusion.org/api/submit/tx` |
 | `VECTOR_EXPLORER_URL` | Block explorer base URL | `https://vector.testnet.apexscan.org` |
 | `VECTOR_SPEND_LIMIT_PER_TX` | Max lovelace per transaction | `100000000` (100 AP3X) |
 | `VECTOR_SPEND_LIMIT_DAILY` | Max lovelace per day | `500000000` (500 AP3X) |
 | `VECTOR_AUDIT_LOG_PATH` | Persistent audit log file path | `./vector-audit-log.json` |
 | `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute | `60` |
-
-> **Note:** the default testnet Koios URL predates the v2 migration and currently returns 503. Override `VECTOR_KOIOS_URL` with `https://v2.koios.vector.testnet.apexfusion.org/` until the default is updated in code.
 
 ### Mainnet endpoints
 
