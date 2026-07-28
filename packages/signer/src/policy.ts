@@ -39,12 +39,24 @@ function ada(lovelace: bigint): string {
 // it starts with the 'addr' prefix every Cardano/Vector payment address
 // actually uses. Nothing built purely from blank or invisible characters can
 // satisfy that, without needing to enumerate any of them.
-function looksLikeAddress(address: string): boolean {
-  return address.trim().startsWith('addr');
-}
-
+//
+// The trimmed value is what gets kept, not the original: this array feeds
+// straight into a `Set` that real output addresses (always clean, never
+// padded) are matched against by exact string equality. An entry that only
+// passes the `startsWith('addr')` check after trimming but is stored with
+// its padding intact would pass this gate yet never match anything
+// downstream — "known" but functionally invisible, silently misclassifying
+// every one of its own change outputs as outflow. `.map` before `.filter`
+// keeps the check and the stored value in agreement.
+//
+// Residual, deliberately not chased further: a *trailing* invisible
+// character (e.g. U+200B) is not stripped by `.trim()`, so an address padded
+// that way still will not match its own outputs. Same safe direction as
+// everything else here — it over-refuses, never under-refuses — and closing
+// it would mean reaching for the denylist-of-codepoints approach this
+// function exists to avoid.
 function knownAddresses(ownAddresses: string[]): string[] {
-  return ownAddresses.filter(looksLikeAddress);
+  return ownAddresses.map((address) => address.trim()).filter((address) => address.startsWith('addr'));
 }
 
 /**

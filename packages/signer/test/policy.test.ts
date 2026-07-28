@@ -215,6 +215,87 @@ describe('evaluate — ownAddresses entries built from invisible Unicode charact
   });
 });
 
+describe('evaluate — knownAddresses must store the trimmed value, not just check it', () => {
+  // Real bug, found reviewing the invisible-character fix, present since that
+  // fix's very first version: the filter checked `address.trim().startsWith(...)`
+  // but Array.prototype.filter always returns the ORIGINAL element on a match,
+  // never a transformed one. So an entry that only qualified after trimming
+  // was kept *with its padding intact*, then compared by exact string
+  // equality against real output addresses (always clean, never padded) —
+  // which can never match. The address passes the fail-closed gate (it
+  // "looks like" a known address) but is then functionally invisible to
+  // computeOutflow's classification, so every one of its own change outputs
+  // gets counted as outflow instead of being excluded. Since change is
+  // usually the dominant value in a UTxO transaction, a single incidental
+  // leading or trailing space on a configured own address would refuse
+  // nearly every real transaction at a wildly inflated outflow figure.
+  test('a leading space on a real own address no longer hides its change output (regression test for the fix)', () => {
+    const d = evaluate(
+      tx({ outputs: [
+        { address: FOREIGN, lovelace: 3_000_000n, assets: [] },
+        { address: OWN, lovelace: 996_000_000n, assets: [] },
+      ] }),
+      [' ' + OWN], LIMITS, 0n
+    );
+    assert.equal(d.allowed, true);
+    assert.equal(d.netOutflowLovelace, 3_200_000n, 'only the genuine foreign spend + fee, not the misclassified change');
+  });
+
+  test('a trailing space on a real own address no longer hides its change output', () => {
+    const d = evaluate(
+      tx({ outputs: [
+        { address: FOREIGN, lovelace: 3_000_000n, assets: [] },
+        { address: OWN, lovelace: 996_000_000n, assets: [] },
+      ] }),
+      [OWN + ' '], LIMITS, 0n
+    );
+    assert.equal(d.allowed, true);
+    assert.equal(d.netOutflowLovelace, 3_200_000n);
+  });
+
+  test('residual: a trailing invisible character still hides the change output, since .trim() does not strip it — same safe direction', () => {
+    // Documented, deliberate residual (see the comment on knownAddresses in
+    // policy.ts): fixing this specific case would mean reaching for the
+    // denylist-of-invisible-codepoints approach the positive check exists to
+    // avoid. Pinned here so it stays a known, bounded gap rather than an
+    // implicit assumption — and because it fails in the safe direction
+    // (refuses a legitimate transaction) rather than the dangerous one.
+    const ZERO_WIDTH_SPACE = String.fromCharCode(0x200b);
+    const d = evaluate(
+      tx({ outputs: [
+        { address: FOREIGN, lovelace: 3_000_000n, assets: [] },
+        { address: OWN, lovelace: 996_000_000n, assets: [] },
+      ] }),
+      [OWN + ZERO_WIDTH_SPACE], LIMITS, 0n
+    );
+    assert.equal(d.allowed, false);
+    assert.equal(d.netOutflowLovelace, 999_200_000n, 'the change is still misclassified as outflow — known, bounded, safe-direction residual');
+  });
+
+  test('an entry merely containing "addr" without starting with it is not a known own address (prefix, not substring)', () => {
+    const d = evaluate(
+      tx({ outputs: [{ address: FOREIGN, lovelace: 5_000_000n, assets: [] }] }),
+      ['xxxaddrxxx'], LIMITS, 0n
+    );
+    assert.equal(d.allowed, false);
+    assert.match(d.reason!, /own address/i);
+  });
+
+  test('a case-variant entry does not match a real own address (pins the existing case-sensitivity decision)', () => {
+    const CASE_VARIANT = 'ADDR1own'; // OWN is 'addr1own'
+    const d = evaluate(
+      tx({ outputs: [{ address: OWN, lovelace: 5_000_000n, assets: [] }] }),
+      [CASE_VARIANT], LIMITS, 0n
+    );
+    // knownAddresses([CASE_VARIANT]) is empty (case-sensitive prefix check
+    // fails), so this hits the fail-closed "no own address" path rather than
+    // the over-counting path — either way, OWN must not be recognised as
+    // change, which is the property this test pins.
+    assert.equal(d.allowed, false);
+    assert.match(d.reason!, /own address/i);
+  });
+});
+
 describe('computeOutflow — the filter applies at the Set-construction site itself, not only in evaluate()', () => {
   // evaluate()'s fail-closed guard and computeOutflow()'s own Set both call
   // knownAddresses(), but nothing above exercises them independently: every
