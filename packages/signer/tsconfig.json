@@ -8,7 +8,11 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    // Tests import source with an explicit .ts extension (node --import tsx
+    // resolves it at runtime). Safe here because noEmit is set, and it lets the
+    // tests be typechecked rather than excluded from the gate.
+    "allowImportingTsExtensions": true
   },
   "include": ["src/**/*", "test/**/*"]
 }
