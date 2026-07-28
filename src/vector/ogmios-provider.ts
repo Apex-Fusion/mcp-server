@@ -162,7 +162,7 @@ export class OgmiosProvider implements Provider {
           }
         }
       } catch (err) {
-        // Koios unreachable — caller can fall back to scanning UTxOs
+        // Koios unreachable - caller can fall back to scanning UTxOs
       }
     }
 
@@ -310,7 +310,7 @@ export class OgmiosProvider implements Provider {
 
   /**
    * Evaluate a transaction without submitting (dry run).
-   * Backward-compatible alias — returns raw Ogmios response.
+   * Backward-compatible alias - returns raw Ogmios response.
    */
   async evaluateTransaction(txCborHex: string): Promise<any> {
     return this.rpc('evaluateTransaction', {

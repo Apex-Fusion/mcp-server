@@ -39,10 +39,10 @@ if (existsSync(envPath)) {
 // Configuration from environment variables
 const VECTOR_OGMIOS_URL = process.env.VECTOR_OGMIOS_URL || 'https://ogmios.vector.testnet.apexfusion.org';
 const VECTOR_SUBMIT_URL = process.env.VECTOR_SUBMIT_URL || 'https://submit.vector.testnet.apexfusion.org/api/submit/tx';
-const VECTOR_KOIOS_URL = process.env.VECTOR_KOIOS_URL || 'https://koios.vector.testnet.apexfusion.org/';
+const VECTOR_KOIOS_URL = process.env.VECTOR_KOIOS_URL || 'https://v2.koios.vector.testnet.apexfusion.org/';
 const VECTOR_EXPLORER_URL = process.env.VECTOR_EXPLORER_URL || 'https://vector.testnet.apexscan.org';
 
-// Helper function to format ADA amounts
+// Helper function to format AP3X amounts
 function lovelaceToAda(lovelace: string | number | bigint): string {
   if (lovelace === undefined || lovelace === null) return '0.000000';
   try {
@@ -159,7 +159,7 @@ export async function getWalletInfo(mnemonic: string, accountIndex: number = 0):
   };
 }
 
-// Send ADA transaction
+// Send AP3X transaction
 export async function sendAda(
   recipientAddress: string,
   amountAda: number,
@@ -234,8 +234,8 @@ export async function sendTokens(
     throw new Error('Amount must be a positive number');
   }
 
-  // Safety check on ADA portion
-  const adaLovelace = adaAmount ? Math.floor(adaAmount * 1_000_000) : 2_000_000; // min ~2 ADA
+  // Safety check on AP3X portion
+  const adaLovelace = adaAmount ? Math.floor(adaAmount * 1_000_000) : 2_000_000; // min ~2 AP3X
   const safetyCheck = safetyLayer.checkTransaction(adaLovelace);
   if (!safetyCheck.allowed) {
     throw new Error(`Safety limit exceeded: ${safetyCheck.reason}`);
@@ -260,7 +260,7 @@ export async function sendTokens(
 
   const outputLovelace = adaAmount
     ? BigInt(Math.floor(adaAmount * 1_000_000))
-    : BigInt(2_000_000); // Default min ADA
+    : BigInt(2_000_000); // Default min AP3X
 
   let tx = lucid.newTx()
     .pay.ToAddress(recipientAddress, {
@@ -303,7 +303,7 @@ export async function buildTransaction(
     throw new Error('At least one output is required');
   }
 
-  // Calculate total ADA across all outputs for safety check
+  // Calculate total AP3X across all outputs for safety check
   const totalLovelace = outputs.reduce((sum, o) => sum + o.lovelace, 0);
   const safetyCheck = safetyLayer.checkTransaction(totalLovelace);
   if (!safetyCheck.allowed) {
@@ -494,7 +494,7 @@ export async function interactWithContract(
     const signedTx = await completedTx.sign.withWallet().complete();
     const txHash = await signedTx.submit();
 
-    // No spend recording for collecting — funds are coming back to wallet
+    // No spend recording for collecting - funds are coming back to wallet
 
     return {
       txHash,
@@ -508,10 +508,10 @@ export async function interactWithContract(
 // Register all Vector MCP tools
 export function registerVectorTools(server: McpServer) {
 
-  // vector_get_balance — Get balance for any address
+  // vector_get_balance - Get balance for any address
   server.tool(
     "vector_get_balance",
-    "Get ADA and token balances for a Vector address",
+    "Get AP3X and token balances for a Vector address",
     {
       address: z.string().describe("Vector address to check (addr1...)"),
     },
@@ -563,7 +563,7 @@ export function registerVectorTools(server: McpServer) {
             type: "text",
             text: `Vector Address Balance for ${address}:
 
-ADA Balance: ${lovelaceToAda(adaBalance)} ADA
+AP3X Balance: ${lovelaceToAda(adaBalance)} AP3X
 UTxO Count: ${utxos.length}
 
 ${tokens.length > 0 ? `Token Holdings (${tokens.length}):\n${tokenList}` : 'No token holdings found'}`,
@@ -581,7 +581,7 @@ ${tokens.length > 0 ? `Token Holdings (${tokens.length}):\n${tokenList}` : 'No t
     }
   );
 
-  // vector_get_address — Get the agent's wallet address and balance
+  // vector_get_address - Get the agent's wallet address and balance
   server.tool(
     "vector_get_address",
     "Get the Vector wallet address, balance, and token holdings derived from a mnemonic",
@@ -606,7 +606,7 @@ ${tokens.length > 0 ? `Token Holdings (${tokens.length}):\n${tokenList}` : 'No t
             text: `# Vector Wallet Information
 
 Address: ${walletInfo.address}
-ADA Balance: ${walletInfo.ada} ADA
+AP3X Balance: ${walletInfo.ada} AP3X
 UTXO Count: ${walletInfo.utxoCount}
 
 ${walletInfo.tokens.length > 0 ? `## Token Holdings (${walletInfo.tokens.length}):\n${tokenList}` : 'No token holdings found'}`,
@@ -629,7 +629,7 @@ ${walletInfo.tokens.length > 0 ? `## Token Holdings (${walletInfo.tokens.length}
     }
   );
 
-  // vector_get_utxos — List UTxOs for an address or the wallet
+  // vector_get_utxos - List UTxOs for an address or the wallet
   server.tool(
     "vector_get_utxos",
     "List unspent transaction outputs (UTxOs) for a Vector address or a wallet derived from a mnemonic",
@@ -673,7 +673,7 @@ ${walletInfo.tokens.length > 0 ? `## Token Holdings (${walletInfo.tokens.length}
         const utxoList = utxos.map((utxo, i) => {
           const ada = utxo.assets['lovelace'] ? lovelaceToAda(utxo.assets['lovelace']) : '0';
           const tokenCount = Object.keys(utxo.assets).filter(k => k !== 'lovelace').length;
-          return `${i + 1}. ${utxo.txHash}#${utxo.outputIndex} — ${ada} ADA${tokenCount > 0 ? ` + ${tokenCount} token(s)` : ''}`;
+          return `${i + 1}. ${utxo.txHash}#${utxo.outputIndex} - ${ada} AP3X${tokenCount > 0 ? ` + ${tokenCount} token(s)` : ''}`;
         }).join('\n');
 
         return {
@@ -698,13 +698,13 @@ ${utxoList}`,
     }
   );
 
-  // vector_send_apex — Send APEX with safety limits (or craft unsigned TX)
+  // vector_send_apex - Send APEX with safety limits (or craft unsigned TX)
   server.tool(
     "vector_send_apex",
-    "Send ADA from a wallet to a recipient address. Set unsigned_only=true to return unsigned CBOR without submitting (transaction-crafter mode).",
+    "Send AP3X from a wallet to a recipient address. Set unsigned_only=true to return unsigned CBOR without submitting (transaction-crafter mode).",
     {
       recipientAddress: z.string().describe("Recipient Vector address (addr1...)"),
-      amount: z.number().min(1).describe("Amount of ADA to send"),
+      amount: z.number().min(1).describe("Amount of AP3X to send"),
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the sending wallet"),
       metadata: z.string().optional().describe("Optional transaction metadata in JSON format"),
       unsigned_only: z.boolean().optional().default(false).describe("If true, return unsigned TX CBOR without signing or submitting"),
@@ -732,9 +732,9 @@ ${utxoList}`,
               type: "text",
               text: `# Unsigned Transaction (Transaction-Crafter Mode)
 
-**Amount:** ${amount} ADA (${lovelaceAmount} lovelace)
+**Amount:** ${amount} AP3X (${lovelaceAmount} lovelace)
 **To:** ${recipientAddress}
-**Estimated Fee:** ${lovelaceToAda(fee)} ADA
+**Estimated Fee:** ${lovelaceToAda(fee)} AP3X
 
 **Unsigned TX CBOR:**
 \`\`\`
@@ -750,12 +750,12 @@ This transaction has NOT been submitted. Sign and submit it separately.`,
         return {
           content: [{
             type: "text",
-            text: `# ADA Transaction Successful
+            text: `# AP3X Transaction Successful
 
 Transaction Hash: ${result.txHash}
 From: ${result.senderAddress}
 To: ${result.recipientAddress}
-Amount: ${result.amount} ADA
+Amount: ${result.amount} AP3X
 
 [View on Explorer](${result.links.explorer})`,
           }],
@@ -765,7 +765,7 @@ Amount: ${result.amount} ADA
         return {
           content: [{
             type: "text",
-            text: `Failed to send ADA: ${error.message}
+            text: `Failed to send AP3X: ${error.message}
 
 **Troubleshooting Tips:**
 1. Check that your wallet has sufficient balance
@@ -778,7 +778,7 @@ Amount: ${result.amount} ADA
     }
   );
 
-  // vector_send_tokens — Send native tokens with safety limits (or craft unsigned TX)
+  // vector_send_tokens - Send native tokens with safety limits (or craft unsigned TX)
   server.tool(
     "vector_send_tokens",
     "Send Vector native tokens from a wallet to a recipient address. Set unsigned_only=true to return unsigned CBOR without submitting.",
@@ -788,7 +788,7 @@ Amount: ${result.amount} ADA
       assetName: z.string().describe("Asset name (can be empty for policy-only tokens)"),
       amount: z.string().describe("Amount of tokens to send"),
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the sending wallet"),
-      adaAmount: z.number().optional().describe("Optional ADA to include (uses minimum required if not specified)"),
+      adaAmount: z.number().optional().describe("Optional AP3X to include (uses minimum required if not specified)"),
       unsigned_only: z.boolean().optional().default(false).describe("If true, return unsigned TX CBOR without signing or submitting"),
     },
     async ({ recipientAddress, policyId, assetName, amount, mnemonic, adaAmount, unsigned_only }) => {
@@ -821,8 +821,8 @@ Amount: ${result.amount} ADA
 **Token:** ${formatAssetName(assetNameHex) || policyId.substring(0,8) + '...'}
 **Amount:** ${amount}
 **To:** ${recipientAddress}
-**Included ADA:** ${lovelaceToAda(outputLovelace)} ADA
-**Estimated Fee:** ${lovelaceToAda(fee)} ADA
+**Included AP3X:** ${lovelaceToAda(outputLovelace)} AP3X
+**Estimated Fee:** ${lovelaceToAda(fee)} AP3X
 
 **Unsigned TX CBOR:**
 \`\`\`
@@ -849,7 +849,7 @@ Token Details:
 - Asset Name: ${result.token.name || '(none)'}
 - Amount: ${result.token.amount}
 
-Included ADA: ${result.ada} ADA
+Included AP3X: ${result.ada} AP3X
 
 [View on Explorer](${result.links.explorer})`,
           }],
@@ -862,7 +862,7 @@ Included ADA: ${result.ada} ADA
             text: `Failed to send tokens: ${error.message}
 
 **Troubleshooting Tips:**
-1. Check that your wallet has sufficient ADA and token balance
+1. Check that your wallet has sufficient AP3X and token balance
 2. Verify the policy ID and asset name are correct
 3. Verify the recipient address is correct (addr1...)
 4. Check spend limits with vector_get_spend_limits`,
@@ -872,7 +872,7 @@ Included ADA: ${result.ada} ADA
     }
   );
 
-  // vector_get_spend_limits — Check safety layer status
+  // vector_get_spend_limits - Check safety layer status
   server.tool(
     "vector_get_spend_limits",
     "Check current spend limits and remaining daily budget",
@@ -887,7 +887,7 @@ Included ADA: ${result.ada} ADA
         const log = safetyLayer.getAuditLog();
 
         const recentTxs = log.slice(-5).reverse().map((entry) =>
-          `- ${entry.timestamp}: ${lovelaceToAda(entry.amountLovelace)} ADA → ${entry.recipient.substring(0, 20)}... (${entry.txHash.substring(0, 16)}...)`
+          `- ${entry.timestamp}: ${lovelaceToAda(entry.amountLovelace)} AP3X → ${entry.recipient.substring(0, 20)}... (${entry.txHash.substring(0, 16)}...)`
         ).join('\n');
 
         return {
@@ -895,10 +895,10 @@ Included ADA: ${result.ada} ADA
             type: "text",
             text: `# Vector Spend Limits
 
-Per-Transaction Limit: ${lovelaceToAda(status.perTransactionLimit)} ADA
-Daily Limit: ${lovelaceToAda(status.dailyLimit)} ADA
-Daily Spent: ${lovelaceToAda(status.dailySpent)} ADA
-Daily Remaining: ${lovelaceToAda(status.dailyRemaining)} ADA
+Per-Transaction Limit: ${lovelaceToAda(status.perTransactionLimit)} AP3X
+Daily Limit: ${lovelaceToAda(status.dailyLimit)} AP3X
+Daily Spent: ${lovelaceToAda(status.dailySpent)} AP3X
+Daily Remaining: ${lovelaceToAda(status.dailyRemaining)} AP3X
 Resets At: ${status.resetTime}
 
 ${log.length > 0 ? `## Recent Transactions (last ${Math.min(5, log.length)}):\n${recentTxs}` : 'No transactions recorded yet.'}`,
@@ -916,14 +916,14 @@ ${log.length > 0 ? `## Recent Transactions (last ${Math.min(5, log.length)}):\n$
     }
   );
 
-  // vector_build_transaction — Build a complex multi-output transaction
+  // vector_build_transaction - Build a complex multi-output transaction
   server.tool(
     "vector_build_transaction",
     "Build a complex multi-output transaction with metadata. Set submit=true to sign and submit, or false to return unsigned CBOR for review.",
     {
       outputs: z.array(z.object({
         address: z.string().describe("Recipient Vector address"),
-        lovelace: z.number().describe("Amount in lovelace (1 ADA = 1,000,000 lovelace)"),
+        lovelace: z.number().describe("Amount in lovelace (1 AP3X = 1,000,000 lovelace)"),
         assets: z.record(z.string()).optional().describe("Optional native assets: { 'policyId+assetNameHex': 'quantity' }"),
       })).min(1).describe("Transaction outputs"),
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the signing wallet"),
@@ -945,9 +945,9 @@ ${log.length > 0 ? `## Recent Transactions (last ${Math.min(5, log.length)}):\n$
               text: `# Transaction Submitted
 
 Transaction Hash: ${result.txHash}
-Fee: ${result.feeAda} ADA
+Fee: ${result.feeAda} AP3X
 Outputs: ${result.outputCount}
-Total ADA Sent: ${result.totalAda} ADA
+Total AP3X Sent: ${result.totalAda} AP3X
 
 [View on Explorer](${result.links?.explorer})`,
             }],
@@ -960,9 +960,9 @@ Total ADA Sent: ${result.totalAda} ADA
             text: `# Transaction Built (Not Submitted)
 
 Transaction Hash: ${result.txHash}
-Fee: ${result.feeAda} ADA
+Fee: ${result.feeAda} AP3X
 Outputs: ${result.outputCount}
-Total ADA: ${result.totalAda} ADA
+Total AP3X: ${result.totalAda} AP3X
 
 CBOR (hex): ${result.txCbor.substring(0, 200)}${result.txCbor.length > 200 ? '...' : ''}
 
@@ -978,7 +978,7 @@ Use vector_dry_run with this CBOR to simulate, or call vector_build_transaction 
 
 **Troubleshooting Tips:**
 1. Verify all recipient addresses are valid (addr1...)
-2. Ensure wallet has enough ADA for outputs + fees
+2. Ensure wallet has enough AP3X for outputs + fees
 3. Check spend limits with vector_get_spend_limits`,
           }],
         };
@@ -986,10 +986,10 @@ Use vector_dry_run with this CBOR to simulate, or call vector_build_transaction 
     }
   );
 
-  // vector_dry_run — Simulate a transaction without submitting
+  // vector_dry_run - Simulate a transaction without submitting
   server.tool(
     "vector_dry_run",
-    "Simulate a transaction without submitting — returns fee estimate and validation result",
+    "Simulate a transaction without submitting - returns fee estimate and validation result",
     {
       txCbor: z.string().optional().describe("Hex-encoded CBOR of a built transaction to evaluate"),
       outputs: z.array(z.object({
@@ -1071,7 +1071,7 @@ Use vector_dry_run with this CBOR to simulate, or call vector_build_transaction 
             executionUnits: (totalMemory > 0 || totalCpu > 0) ? { memory: totalMemory, cpu: totalCpu } : undefined,
           };
         } catch (evalErr) {
-          // evaluateTransaction failed — still return fee if we built the tx
+          // evaluateTransaction failed - still return fee if we built the tx
           if (feeFromBuild) {
             evalResult = {
               valid: true,
@@ -1095,7 +1095,7 @@ Use vector_dry_run with this CBOR to simulate, or call vector_build_transaction 
             text: `# Dry Run Result
 
 Valid: ${evalResult.valid ? 'Yes' : 'No'}
-Estimated Fee: ${evalResult.feeAda} ADA (${evalResult.fee} lovelace)
+Estimated Fee: ${evalResult.feeAda} AP3X (${evalResult.fee} lovelace)
 ${evalResult.executionUnits ? `Execution Units: Memory ${evalResult.executionUnits.memory}, CPU ${evalResult.executionUnits.cpu}` : ''}
 ${evalResult.error ? `\nNote: ${evalResult.error}` : ''}
 
@@ -1114,7 +1114,7 @@ No transaction was submitted to the network.`,
     }
   );
 
-  // vector_get_transaction_history — Get transaction history via Koios
+  // vector_get_transaction_history - Get transaction history via Koios
   server.tool(
     "vector_get_transaction_history",
     "Get transaction history for a Vector address via Koios indexed queries",
@@ -1156,7 +1156,7 @@ No transaction was submitted to the network.`,
 
         const txList = txs.map((tx, i) => {
           const feeAda = tx.fee ? lovelaceToAda(tx.fee) : 'N/A';
-          return `${i + 1}. ${tx.txHash}\n   Block: ${tx.blockHeight} | Time: ${tx.blockTime} | Fee: ${feeAda} ADA`;
+          return `${i + 1}. ${tx.txHash}\n   Block: ${tx.blockHeight} | Time: ${tx.blockTime} | Fee: ${feeAda} AP3X`;
         }).join('\n\n');
 
         return {
@@ -1188,7 +1188,7 @@ ${txList}
     }
   );
 
-  // vector_deploy_contract — Deploy a Plutus/Aiken smart contract
+  // vector_deploy_contract - Deploy a Plutus/Aiken smart contract
   server.tool(
     "vector_deploy_contract",
     "Deploy a Plutus/Aiken smart contract to Vector by sending funds to its script address",
@@ -1197,7 +1197,7 @@ ${txList}
       scriptType: z.enum(["PlutusV1", "PlutusV2", "PlutusV3"]).describe("Script version"),
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the deploying wallet"),
       initialDatum: z.string().optional().describe("Initial datum as CBOR hex. Use 'd87980' for void/unit datum. Defaults to void if omitted."),
-      lovelaceAmount: z.number().optional().describe("ADA to lock at the script address in lovelace (default: 2,000,000 = 2 ADA)"),
+      lovelaceAmount: z.number().optional().describe("AP3X to lock at the script address in lovelace (default: 2,000,000 = 2 AP3X)"),
     },
     async ({ scriptCbor, scriptType, mnemonic, initialDatum, lovelaceAmount }) => {
       const rateCheck = rateLimiter.check();
@@ -1237,7 +1237,7 @@ Funds locked at the script address. Use vector_interact_contract to interact wit
 
 **Troubleshooting Tips:**
 1. Verify the script CBOR is valid hex (compiled Aiken or Plutus output)
-2. Ensure wallet has sufficient ADA for the locked amount + fees
+2. Ensure wallet has sufficient AP3X for the locked amount + fees
 3. Check that the script type matches the compiled version (PlutusV1/V2/V3)
 4. Check spend limits with vector_get_spend_limits`,
           }],
@@ -1246,10 +1246,10 @@ Funds locked at the script address. Use vector_interact_contract to interact wit
     }
   );
 
-  // vector_interact_contract — Interact with a deployed smart contract
+  // vector_interact_contract - Interact with a deployed smart contract
   server.tool(
     "vector_interact_contract",
-    "Interact with a deployed Plutus/Aiken smart contract — lock funds or spend from it",
+    "Interact with a deployed Plutus/Aiken smart contract - lock AP3X or spend from it",
     {
       scriptCbor: z.string().describe("Compiled Plutus/Aiken script in CBOR hex"),
       scriptType: z.enum(["PlutusV1", "PlutusV2", "PlutusV3"]).describe("Script version"),
@@ -1257,7 +1257,7 @@ Funds locked at the script address. Use vector_interact_contract to interact wit
       mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the wallet"),
       redeemer: z.string().optional().describe("Redeemer as CBOR hex (required for spend, use 'd87980' for void)"),
       datum: z.string().optional().describe("Datum as CBOR hex (required for lock, use 'd87980' for void)"),
-      lovelaceAmount: z.number().optional().describe("Lovelace to lock (for lock action, default: 2,000,000 = 2 ADA)"),
+      lovelaceAmount: z.number().optional().describe("Lovelace to lock (for lock action, default: 2,000,000 = 2 AP3X)"),
       utxoRef: z.object({
         txHash: z.string(),
         outputIndex: z.number(),
@@ -1307,8 +1307,8 @@ Funds ${actionVerb} the script address.
 
 **Troubleshooting Tips:**
 1. For 'spend': ensure the script address has UTxOs and the redeemer satisfies the validator
-2. For 'lock': ensure wallet has sufficient ADA and the datum matches the script's expectations
-3. Spending requires collateral — ensure wallet has a pure-ADA UTxO (no native tokens)
+2. For 'lock': ensure wallet has sufficient AP3X and the datum matches the script's expectations
+3. Spending requires collateral - ensure wallet has a pure-AP3X UTxO (no native tokens)
 4. Verify the script CBOR matches the deployed script exactly
 5. Check spend limits with vector_get_spend_limits`,
           }],

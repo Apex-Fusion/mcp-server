@@ -3,8 +3,8 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import type { SpendLimits, SpendStatus, AuditEntry } from './types.js';
 
-const VECTOR_SPEND_LIMIT_PER_TX = parseInt(process.env.VECTOR_SPEND_LIMIT_PER_TX || '100000000'); // 100 ADA
-const VECTOR_SPEND_LIMIT_DAILY = parseInt(process.env.VECTOR_SPEND_LIMIT_DAILY || '500000000'); // 500 ADA
+const VECTOR_SPEND_LIMIT_PER_TX = parseInt(process.env.VECTOR_SPEND_LIMIT_PER_TX || '100000000'); // 100 AP3X
+const VECTOR_SPEND_LIMIT_DAILY = parseInt(process.env.VECTOR_SPEND_LIMIT_DAILY || '500000000'); // 500 AP3X
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -91,7 +91,7 @@ export class SafetyLayer {
     if (amountLovelace > this.limits.perTransaction) {
       return {
         allowed: false,
-        reason: `Transaction amount ${(amountLovelace / 1_000_000).toFixed(6)} ADA exceeds per-transaction limit of ${(this.limits.perTransaction / 1_000_000).toFixed(6)} ADA`,
+        reason: `Transaction amount ${(amountLovelace / 1_000_000).toFixed(6)} AP3X exceeds per-transaction limit of ${(this.limits.perTransaction / 1_000_000).toFixed(6)} AP3X`,
       };
     }
 
@@ -99,7 +99,7 @@ export class SafetyLayer {
       const remaining = this.limits.daily - this.dailySpent;
       return {
         allowed: false,
-        reason: `Transaction would exceed daily spend limit. Daily limit: ${(this.limits.daily / 1_000_000).toFixed(6)} ADA, already spent: ${(this.dailySpent / 1_000_000).toFixed(6)} ADA, remaining: ${(remaining / 1_000_000).toFixed(6)} ADA`,
+        reason: `Transaction would exceed daily spend limit. Daily limit: ${(this.limits.daily / 1_000_000).toFixed(6)} AP3X, already spent: ${(this.dailySpent / 1_000_000).toFixed(6)} AP3X, remaining: ${(remaining / 1_000_000).toFixed(6)} AP3X`,
       };
     }
 
