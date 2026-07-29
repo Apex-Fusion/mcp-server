@@ -232,6 +232,11 @@ describe('Smart Contract Tools', () => {
 // never custodial - both unchanged (tool name and call shape). walletHasAda
 // gating, the settle waits, and the assertSuccessOrKnownError convention are
 // unchanged from the pre-keyless version of this section.
+//
+// Known/accepted risk, same shape as the pre-keyless suite: if register
+// submits but a later step in this chain fails before deregister runs, the
+// 10 AP3X deposit stays locked on-chain under this test agent - nothing in
+// this file reclaims it automatically.
 
 // Extracts the CBOR block a build_* tool response embeds ("```\n<hex>\n```"),
 // or null if the build didn't produce one (a known-error response, e.g. an
@@ -264,7 +269,18 @@ async function buildSignSubmit(
   const { signedCborHex } = signWithMnemonic(cbor, mnemonic);
   const submitText = await callTool(ctx.client, 'vector_submit_transaction', { signedTxCbor: signedCborHex });
   console.log(submitText);
-  assertSuccessOrKnownError(submitText, /Transaction Submitted/, `${toolName} (submit)`);
+  // A successful build against a FUNDED wallet is expected to submit
+  // successfully too - hard-assert here instead of the tolerant
+  // assertSuccessOrKnownError, which would otherwise treat a real submit
+  // regression (e.g. a signing defect - see task-5-report.md's Bug #1) as
+  // an indistinguishable "known error, wallet may be unfunded" and let it
+  // pass silently. Falls back to the graceful known-error path when the
+  // wallet isn't funded (mirrors every other assertion in this file).
+  if (walletHasAda) {
+    assert.match(submitText, /Transaction Submitted/, `${toolName} (submit): expected success on a funded wallet, got: ${submitText.slice(0, 300)}`);
+  } else {
+    assertSuccessOrKnownError(submitText, /Transaction Submitted/, `${toolName} (submit)`);
+  }
   return { buildText, submitted: /Transaction Submitted/.test(submitText) };
 }
 

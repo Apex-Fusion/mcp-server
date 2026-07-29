@@ -84,7 +84,12 @@ describe('registry keyless tier-1 (live testnet, no secrets)', () => {
       changeAddress: OWN_ADDRESS, agent_id: liveDid!, description: 'not mine',
     });
     // The discovered agent belongs to another wallet (verified during planning:
-    // live datum owners differ from OWN_ADDRESS's key). Expect the ownership fail-fast.
-    assert.match(text, /Ownership check failed|Failed to build agent update/);
+    // live datum owners differ from OWN_ADDRESS's key). Expect the ownership
+    // fail-fast specifically, not the broader "Failed to build agent update"
+    // wrapper it's nested inside - that second alternative would also match
+    // any OTHER build failure (a real regression), so it isn't a safe
+    // stand-in for "ownership was checked and correctly refused." Reviewer-
+    // confirmed against today's live response; not re-run live for this change.
+    assert.match(text, /Ownership check failed/);
   });
 });
