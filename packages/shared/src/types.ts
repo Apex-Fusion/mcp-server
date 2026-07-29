@@ -76,6 +76,28 @@ export interface VectorBuildInteractResult extends VectorUnsignedBuildResult {
   scriptAddress: string; action: 'lock' | 'spend';
 }
 
+// --- Keyless registry builds (spec PR 7) ---
+
+export interface VectorBuildRegisterResult extends VectorUnsignedBuildResult {
+  agentId: string;
+  nftAssetName: string;
+  registryAddress: string;
+  depositLovelace: string;
+}
+
+export interface VectorBuildAgentOpResult extends VectorUnsignedBuildResult {
+  agentId: string;
+  op: 'update' | 'transfer' | 'deregister';
+  agentName: string;
+  detail: string;
+}
+
+export interface VectorBuildMessageResult extends VectorUnsignedBuildResult {
+  agentId: string;
+  agentName: string;
+  recipientAddress: string;
+}
+
 // --- Agent Network ---
 
 export interface AgentProfile {
