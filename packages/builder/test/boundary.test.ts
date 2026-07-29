@@ -12,6 +12,7 @@ import { resolve, join, relative } from 'node:path';
  * non-custodial split; growing it should be impossible to do accidentally.
  */
 const SRC_ROOT = resolve(import.meta.dirname!, '../src');
+const SCRIPTS_ROOT = resolve(import.meta.dirname!, '../scripts');
 const CUSTODIAL_UNTIL_LATER_PR = new Set([
   'vector/agent-network.ts',     // family 2 — goes keyless in spec PR 7
   'vector/self-improvement.ts',  // family 3 — goes keyless in spec PR 8
@@ -44,6 +45,16 @@ describe('builder custody boundary', () => {
       const lines = readFileSync(file, 'utf-8').split('\n');
       lines.forEach((line, i) => {
         if (FORBIDDEN.test(line)) offenders.push(`${rel}:${i + 1}: ${line.trim()}`);
+      });
+    }
+    // scripts/ is dev-tooling, not shipped builder source - it has no
+    // custodial carve-out, so nothing here is ever checked against the
+    // allowlist (unlike SRC_ROOT files above).
+    for (const file of sourceFiles(SCRIPTS_ROOT)) {
+      const rel = relative(SCRIPTS_ROOT, file).replace(/\\/g, '/');
+      const lines = readFileSync(file, 'utf-8').split('\n');
+      lines.forEach((line, i) => {
+        if (FORBIDDEN.test(line)) offenders.push(`scripts/${rel}:${i + 1}: ${line.trim()}`);
       });
     }
     assert.deepEqual(offenders, [], `key-material vocabulary found in keyless builder source:\n${offenders.join('\n')}`);

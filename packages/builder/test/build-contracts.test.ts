@@ -66,6 +66,14 @@ describe('buildDeployContract', () => {
     const vkeys = CML.Transaction.from_cbor_hex(r.txCbor).witness_set().vkeywitnesses();
     assert.ok(vkeys === undefined || vkeys.len() === 0);
   });
+
+  test("deploy with initialDatum '' fails loudly instead of silently voiding", async () => {
+    // '' is falsy but caller-supplied; ?? must let it flow through and fail
+    // loudly downstream rather than defaulting to Data.void().
+    await assert.rejects(buildDeployContract(lucid, {
+      scriptCbor: ALWAYS_SUCCEEDS_V2, scriptType: 'PlutusV2', initialDatum: '',
+    }));
+  });
 });
 
 describe('buildInteractContract', () => {
@@ -87,6 +95,24 @@ describe('buildInteractContract', () => {
       scriptCbor: ALWAYS_SUCCEEDS_V2, scriptType: 'PlutusV2', action: 'lock',
       changeAddress: OWN_ADDRESS, lovelaceAmount: 2_000_000, datum: '',
     }));
+  });
+
+  test('lock datum is inline (kind), not a hash reference', async () => {
+    const r = await buildInteractContract(lucid, {
+      scriptCbor: ALWAYS_SUCCEEDS_V2, scriptType: 'PlutusV2', action: 'lock',
+      changeAddress: OWN_ADDRESS, lovelaceAmount: 2_000_000, datum: 'd87980',
+    });
+    const tx = CML.Transaction.from_cbor_hex(r.txCbor);
+    const outs = tx.body().outputs();
+    let inlineSeen = false;
+    for (let i = 0; i < outs.len(); i++) {
+      const d = outs.get(i).datum();
+      // CML DatumOptionKind: Hash = 0, Datum = 1 (verified against the
+      // package's own .d.ts) - kind() === 1 is an inline datum.
+      if (d && d.kind() === 1) inlineSeen = true;
+      if (d && d.kind() === 0) assert.fail('lock produced a datum HASH output - must be inline');
+    }
+    assert.ok(inlineSeen, 'no inline-datum output found on the lock tx');
   });
 
   test('rejects an invalid action', async () => {
@@ -171,5 +197,20 @@ describe('buildInteractContract', () => {
       }),
       /not at script address/,
     );
+  });
+
+  test("spend: rejects an empty-string redeemer instead of silently treating it as void", async () => {
+    // '' is falsy but caller-supplied; ?? must let it flow through and fail
+    // loudly downstream rather than defaulting to Data.void().
+    const scriptUtxo: UTxO = {
+      txHash: FIXTURE_TXHASH, outputIndex: 7, address: SCRIPT_ADDRESS,
+      assets: { lovelace: 2_000_000n }, datum: 'd87980',
+    };
+    const withScript = new FixtureProvider([...FIXTURE_UTXOS, scriptUtxo]);
+    const l = await lucidForAddress(withScript, OWN_ADDRESS);
+    await assert.rejects(buildInteractContract(l, {
+      scriptCbor: ALWAYS_SUCCEEDS_V2, scriptType: 'PlutusV2', action: 'spend',
+      changeAddress: OWN_ADDRESS, redeemer: '',
+    }));
   });
 });
