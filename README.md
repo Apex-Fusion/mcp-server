@@ -39,15 +39,22 @@ Self-hosting instructions are below.
 `packages/signer` is a local MCP server that holds your key and signs transactions locally
 instead of handing your mnemonic to a shared host. It has **no network access at all** —
 stdio transport, no Provider, no egress — so a key given to it never reaches a shared server
-or your model provider.
+or your model provider. Four tools: `vector_signer_get_address`, `vector_signer_decode_transaction`,
+`vector_signer_sign`, `vector_signer_get_spend_limits`.
 
-See [`packages/signer/README.md`](packages/signer/README.md) for configuration, its tools, and
-known limitations — including the gap that matters most right now: the hosted builder's tools
-above still require your mnemonic as a call parameter, so pairing the signer with *this*
-hosted builder does not yet remove the custody exposure described above. Closing that gap is
-the next stage of the migration described in
-[`docs/architecture/non-custodial-split.md`](docs/architecture/non-custodial-split.md); until
-it ships, the security notice above still applies.
+**Paired with this hosted builder, the full non-custodial flow is live today** for the wallet,
+transaction, and smart-contract family: `vector_signer_get_address` → `build_*` →
+`vector_signer_sign` → `vector_submit_transaction` → `vector_await_transaction`. No step in that
+chain puts a mnemonic in front of this server or your model provider. The build → submit → await
+half is E2E-proven on Vector testnet, landing a real signed transaction on-chain; see
+[`packages/signer/README.md`](packages/signer/README.md#known-limitations) for exactly what that
+test does and does not exercise on the signer's side. **The agent-registry and self-improvement
+families are not part of that pairing yet** — they still take a mnemonic as a tool-call
+parameter until their own keyless migration lands (see the security notice above and
+[docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md)).
+
+See [`packages/signer/README.md`](packages/signer/README.md) for configuration, tools, and known
+limitations.
 
 ## Features
 
