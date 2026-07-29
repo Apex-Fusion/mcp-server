@@ -206,10 +206,14 @@ export async function buildUpdateAgent(
   if (p.endpoint !== undefined) validateEndpoint(p.endpoint);
   if (p.capabilities !== undefined) validateCapabilities(p.capabilities);
   const vkeyHash = paymentKeyHashOf(p.changeAddress);
-  const { profile, utxo, nftUnit } = await resolveAgentUtxo(provider, p.agentId);
+  const { profile, utxo } = await resolveAgentUtxo(provider, p.agentId);
   verifyOwnership(profile, vkeyHash);
+  // Owner is written from profile.ownerVkeyHash, not the caller's vkeyHash:
+  // makes owner-immutability on this path structural (the datum literally
+  // cannot carry a different owner out of buildUpdateAgent) rather than
+  // depending solely on the verifyOwnership() call two lines up.
   const newDatum = buildAgentDatum(
-    vkeyHash,
+    profile.ownerVkeyHash,
     p.name ?? profile.name,
     p.description ?? profile.description,
     p.capabilities ?? profile.capabilities,
@@ -218,10 +222,16 @@ export async function buildUpdateAgent(
     profile.registeredAt,
   );
   const spendRedeemer = Data.to(new Constr(0, [])); // Update
+  // The continuing output must carry the spent input's value EXACTLY
+  // (utxo.assets - lovelace AND the NFT), not a hardcoded
+  // { lovelace: MIN_AP3X_DEPOSIT, [nftUnit]: 1n } - the deployed validator
+  // enforces value preservation on Update (differential-tested; see
+  // task-3-report.md's correction section). Hardcoding the floor here was
+  // the same latent defect the old custodial code had.
   const completed = await lucid.newTx()
     .collectFrom([utxo], spendRedeemer)
     .attach.SpendingValidator(registryScript())
-    .pay.ToAddressWithData(getRegistryAddress(), { kind: 'inline', value: newDatum }, { lovelace: MIN_AP3X_DEPOSIT, [nftUnit]: 1n })
+    .pay.ToAddressWithData(getRegistryAddress(), { kind: 'inline', value: newDatum }, utxo.assets)
     .addSigner(p.changeAddress)
     .complete();
   const updatedFields: string[] = [];
@@ -248,17 +258,20 @@ export async function buildTransferAgent(
   } catch (e) {
     throw new Error(`Invalid new owner address: ${e instanceof Error ? e.message : String(e)} The on-chain contract rejects script credentials as owners.`);
   }
-  const { profile, utxo, nftUnit } = await resolveAgentUtxo(provider, p.agentId);
+  const { profile, utxo } = await resolveAgentUtxo(provider, p.agentId);
   verifyOwnership(profile, vkeyHash);
   const newDatum = buildAgentDatum(
     newOwnerHash, profile.name, profile.description,
     profile.capabilities, profile.framework, profile.endpoint, profile.registeredAt,
   );
   const spendRedeemer = Data.to(new Constr(0, [])); // Update (transfer uses the Update redeemer)
+  // Value-preserving output, same reasoning as buildUpdateAgent above: the
+  // deployed validator requires the continuing output to carry the spent
+  // input's value exactly, not a hardcoded deposit-floor amount.
   const completed = await lucid.newTx()
     .collectFrom([utxo], spendRedeemer)
     .attach.SpendingValidator(registryScript())
-    .pay.ToAddressWithData(getRegistryAddress(), { kind: 'inline', value: newDatum }, { lovelace: MIN_AP3X_DEPOSIT, [nftUnit]: 1n })
+    .pay.ToAddressWithData(getRegistryAddress(), { kind: 'inline', value: newDatum }, utxo.assets)
     .addSigner(p.changeAddress)
     .complete();
   return {
@@ -277,36 +290,42 @@ export async function buildDeregisterAgent(
   verifyOwnership(profile, vkeyHash);
   const spendRedeemer = Data.to(new Constr(1, [])); // Deregister
   const mintRedeemer = Data.to(new Constr(1, []));  // Burn
-  let txBuilder = lucid.newTx()
-    .collectFrom([utxo], spendRedeemer)
-    .attach.SpendingValidator(registryScript());
-  // The registry UTxO alone carries exactly MIN_AP3X_DEPOSIT and this build
-  // pays no explicit output (the deposit returns as ordinary change), so
-  // Lucid's automatic coin selection can conclude no further wallet input is
-  // needed to cover the fee. Empirically (see task-3-report.md) that exact
-  // shape - a single script input, a Burn mint redeemer, zero other inputs -
-  // makes Lucid's LOCAL UPLC evaluator crash even though the draft
-  // transaction is byte-for-byte correct otherwise; Lucid runs that local
-  // evaluation during .complete() BEFORE collateral is selected/applied
-  // (Anastasia-Labs/lucid-evolution#361 documents this same evaluation-
-  // before-collateral ordering as a source of bugs elsewhere in the
-  // library). Explicitly feeding in a second, plain pure-AP3X wallet UTxO
-  // sidesteps it; verified with both a small and a large pure-AP3X UTxO, so
-  // this isn't a fixture-specific fluke.
+  // CORRECTED root cause (see task-3-report.md's correction section for the
+  // full account - this replaces an earlier, wrong "Lucid library bug"
+  // diagnosis). The DEPLOYED registry validator (REGISTRY_SCRIPT_CBOR /
+  // REGISTRY_POLICY_ID above) does NOT match the in-workspace Aiken source
+  // under agent-infrastructure/contracts/agent-registry/ - that source
+  // compiles to policy 5dd51189..., a different script entirely (confirmed
+  // by hashing both; provenance worth resolving before the governance
+  // family trusts that source as ground truth). Differential-tested
+  // directly against the deployed bytecode instead: deregister enforces a
+  // floor on the owner's returned change - a sole-input deregister of a
+  // registry UTxO holding exactly MIN_AP3X_DEPOSIT fails, the identical
+  // build against a 25 AP3X registry UTxO succeeds unaided. Feeding in a
+  // second, plain pure-AP3X wallet UTxO - the LARGEST one available, so the
+  // returned change clears the floor with margin rather than by a hair -
+  // satisfies it for the common exactly-the-floor case.
   const walletUtxos = await lucid.wallet().getUtxos();
-  const feeUtxo = walletUtxos.find((u) => {
-    const keys = Object.keys(u.assets);
-    return keys.length === 1 && keys[0] === 'lovelace';
-  });
-  if (feeUtxo) txBuilder = txBuilder.collectFrom([feeUtxo]);
-  const completed = await txBuilder
+  const feeUtxo = walletUtxos
+    .filter((u) => {
+      const keys = Object.keys(u.assets);
+      return keys.length === 1 && keys[0] === 'lovelace';
+    })
+    .sort((a, b) => Number(b.assets.lovelace - a.assets.lovelace))[0];
+  if (!feeUtxo) {
+    throw new Error("Deregistration needs a plain AP3X-only UTxO in the wallet to clear the validator's returned-change floor; send yourself a small AP3X-only payment first.");
+  }
+  const completed = await lucid.newTx()
+    .collectFrom([utxo], spendRedeemer)
+    .attach.SpendingValidator(registryScript())
+    .collectFrom([feeUtxo])
     .mintAssets({ [nftUnit]: -1n }, mintRedeemer)
     .attach.MintingPolicy(registryScript())
     .addSigner(p.changeAddress)
     .complete();
   return {
     ...toBuildResult(completed),
-    agentId: p.agentId, op: 'deregister', agentName: profile.name, detail: MIN_AP3X_DEPOSIT.toString(),
+    agentId: p.agentId, op: 'deregister', agentName: profile.name, detail: String(utxo.assets.lovelace),
   };
 }
 

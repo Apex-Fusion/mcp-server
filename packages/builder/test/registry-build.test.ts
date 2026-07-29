@@ -4,13 +4,15 @@ import {
   CML, getAddressDetails, Data, Constr, toText, fromText, credentialToAddress,
 } from '@lucid-evolution/lucid';
 import type { LucidEvolution } from '@lucid-evolution/lucid';
-import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS, FOREIGN_ADDRESS } from './fixtures/fixture-provider.ts';
+import {
+  FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS, FOREIGN_ADDRESS, FIXTURE_TOKEN_UNIT,
+} from './fixtures/fixture-provider.ts';
 import { lucidForAddress } from '../src/vector/build.ts';
 import {
   REGISTRY_POLICY_ID, MIN_AP3X_DEPOSIT, AGENT_MESSAGE_LABEL,
   getRegistryAddress, parseDid, buildAgentDatum, parseAgentDatum, resolveAgentUtxo,
   buildRegisterAgent, buildMessageAgent,
-  buildUpdateAgent, buildTransferAgent, buildDeregisterAgent,
+  buildUpdateAgent, buildTransferAgent, buildDeregisterAgent, registryScript,
 } from '../src/vector/registry-build.ts';
 
 // The REAL registry validator evaluates during .complete() (native UPLC, offline).
@@ -343,5 +345,95 @@ describe('registry owner ops (real validator, offline)', () => {
       assert.equal(outs.get(i).address().to_bech32(), OWN_ADDRESS);
     }
     assert.ok(tx.body().mint(), 'no mint (burn) field on the deregister tx');
+  });
+});
+
+// Correction round (see task-3-report.md): differential testing against the
+// REAL deployed validator (not the in-workspace Aiken source, which turned
+// out to compile to an unrelated policy - see the report) found the deployed
+// script enforces value-preservation on Update/Transfer and a returned-
+// change floor on Deregister. These tests pin that corrected understanding.
+describe('registry owner ops - value preservation & deregister floor (correction, real validator)', () => {
+  function overfundedRegistryUtxo(lovelace: bigint) {
+    return {
+      txHash: 'ce'.repeat(32), outputIndex: 0,
+      address: getRegistryAddress(),
+      assets: { lovelace, [AGENT_UNIT]: 1n },
+      datum: buildAgentDatum(OWN_VKEY_HASH, 'FixtureAgent', 'offline fixture agent', ['testing'], 'custom', '', 1750000000000),
+    };
+  }
+
+  test('update preserves the FULL input value on an over-funded registry UTxO, not just the deposit floor', async () => {
+    const overfunded = overfundedRegistryUtxo(25_000_000n);
+    const provider = new FixtureProvider([...FIXTURE_UTXOS, overfunded]);
+    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
+    const r = await buildUpdateAgent(lucid, provider, {
+      changeAddress: OWN_ADDRESS, agentId: AGENT_DID, description: 'overfunded update',
+    });
+    assert.equal(r.op, 'update');
+    const tx = decodeTx(r.txCbor);
+    const outs = tx.body().outputs();
+    let registryOut: any = null;
+    for (let i = 0; i < outs.len(); i++) {
+      if (outs.get(i).address().to_bech32() === getRegistryAddress()) registryOut = outs.get(i);
+    }
+    assert.ok(registryOut, 'no continuing registry output');
+    assert.equal(registryOut.amount().coin(), 25_000_000n, 'continuing output must preserve the FULL input value, not the deposit floor');
+  });
+
+  test('transfer preserves the FULL input value on an over-funded registry UTxO', async () => {
+    const overfunded = overfundedRegistryUtxo(25_000_000n);
+    const provider = new FixtureProvider([...FIXTURE_UTXOS, overfunded]);
+    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
+    const newOwnerHash = '22'.repeat(28);
+    const newOwner = credentialToAddress('Mainnet', { type: 'Key', hash: newOwnerHash });
+    const r = await buildTransferAgent(lucid, provider, {
+      changeAddress: OWN_ADDRESS, agentId: AGENT_DID, newOwnerAddress: newOwner,
+    });
+    assert.equal(r.op, 'transfer');
+    const tx = decodeTx(r.txCbor);
+    const outs = tx.body().outputs();
+    let registryOut: any = null;
+    for (let i = 0; i < outs.len(); i++) {
+      if (outs.get(i).address().to_bech32() === getRegistryAddress()) registryOut = outs.get(i);
+    }
+    assert.ok(registryOut, 'no continuing registry output');
+    assert.equal(registryOut.amount().coin(), 25_000_000n, 'continuing output must preserve the FULL input value on transfer too');
+  });
+
+  test('validator floor pin: deregister of an over-funded (25 AP3X) registry UTxO succeeds with no extra input pulled in', async () => {
+    // Direct build (not through buildDeregisterAgent, which now
+    // unconditionally requires a fee UTxO whenever the wallet has one) -
+    // pins the underlying chain fact that motivates that requirement: the
+    // deployed validator's returned-change floor is cleared by the registry
+    // deposit alone once it's well above MIN_AP3X_DEPOSIT. Confirms this is
+    // a genuine value floor on the validator side, not "any sole-input
+    // deregister fails" (which was the earlier, wrong diagnosis).
+    const overfunded = overfundedRegistryUtxo(25_000_000n);
+    const provider = new FixtureProvider([overfunded, ...FIXTURE_UTXOS]);
+    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
+    const spendRedeemer = Data.to(new Constr(1, []));
+    const mintRedeemer = Data.to(new Constr(1, []));
+    const completed = await lucid.newTx()
+      .collectFrom([overfunded], spendRedeemer)
+      .attach.SpendingValidator(registryScript())
+      .mintAssets({ [AGENT_UNIT]: -1n }, mintRedeemer)
+      .attach.MintingPolicy(registryScript())
+      .addSigner(OWN_ADDRESS)
+      .complete();
+    const tx = decodeTx(completed.toCBOR());
+    assert.equal(tx.body().inputs().len(), 1, 'sole input - Lucid should not need to pull in any extra wallet UTxO here');
+  });
+
+  test('deregister throws an actionable error (not a validator crash) when the wallet has no plain AP3X-only UTxO', async () => {
+    const tokenOnlyUtxo = {
+      txHash: 'df'.repeat(32), outputIndex: 0, address: OWN_ADDRESS,
+      assets: { lovelace: 1_000_000_000n, [FIXTURE_TOKEN_UNIT]: 500n },
+    };
+    const provider = new FixtureProvider([tokenOnlyUtxo, REGISTRY_UTXO]);
+    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
+    await assert.rejects(buildDeregisterAgent(lucid, provider, {
+      changeAddress: OWN_ADDRESS, agentId: AGENT_DID,
+    }), /AP3X-only UTxO/);
   });
 });
