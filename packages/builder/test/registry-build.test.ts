@@ -1,12 +1,12 @@
 import { describe, test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { CML, getAddressDetails, Data, Constr, toText } from '@lucid-evolution/lucid';
+import { CML, getAddressDetails, Data, Constr, toText, fromText } from '@lucid-evolution/lucid';
 import type { LucidEvolution } from '@lucid-evolution/lucid';
 import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS, FOREIGN_ADDRESS } from './fixtures/fixture-provider.ts';
 import { lucidForAddress } from '../src/vector/build.ts';
 import {
   REGISTRY_POLICY_ID, MIN_AP3X_DEPOSIT, AGENT_MESSAGE_LABEL,
-  getRegistryAddress, parseDid, buildAgentDatum, parseAgentDatum,
+  getRegistryAddress, parseDid, buildAgentDatum, parseAgentDatum, resolveAgentUtxo,
   buildRegisterAgent, buildMessageAgent,
 } from '../src/vector/registry-build.ts';
 
@@ -31,6 +31,40 @@ before(() => {
 
 function decodeTx(cborHex: string) {
   return CML.Transaction.from_cbor_hex(cborHex);
+}
+
+// Shared by the mint-content and registry-output-asset checks below: Mint's
+// as_positive_multiasset() and Value's multi_asset() both return the same
+// MultiAsset type (policy ScriptHash -> AssetName -> quantity), so one
+// traversal serves both call sites.
+function findAssetQuantity(ma: any, policyIdHex: string, assetNameHex: string): bigint | undefined {
+  const policies = ma.keys();
+  for (let i = 0; i < policies.len(); i++) {
+    const policy = policies.get(i);
+    if (policy.to_hex() !== policyIdHex) continue;
+    const assets = ma.get_assets(policy);
+    if (!assets) continue;
+    const names = assets.keys();
+    for (let n = 0; n < names.len(); n++) {
+      const name = names.get(n);
+      if (name.to_hex() === assetNameHex) return assets.get(name);
+    }
+  }
+  return undefined;
+}
+
+// Decodes a TransactionMetadatum leaf as text, joining metadataStr()'s
+// chunked-list form (used for values over 64 chars) back into one string.
+function metadatumText(m: any): string | undefined {
+  const text = m.as_text();
+  if (text !== undefined) return text;
+  const list = m.as_list();
+  if (list) {
+    let joined = '';
+    for (let i = 0; i < list.len(); i++) joined += list.get(i).as_text() ?? '';
+    return joined;
+  }
+  return undefined;
 }
 
 describe('registry constants and helpers', () => {
@@ -61,6 +95,17 @@ describe('registry constants and helpers', () => {
     assert.equal(parseAgentDatum('deadbeef', 'ref#0', {}), null);
     assert.equal(parseAgentDatum(Data.to(new Constr(1, [])), 'ref#0', {}), null);
   });
+
+  test('parseAgentDatum returns null when the datum has the wrong field count (missing registeredAt)', () => {
+    const sixFieldDatum = Data.to(new Constr(0, [
+      new Constr(0, ['00'.repeat(28)]), fromText('x'), fromText('x'), [], fromText('x'), fromText('x'),
+    ]));
+    assert.equal(parseAgentDatum(sixFieldDatum, 'ref#0', {}), null);
+  });
+
+  test('MIN_AP3X_DEPOSIT matches the protocol deposit floor exactly', () => {
+    assert.equal(MIN_AP3X_DEPOSIT, 10_000_000n, 'protocol deposit constant drifted');
+  });
 });
 
 describe('buildRegisterAgent (real validator, offline)', () => {
@@ -84,6 +129,10 @@ describe('buildRegisterAgent (real validator, offline)', () => {
     // DID binds to the consumed one-shot input
     assert.match(r.agentId, new RegExp(`^did:vector:agent:${REGISTRY_POLICY_ID}:[0-9a-f]{64}$`));
     assert.equal(r.nftAssetName.length, 64);
+    assert.equal(
+      findAssetQuantity(mint.as_positive_multiasset(), REGISTRY_POLICY_ID, r.nftAssetName), 1n,
+      'minted unit must be exactly +1 of policy:nftAssetName, not just any positive mint',
+    );
     // one output to the registry address carrying deposit + NFT
     const outs = tx.body().outputs();
     let registryOut: any = null;
@@ -92,8 +141,19 @@ describe('buildRegisterAgent (real validator, offline)', () => {
       if (o.address().to_bech32() === getRegistryAddress()) registryOut = o;
     }
     assert.ok(registryOut, 'no output to the registry address');
-    assert.equal(registryOut.amount().coin(), MIN_AP3X_DEPOSIT);
+    // literal is the load-bearing assertion: comparing only to the constant
+    // under test is tautological (it would pass even if MIN_AP3X_DEPOSIT drifted
+    // above the real on-chain floor - see the dedicated pin test above).
+    assert.equal(registryOut.amount().coin(), 10_000_000n, 'registry deposit must equal the literal on-chain floor');
+    assert.equal(registryOut.amount().coin(), MIN_AP3X_DEPOSIT, 'MIN_AP3X_DEPOSIT should still equal the literal floor pinned above');
     assert.ok(registryOut.datum() && registryOut.datum()!.kind() === 1, 'registry output datum must be inline');
+    // registry output must actually carry the NFT, not just the deposit
+    const registryAssets = registryOut.amount().multi_asset();
+    assert.ok(registryAssets, 'registry output carries no native assets');
+    assert.equal(
+      findAssetQuantity(registryAssets, REGISTRY_POLICY_ID, r.nftAssetName), 1n,
+      'registry output must hold exactly 1 of the derived NFT unit',
+    );
     // required signer = owner
     const signers = tx.body().required_signers();
     assert.ok(signers && signers.len() >= 1, 'no required_signers');
@@ -140,6 +200,12 @@ describe('buildMessageAgent (resolves via fixture registry UTxO)', () => {
     // metadata label present
     const aux = tx.auxiliary_data();
     assert.ok(aux && aux.metadata() && aux.metadata()!.get(BigInt(AGENT_MESSAGE_LABEL)), 'label-674 metadata missing');
+    // metadata content: from/to must be the real sender/recipient, not swapped
+    const metaMap = aux!.metadata()!.get(BigInt(AGENT_MESSAGE_LABEL))!.as_map()!;
+    const fromVal = metadatumText(metaMap.get(CML.TransactionMetadatum.new_text('from'))!);
+    const toVal = metadatumText(metaMap.get(CML.TransactionMetadatum.new_text('to'))!);
+    assert.equal(fromVal, OWN_ADDRESS, 'metadata "from" must be the sending changeAddress');
+    assert.equal(toVal, AGENT_DID, 'metadata "to" must be the recipient agent DID');
     const vkeys = tx.witness_set().vkeywitnesses();
     assert.ok(vkeys === undefined || vkeys.len() === 0, 'message build must be unsigned');
   });
@@ -150,5 +216,26 @@ describe('buildMessageAgent (resolves via fixture registry UTxO)', () => {
     await assert.rejects(buildMessageAgent(lucid, provider, {
       changeAddress: OWN_ADDRESS, agentId: AGENT_DID, messageType: 'inquiry', payload: 'x',
     }), /Agent not found/);
+  });
+});
+
+describe('resolveAgentUtxo (Koios/address-scan fallback)', () => {
+  test('falls through to the address re-scan when getUtxoByUnit resolves but with no datum', async () => {
+    // getUtxoByUnit "succeeding" with a datum-less UTxO (e.g. a Koios hit that
+    // only carries a datum hash, not the inline datum) must not be treated as
+    // resolved - resolveAgentUtxo has to notice the missing datum and fall
+    // back to scanning the registry address, same as when getUtxoByUnit
+    // throws outright. Under plain FixtureProvider this branch is dead
+    // (getUtxoByUnit always throws), so it needs its own provider double.
+    const base = new FixtureProvider([...FIXTURE_UTXOS, REGISTRY_UTXO]);
+    const wrapped = {
+      getUtxos: (a: string) => base.getUtxos(a),
+      getUtxoByUnit: async () => ({ ...REGISTRY_UTXO, datum: null }),
+    };
+    const { profile, utxo, nftUnit } = await resolveAgentUtxo(wrapped as any, AGENT_DID);
+    assert.equal(nftUnit, AGENT_UNIT);
+    assert.equal(utxo.datum, REGISTRY_UTXO.datum, 're-scanned UTxO must carry the real inline datum, not the datum-less stand-in');
+    assert.equal(profile.name, 'FixtureAgent');
+    assert.equal(profile.agentId, AGENT_DID);
   });
 });
