@@ -196,6 +196,10 @@ If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` firs
 | `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute | `60` |
 | `MCP_AUTH_TOKENS` | Bearer tokens that may call this server. Comma-separated; each entry is `label:token` or a bare token. **When unset, the server is open to anyone who can reach it.** | _(unset — auth disabled)_ |
 
+`VECTOR_SPEND_LIMIT_PER_TX` / `VECTOR_SPEND_LIMIT_DAILY` govern only the still-custodial
+families (agent registry, self-improvement) — the keyless `build_*` family ignores them; its
+spend limits are enforced by the local signer instead.
+
 > **Running a public instance?** Set `MCP_AUTH_TOKENS`. Without it every caller
 > is treated as one anonymous identity and shares a single rate-limit bucket, so
 > one busy client throttles everyone. Rate limits are applied per identity, so
@@ -236,7 +240,7 @@ echo "your mnemonic words here" > packages/builder/mnemonic.txt
 npm run test:integration
 ```
 
-Requires `mnemonic.txt` in `packages/builder/` containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister. Also runs `keyless-build.test.ts`, which needs no mnemonic at all - it builds every `build_*` tool's unsigned transaction against a live public address only. Set `VECTOR_E2E_SUBMIT=1` to additionally run the full non-custodial pipeline end-to-end: build → local sign → submit → await, landing one real self-send (~0.16 AP3X fee) on-chain. Never runs in CI.
+Requires `mnemonic.txt` in `packages/builder/` containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister. Also runs `keyless-build.test.ts`, which needs no mnemonic at all - it builds unsigned transactions with four of the five `build_*` tools against a live public address only (`vector_build_send_tokens` is covered offline, by unit tests and the legacy suite above, not by this live suite). Set `VECTOR_E2E_SUBMIT=1` to additionally run the full non-custodial pipeline end-to-end: build → local sign → submit → await, landing one real self-send (~0.16 AP3X fee) on-chain. Never runs in CI.
 
 ```bash
 npm run test:smoke:signer
@@ -268,7 +272,7 @@ against live chain data. **Never submits.** Never runs in CI. See
                               │  └────────┬───────────┘  │
                               │           │               │
                               │  ┌────────▼───────────┐  │
-                              │  │ Safety Layer        │  │
+                              │  │ Safety Layer *      │  │
                               │  │ - Per-tx limits     │  │
                               │  │ - Daily limits      │  │
                               │  │ - Audit log         │  │
@@ -285,6 +289,9 @@ against live chain data. **Never submits.** Never runs in CI. See
                               │  └────────────────────┘  │
                               └──────────────────────────┘
 ```
+
+\* Custodial families only (agent registry, self-improvement) — the keyless `build_*` path
+never reaches the Safety Layer; its spend limits are enforced by the local signer instead.
 
 ## About Vector
 

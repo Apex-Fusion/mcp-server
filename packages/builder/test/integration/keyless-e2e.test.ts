@@ -6,8 +6,9 @@ import { startServer, stopServer, callTool, getMnemonic, ServerContext } from '.
 
 // Full non-custodial pipeline against the live testnet:
 //   keyless build (hosted tool) -> inline CML sign (this process, standing in
-//   for the local signer, which lives on PR #7's branch) -> submit tool ->
-//   await tool. A self-send, so the run costs only the fee (~0.16 AP3X).
+//   for the in-tree local signer (packages/signer) — same CML primitives,
+//   without the signer's decode/policy/audit path) -> submit tool -> await
+//   tool. A self-send, so the run costs only the fee (~0.16 AP3X).
 //
 // Gated: set VECTOR_E2E_SUBMIT=1 to run. Requires packages/builder/mnemonic.txt
 // (the funded testnet wallet). NEVER runs in CI.
