@@ -191,6 +191,125 @@ export async function buildRegisterAgent(lucid: LucidEvolution, p: {
   };
 }
 
+export async function buildUpdateAgent(
+  lucid: LucidEvolution,
+  provider: Pick<OgmiosProvider, 'getUtxos' | 'getUtxoByUnit'>,
+  p: {
+    changeAddress: string; agentId: string; name?: string; description?: string;
+    capabilities?: string[]; framework?: string; endpoint?: string;
+  },
+): Promise<VectorBuildAgentOpResult> {
+  if (p.name === undefined && p.description === undefined && p.capabilities === undefined
+    && p.framework === undefined && p.endpoint === undefined) {
+    throw new Error('At least one field must be provided to update (name, description, capabilities, framework, or endpoint).');
+  }
+  if (p.endpoint !== undefined) validateEndpoint(p.endpoint);
+  if (p.capabilities !== undefined) validateCapabilities(p.capabilities);
+  const vkeyHash = paymentKeyHashOf(p.changeAddress);
+  const { profile, utxo, nftUnit } = await resolveAgentUtxo(provider, p.agentId);
+  verifyOwnership(profile, vkeyHash);
+  const newDatum = buildAgentDatum(
+    vkeyHash,
+    p.name ?? profile.name,
+    p.description ?? profile.description,
+    p.capabilities ?? profile.capabilities,
+    p.framework ?? profile.framework,
+    p.endpoint ?? profile.endpoint,
+    profile.registeredAt,
+  );
+  const spendRedeemer = Data.to(new Constr(0, [])); // Update
+  const completed = await lucid.newTx()
+    .collectFrom([utxo], spendRedeemer)
+    .attach.SpendingValidator(registryScript())
+    .pay.ToAddressWithData(getRegistryAddress(), { kind: 'inline', value: newDatum }, { lovelace: MIN_AP3X_DEPOSIT, [nftUnit]: 1n })
+    .addSigner(p.changeAddress)
+    .complete();
+  const updatedFields: string[] = [];
+  if (p.name !== undefined) updatedFields.push('name');
+  if (p.description !== undefined) updatedFields.push('description');
+  if (p.capabilities !== undefined) updatedFields.push('capabilities');
+  if (p.framework !== undefined) updatedFields.push('framework');
+  if (p.endpoint !== undefined) updatedFields.push('endpoint');
+  return {
+    ...toBuildResult(completed),
+    agentId: p.agentId, op: 'update', agentName: profile.name, detail: updatedFields.join(', '),
+  };
+}
+
+export async function buildTransferAgent(
+  lucid: LucidEvolution,
+  provider: Pick<OgmiosProvider, 'getUtxos' | 'getUtxoByUnit'>,
+  p: { changeAddress: string; agentId: string; newOwnerAddress: string },
+): Promise<VectorBuildAgentOpResult> {
+  const vkeyHash = paymentKeyHashOf(p.changeAddress);
+  let newOwnerHash: string;
+  try {
+    newOwnerHash = paymentKeyHashOf(p.newOwnerAddress);
+  } catch (e) {
+    throw new Error(`Invalid new owner address: ${e instanceof Error ? e.message : String(e)} The on-chain contract rejects script credentials as owners.`);
+  }
+  const { profile, utxo, nftUnit } = await resolveAgentUtxo(provider, p.agentId);
+  verifyOwnership(profile, vkeyHash);
+  const newDatum = buildAgentDatum(
+    newOwnerHash, profile.name, profile.description,
+    profile.capabilities, profile.framework, profile.endpoint, profile.registeredAt,
+  );
+  const spendRedeemer = Data.to(new Constr(0, [])); // Update (transfer uses the Update redeemer)
+  const completed = await lucid.newTx()
+    .collectFrom([utxo], spendRedeemer)
+    .attach.SpendingValidator(registryScript())
+    .pay.ToAddressWithData(getRegistryAddress(), { kind: 'inline', value: newDatum }, { lovelace: MIN_AP3X_DEPOSIT, [nftUnit]: 1n })
+    .addSigner(p.changeAddress)
+    .complete();
+  return {
+    ...toBuildResult(completed),
+    agentId: p.agentId, op: 'transfer', agentName: profile.name, detail: p.newOwnerAddress,
+  };
+}
+
+export async function buildDeregisterAgent(
+  lucid: LucidEvolution,
+  provider: Pick<OgmiosProvider, 'getUtxos' | 'getUtxoByUnit'>,
+  p: { changeAddress: string; agentId: string },
+): Promise<VectorBuildAgentOpResult> {
+  const vkeyHash = paymentKeyHashOf(p.changeAddress);
+  const { profile, utxo, nftUnit } = await resolveAgentUtxo(provider, p.agentId);
+  verifyOwnership(profile, vkeyHash);
+  const spendRedeemer = Data.to(new Constr(1, [])); // Deregister
+  const mintRedeemer = Data.to(new Constr(1, []));  // Burn
+  let txBuilder = lucid.newTx()
+    .collectFrom([utxo], spendRedeemer)
+    .attach.SpendingValidator(registryScript());
+  // The registry UTxO alone carries exactly MIN_AP3X_DEPOSIT and this build
+  // pays no explicit output (the deposit returns as ordinary change), so
+  // Lucid's automatic coin selection can conclude no further wallet input is
+  // needed to cover the fee. Empirically (see task-3-report.md) that exact
+  // shape - a single script input, a Burn mint redeemer, zero other inputs -
+  // makes Lucid's LOCAL UPLC evaluator crash even though the draft
+  // transaction is byte-for-byte correct otherwise; Lucid runs that local
+  // evaluation during .complete() BEFORE collateral is selected/applied
+  // (Anastasia-Labs/lucid-evolution#361 documents this same evaluation-
+  // before-collateral ordering as a source of bugs elsewhere in the
+  // library). Explicitly feeding in a second, plain pure-AP3X wallet UTxO
+  // sidesteps it; verified with both a small and a large pure-AP3X UTxO, so
+  // this isn't a fixture-specific fluke.
+  const walletUtxos = await lucid.wallet().getUtxos();
+  const feeUtxo = walletUtxos.find((u) => {
+    const keys = Object.keys(u.assets);
+    return keys.length === 1 && keys[0] === 'lovelace';
+  });
+  if (feeUtxo) txBuilder = txBuilder.collectFrom([feeUtxo]);
+  const completed = await txBuilder
+    .mintAssets({ [nftUnit]: -1n }, mintRedeemer)
+    .attach.MintingPolicy(registryScript())
+    .addSigner(p.changeAddress)
+    .complete();
+  return {
+    ...toBuildResult(completed),
+    agentId: p.agentId, op: 'deregister', agentName: profile.name, detail: MIN_AP3X_DEPOSIT.toString(),
+  };
+}
+
 export async function buildMessageAgent(
   lucid: LucidEvolution,
   provider: Pick<OgmiosProvider, 'getUtxos' | 'getUtxoByUnit'>,

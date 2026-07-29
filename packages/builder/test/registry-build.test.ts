@@ -1,6 +1,8 @@
 import { describe, test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { CML, getAddressDetails, Data, Constr, toText, fromText } from '@lucid-evolution/lucid';
+import {
+  CML, getAddressDetails, Data, Constr, toText, fromText, credentialToAddress,
+} from '@lucid-evolution/lucid';
 import type { LucidEvolution } from '@lucid-evolution/lucid';
 import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS, FOREIGN_ADDRESS } from './fixtures/fixture-provider.ts';
 import { lucidForAddress } from '../src/vector/build.ts';
@@ -8,6 +10,7 @@ import {
   REGISTRY_POLICY_ID, MIN_AP3X_DEPOSIT, AGENT_MESSAGE_LABEL,
   getRegistryAddress, parseDid, buildAgentDatum, parseAgentDatum, resolveAgentUtxo,
   buildRegisterAgent, buildMessageAgent,
+  buildUpdateAgent, buildTransferAgent, buildDeregisterAgent,
 } from '../src/vector/registry-build.ts';
 
 // The REAL registry validator evaluates during .complete() (native UPLC, offline).
@@ -237,5 +240,108 @@ describe('resolveAgentUtxo (Koios/address-scan fallback)', () => {
     assert.equal(utxo.datum, REGISTRY_UTXO.datum, 're-scanned UTxO must carry the real inline datum, not the datum-less stand-in');
     assert.equal(profile.name, 'FixtureAgent');
     assert.equal(profile.agentId, AGENT_DID);
+  });
+});
+
+describe('registry owner ops (real validator, offline)', () => {
+  function ownedProvider() {
+    return new FixtureProvider([...FIXTURE_UTXOS, REGISTRY_UTXO]);
+  }
+
+  test('update merges fields, preserves registeredAt, keeps NFT + deposit at the registry', async () => {
+    const provider = ownedProvider();
+    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
+    const r = await buildUpdateAgent(lucid, provider, {
+      changeAddress: OWN_ADDRESS, agentId: AGENT_DID, description: 'updated by unit test',
+    });
+    assert.equal(r.op, 'update');
+    assert.equal(r.detail, 'description');
+    const tx = decodeTx(r.txCbor);
+    const outs = tx.body().outputs();
+    let registryOut: any = null;
+    for (let i = 0; i < outs.len(); i++) {
+      if (outs.get(i).address().to_bech32() === getRegistryAddress()) registryOut = outs.get(i);
+    }
+    assert.ok(registryOut, 'no continuing registry output');
+    assert.equal(registryOut.amount().coin(), MIN_AP3X_DEPOSIT);
+    assert.ok(registryOut.datum() && registryOut.datum()!.kind() === 1, 'continuing datum must be inline');
+    // decode the continuing inline datum and verify the merge
+    const datumCbor = registryOut.datum()!.as_datum()!.to_cbor_hex();
+    const p = parseAgentDatum(datumCbor, 'x#0', { [AGENT_UNIT]: 1n })!;
+    assert.equal(p.description, 'updated by unit test');
+    assert.equal(p.name, 'FixtureAgent');           // preserved
+    assert.equal(p.registeredAt, 1750000000000);    // preserved
+    const vkeys = tx.witness_set().vkeywitnesses();
+    assert.ok(vkeys === undefined || vkeys.len() === 0, 'must be unsigned');
+  });
+
+  test('update with no fields throws before any resolution', async () => {
+    const provider = ownedProvider();
+    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
+    await assert.rejects(buildUpdateAgent(lucid, provider, {
+      changeAddress: OWN_ADDRESS, agentId: AGENT_DID,
+    }), /At least one field/);
+  });
+
+  test('ownership fail-fast: a non-owner changeAddress is refused before building', async () => {
+    const provider = ownedProvider();
+    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
+    // FOREIGN_ADDRESS is a script address in the fixture set; use a foreign KEY address instead:
+    // derive one from a different fixture or construct via credentialToAddress with a random hash.
+    const strangerHash = '00'.repeat(28);
+    const stranger = credentialToAddress('Mainnet', { type: 'Key', hash: strangerHash });
+    // build a lucid for the stranger (their own address-only wallet, holding nothing at the registry)
+    const strangerProvider = new FixtureProvider([
+      { txHash: 'ee'.repeat(32), outputIndex: 0, address: stranger, assets: { lovelace: 50_000_000n } },
+      REGISTRY_UTXO,
+    ]);
+    const strangerLucid = await lucidForAddress(strangerProvider, stranger);
+    await assert.rejects(buildUpdateAgent(strangerLucid, strangerProvider, {
+      changeAddress: stranger, agentId: AGENT_DID, description: 'hijack attempt',
+    }), /Ownership check failed/);
+  });
+
+  test('transfer swaps the datum owner to the new key and rejects script-address owners', async () => {
+    const provider = ownedProvider();
+    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
+    const newOwnerHash = '11'.repeat(28);
+    const newOwner = credentialToAddress('Mainnet', { type: 'Key', hash: newOwnerHash });
+    const r = await buildTransferAgent(lucid, provider, {
+      changeAddress: OWN_ADDRESS, agentId: AGENT_DID, newOwnerAddress: newOwner,
+    });
+    assert.equal(r.op, 'transfer');
+    const tx = decodeTx(r.txCbor);
+    const outs = tx.body().outputs();
+    let registryOut: any = null;
+    for (let i = 0; i < outs.len(); i++) {
+      if (outs.get(i).address().to_bech32() === getRegistryAddress()) registryOut = outs.get(i);
+    }
+    const datumCbor = registryOut.datum()!.as_datum()!.to_cbor_hex();
+    const p = parseAgentDatum(datumCbor, 'x#0', { [AGENT_UNIT]: 1n })!;
+    assert.equal(p.ownerVkeyHash, newOwnerHash);
+    assert.equal(p.name, 'FixtureAgent'); // everything else preserved
+    // script-credential new owner refused
+    await assert.rejects(buildTransferAgent(lucid, provider, {
+      changeAddress: OWN_ADDRESS, agentId: AGENT_DID, newOwnerAddress: getRegistryAddress(),
+    }), /verification key/i);
+  });
+
+  test('deregister burns the NFT and leaves no registry output (deposit comes back as change)', async () => {
+    const provider = ownedProvider();
+    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
+    const r = await buildDeregisterAgent(lucid, provider, {
+      changeAddress: OWN_ADDRESS, agentId: AGENT_DID,
+    });
+    assert.equal(r.op, 'deregister');
+    assert.equal(r.agentName, 'FixtureAgent');
+    const tx = decodeTx(r.txCbor);
+    const outs = tx.body().outputs();
+    for (let i = 0; i < outs.len(); i++) {
+      assert.notEqual(outs.get(i).address().to_bech32(), getRegistryAddress(),
+        'deregister must not leave an output at the registry');
+      // every output is change to the owner
+      assert.equal(outs.get(i).address().to_bech32(), OWN_ADDRESS);
+    }
+    assert.ok(tx.body().mint(), 'no mint (burn) field on the deregister tx');
   });
 });
