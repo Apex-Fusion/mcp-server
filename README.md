@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks, exposing all 25 tools:
+Hosted instances run on both networks, exposing all 23 tools:
 
 | Network | Endpoint |
 |---------|----------|
@@ -21,13 +21,15 @@ Connect from Claude Code in one command:
 claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse
 ```
 
-> **Security notice — custody.** Signing tools currently take your wallet mnemonic as a
-> tool-call parameter. It therefore passes through your MCP client, your model provider,
-> and the hosted server's memory — it is not written to disk, but it is exposed. Use only
-> a hot wallet holding funds you can afford to lose, and prefer self-hosting until the
-> non-custodial migration lands. `vector_submit_transaction` and `vector_await_transaction`
-> are the exception — they take no mnemonic and sign nothing; they only broadcast a
-> transaction signed elsewhere (for example by a local signer) and poll for confirmation.
+> **Security notice — custody.** The wallet, transaction, and smart-contract tools are now
+> **keyless**: `build_*` tools construct unsigned transactions from a wallet *address* and
+> never accept a mnemonic. Sign the returned CBOR with the local signer companion and
+> broadcast it with `vector_submit_transaction` — your seed phrase never leaves your machine.
+> **The agent-registry and self-improvement tool families still take a mnemonic as a
+> tool-call parameter** (their keyless migration is in progress — see the architecture doc).
+> For those tools the mnemonic passes through your MCP client, your model provider, and the
+> hosted server's memory: use only a hot wallet holding funds you can afford to lose, and
+> prefer self-hosting until the migration completes.
 > See [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md).
 
 Self-hosting instructions are below.
@@ -49,34 +51,32 @@ it ships, the security notice above still applies.
 
 ## Features
 
-- **Wallet management** - derive addresses from mnemonic, query balances and UTxOs
-- **Transactions** - send AP3X and native tokens, build multi-output transactions, dry-run simulations
+- **Wallet & queries** - balances, UTxOs, and transaction history for any address (no key material)
+- **Keyless transaction building** - build unsigned AP3X/token/multi-output transactions and contract interactions; sign locally, broadcast via submit
 - **Smart contracts** - deploy Plutus/Aiken validators, lock and spend UTxOs at script addresses
 - **Agent registry** - register, discover, update, transfer, and deregister on-chain AI agent identities via soulbound NFTs
 - **Agent messaging** - send on-chain messages between agents via TX metadata
 - **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals (live on Vector mainnet)
-- **Safety controls** - per-transaction and daily spend limits, persistent audit log, rate limiting
+- **Safety controls** - per-identity rate limiting; spend limits for the keyless family are enforced by the local signer (registry/self-improvement families keep server-side limits until their keyless migration)
 - **SSE transport** - HTTP server with Server-Sent Events for MCP client connectivity
 
-## MCP Tools (25)
+## MCP Tools (23)
 
 ### Wallet & Queries
 
 | Tool | Description |
 |------|-------------|
 | `vector_get_balance` | Get AP3X and token balances for any address |
-| `vector_get_address` | Get the wallet address, balance, and holdings from a mnemonic |
-| `vector_get_utxos` | List UTxOs for an address or wallet |
-| `vector_get_spend_limits` | Check spend limits, daily usage, and audit log |
-| `vector_get_transaction_history` | Get transaction history for a wallet |
+| `vector_get_utxos` | List UTxOs for an address |
+| `vector_get_transaction_history` | Get transaction history for an address |
 
 ### Transactions
 
 | Tool | Description |
 |------|-------------|
-| `vector_send_apex` | Send AP3X (respects spend limits) |
-| `vector_send_tokens` | Send native tokens with optional AP3X |
-| `vector_build_transaction` | Build multi-output transactions (sign+submit or return unsigned CBOR) |
+| `vector_build_send_apex` | Build an unsigned AP3X payment (keyless — sign with the local signer) |
+| `vector_build_send_tokens` | Build an unsigned native-token transfer (keyless) |
+| `vector_build_transaction` | Build an unsigned multi-output transaction (keyless, never submits) |
 | `vector_dry_run` | Simulate a transaction without submitting - estimate fees and validate |
 | `vector_submit_transaction` | Broadcast an already-signed transaction (for example one signed by the local signer) |
 | `vector_await_transaction` | Wait for a submitted transaction to be confirmed on-chain |
@@ -85,8 +85,8 @@ it ships, the security notice above still applies.
 
 | Tool | Description |
 |------|-------------|
-| `vector_deploy_contract` | Deploy a Plutus V1/V2/V3 or Aiken validator to the chain |
-| `vector_interact_contract` | Lock AP3X at a script address or spend from it with a redeemer |
+| `vector_build_deploy_contract` | Build an unsigned deployment of a Plutus V1/V2/V3 or Aiken validator (keyless) |
+| `vector_build_interact_contract` | Build an unsigned lock or spend at a script address, with a redeemer (keyless) |
 
 ### Agent Registry
 
@@ -128,8 +128,9 @@ cp .env.example .env
 # Edit .env with your endpoint URLs (defaults point to Vector testnet; mainnet URLs below)
 ```
 
-The mnemonic is passed per-call by the MCP client rather than stored in the environment. This
-avoids environment dumps, but does not make it private — see the security notice above.
+The wallet/tx family is keyless: `build_*` tools take a wallet address, never a mnemonic.
+The registry and self-improvement families still take a per-call mnemonic until their
+keyless migration lands — see the security notice above.
 
 ### 3. Run
 
@@ -228,7 +229,7 @@ echo "your mnemonic words here" > packages/builder/mnemonic.txt
 npm run test:integration
 ```
 
-Requires `mnemonic.txt` in `packages/builder/` containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister. Never runs in CI.
+Requires `mnemonic.txt` in `packages/builder/` containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister. Also runs `keyless-build.test.ts`, which needs no mnemonic at all - it builds every `build_*` tool's unsigned transaction against a live public address only. Set `VECTOR_E2E_SUBMIT=1` to additionally run the full non-custodial pipeline end-to-end: build → local sign → submit → await, landing one real self-send (~0.16 AP3X fee) on-chain. Never runs in CI.
 
 ```bash
 npm run test:smoke:signer

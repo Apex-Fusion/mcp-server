@@ -188,7 +188,7 @@ TDD throughout: failing test before implementation, every PR.
 | **3** | Workspace scaffolding — pure `git mv`, zero logic change, validated by PR 1–2 CI | no |
 | **4** | **Signer package** (purely additive): `KeySource`, decode, `PolicyEngine`, audit, 4 tools. Heavy TDD | no |
 | **5** | Builder hardening: auth (enforced when configured), per-identity rate limits, `submit_transaction`, `await_transaction` | no |
-| **6** | **Family 1 — wallet/tx keyless.** Mnemonics removed; `build_*` tools land | **yes** |
+| **6** | **Family 1 — wallet/tx keyless.** Mnemonics removed; `build_*` tools land ✅ **(landed — this PR)** | **yes** |
 | **7** | **Family 2 — agent registry keyless.** Drops `@ts-nocheck` from `agent-network.ts` | yes |
 | **8** | **Family 3 — governance keyless.** Plus env-driven ref-UTxO config and a CBOR encoding fix | yes |
 | **9** | Mainnet cutover: README, security-page correction, deliberate `workflow_dispatch` | — |
