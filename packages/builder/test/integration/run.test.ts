@@ -10,7 +10,6 @@ let ctx: ServerContext;
 let mnemonic: string;
 let walletAddress: string;
 let walletHasAda = false;
-let walletBalanceAda = 0;
 let agentDid: string | null = null;
 
 before(async () => {
@@ -66,7 +65,6 @@ describe('Wallet Tools', () => {
     const balanceMatch = text.match(/AP3X Balance:\s*([\d.]+)/);
     if (balanceMatch && parseFloat(balanceMatch[1]) > 0) {
       walletHasAda = true;
-      walletBalanceAda = parseFloat(balanceMatch[1]);
       console.log(`Wallet funded: ${balanceMatch[1]} AP3X`);
     } else {
       console.log('Wallet has 0 AP3X - transaction tests will verify error handling');

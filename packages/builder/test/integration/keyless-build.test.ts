@@ -45,11 +45,20 @@ describe('keyless build against live testnet', () => {
     const tx = CML.Transaction.from_cbor_hex(cbor);
     const outs = tx.body().outputs();
     let paid = 0n;
+    // A self-send means the payment output and the change output land at the
+    // same address, so summing every output can't tell a correct 3 AP3X
+    // payment apart from a dropped/wrong one (change alone dwarfs the floor).
+    // Count outputs at exactly the requested lovelace amount instead - the
+    // same exact-count pattern the build_transaction test below uses.
+    let paymentOutputs = 0;
     for (let i = 0; i < outs.len(); i++) {
       const o = outs.get(i);
       assert.equal(o.address().to_bech32(), OWN_ADDRESS, 'self-send must only pay the own address');
-      paid += BigInt(o.amount().coin().toString());
+      const lovelace = BigInt(o.amount().coin().toString());
+      paid += lovelace;
+      if (lovelace === 3_000_000n) paymentOutputs++;
     }
+    assert.ok(paymentOutputs >= 1, `expected a 3 AP3X payment output, found ${paymentOutputs} (total paid: ${paid})`);
     const fee = BigInt(tx.body().fee().toString());
     assert.ok(fee >= 156_253n && fee <= 500_000n, `fee out of sane range: ${fee}`);
     const vkeys = tx.witness_set().vkeywitnesses();
@@ -62,6 +71,7 @@ describe('keyless build against live testnet', () => {
     const buildText = await callTool(ctx.client, 'vector_build_send_apex', {
       changeAddress: OWN_ADDRESS, recipientAddress: OWN_ADDRESS, amount: 3,
     });
+    assertBuildNotSubmitted(buildText);
     const cbor = extractCbor(buildText);
     const text = await callTool(ctx.client, 'vector_dry_run', { txCbor: cbor });
     assert.match(text, /Valid: Yes/);
