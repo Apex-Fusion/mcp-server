@@ -18,9 +18,189 @@
     ],
     "$schema": "http://json-schema.org/draft-07/schema#"
   },
+  "vector_build_deploy_contract": {
+    "type": "object",
+    "properties": {
+      "changeAddress": {
+        "description": "Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address.",
+        "type": "string"
+      },
+      "scriptCbor": {
+        "description": "Compiled Plutus/Aiken script in CBOR hex format",
+        "type": "string"
+      },
+      "scriptType": {
+        "description": "Script version",
+        "type": "string",
+        "enum": [
+          "PlutusV1",
+          "PlutusV2",
+          "PlutusV3"
+        ]
+      },
+      "initialDatum": {
+        "description": "Initial datum as CBOR hex. Use 'd87980' for void/unit datum. Defaults to void if omitted.",
+        "type": "string"
+      },
+      "lovelaceAmount": {
+        "description": "AP3X to lock at the script address in lovelace (default: 2,000,000 = 2 AP3X)",
+        "type": "number"
+      }
+    },
+    "required": [
+      "changeAddress",
+      "scriptCbor",
+      "scriptType"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_build_interact_contract": {
+    "type": "object",
+    "properties": {
+      "changeAddress": {
+        "description": "Your wallet address (source of funds, change, and the required signer for spends). Get it from your local signer's vector_signer_get_address.",
+        "type": "string"
+      },
+      "scriptCbor": {
+        "description": "Compiled Plutus/Aiken script in CBOR hex",
+        "type": "string"
+      },
+      "scriptType": {
+        "description": "Script version",
+        "type": "string",
+        "enum": [
+          "PlutusV1",
+          "PlutusV2",
+          "PlutusV3"
+        ]
+      },
+      "action": {
+        "description": "'spend' to collect UTxOs from the script, 'lock' to send funds to it",
+        "type": "string",
+        "enum": [
+          "spend",
+          "lock"
+        ]
+      },
+      "redeemer": {
+        "description": "Redeemer as CBOR hex (required for spend, use 'd87980' for void)",
+        "type": "string"
+      },
+      "datum": {
+        "description": "Datum as CBOR hex (required for lock, use 'd87980' for void)",
+        "type": "string"
+      },
+      "lovelaceAmount": {
+        "description": "Lovelace to lock (for lock action, default: 2,000,000 = 2 AP3X)",
+        "type": "number"
+      },
+      "utxoRef": {
+        "description": "Specific UTxO to spend from (optional, otherwise spends all UTxOs at script address)",
+        "type": "object",
+        "properties": {
+          "txHash": {
+            "type": "string"
+          },
+          "outputIndex": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "txHash",
+          "outputIndex"
+        ]
+      },
+      "assets": {
+        "description": "Additional native assets for lock action: { 'policyId+assetNameHex': 'quantity' }",
+        "type": "object",
+        "propertyNames": {
+          "type": "string"
+        },
+        "additionalProperties": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "changeAddress",
+      "scriptCbor",
+      "scriptType",
+      "action"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_build_send_apex": {
+    "type": "object",
+    "properties": {
+      "changeAddress": {
+        "description": "Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address.",
+        "type": "string"
+      },
+      "recipientAddress": {
+        "description": "Recipient Vector address (addr1...)",
+        "type": "string"
+      },
+      "amount": {
+        "description": "Amount of AP3X to send",
+        "type": "number",
+        "minimum": 1
+      },
+      "metadata": {
+        "description": "Optional transaction metadata in JSON format",
+        "type": "string"
+      }
+    },
+    "required": [
+      "changeAddress",
+      "recipientAddress",
+      "amount"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_build_send_tokens": {
+    "type": "object",
+    "properties": {
+      "changeAddress": {
+        "description": "Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address.",
+        "type": "string"
+      },
+      "recipientAddress": {
+        "description": "Recipient Vector address (addr1...)",
+        "type": "string"
+      },
+      "policyId": {
+        "description": "Token policy ID (56 hex characters)",
+        "type": "string"
+      },
+      "assetName": {
+        "description": "Asset name (text or hex; can be empty for policy-only tokens)",
+        "type": "string"
+      },
+      "amount": {
+        "description": "Amount of tokens to send",
+        "type": "string"
+      },
+      "adaAmount": {
+        "description": "Optional AP3X to include with the tokens (defaults to the 2 AP3X minimum)",
+        "type": "number"
+      }
+    },
+    "required": [
+      "changeAddress",
+      "recipientAddress",
+      "policyId",
+      "assetName",
+      "amount"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
   "vector_build_transaction": {
     "type": "object",
     "properties": {
+      "changeAddress": {
+        "description": "Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address.",
+        "type": "string"
+      },
       "outputs": {
         "description": "Transaction outputs",
         "minItems": 1,
@@ -53,58 +233,14 @@
           ]
         }
       },
-      "mnemonic": {
-        "description": "15 or 24-word BIP39 mnemonic for the signing wallet",
-        "type": "string"
-      },
       "metadata": {
         "description": "Optional JSON metadata (attached under label 674)",
         "type": "string"
-      },
-      "submit": {
-        "description": "If true, sign and submit the transaction. If false/omitted, return unsigned CBOR for review.",
-        "type": "boolean"
       }
     },
     "required": [
-      "outputs",
-      "mnemonic"
-    ],
-    "$schema": "http://json-schema.org/draft-07/schema#"
-  },
-  "vector_deploy_contract": {
-    "type": "object",
-    "properties": {
-      "scriptCbor": {
-        "description": "Compiled Plutus/Aiken script in CBOR hex format",
-        "type": "string"
-      },
-      "scriptType": {
-        "description": "Script version",
-        "type": "string",
-        "enum": [
-          "PlutusV1",
-          "PlutusV2",
-          "PlutusV3"
-        ]
-      },
-      "mnemonic": {
-        "description": "15 or 24-word BIP39 mnemonic for the deploying wallet",
-        "type": "string"
-      },
-      "initialDatum": {
-        "description": "Initial datum as CBOR hex. Use 'd87980' for void/unit datum. Defaults to void if omitted.",
-        "type": "string"
-      },
-      "lovelaceAmount": {
-        "description": "AP3X to lock at the script address in lovelace (default: 2,000,000 = 2 AP3X)",
-        "type": "number"
-      }
-    },
-    "required": [
-      "scriptCbor",
-      "scriptType",
-      "mnemonic"
+      "changeAddress",
+      "outputs"
     ],
     "$schema": "http://json-schema.org/draft-07/schema#"
   },
@@ -274,81 +410,6 @@
         "type": "string"
       }
     },
-    "$schema": "http://json-schema.org/draft-07/schema#"
-  },
-  "vector_interact_contract": {
-    "type": "object",
-    "properties": {
-      "scriptCbor": {
-        "description": "Compiled Plutus/Aiken script in CBOR hex",
-        "type": "string"
-      },
-      "scriptType": {
-        "description": "Script version",
-        "type": "string",
-        "enum": [
-          "PlutusV1",
-          "PlutusV2",
-          "PlutusV3"
-        ]
-      },
-      "action": {
-        "description": "'spend' to collect UTxOs from the script, 'lock' to send funds to it",
-        "type": "string",
-        "enum": [
-          "spend",
-          "lock"
-        ]
-      },
-      "mnemonic": {
-        "description": "15 or 24-word BIP39 mnemonic for the wallet",
-        "type": "string"
-      },
-      "redeemer": {
-        "description": "Redeemer as CBOR hex (required for spend, use 'd87980' for void)",
-        "type": "string"
-      },
-      "datum": {
-        "description": "Datum as CBOR hex (required for lock, use 'd87980' for void)",
-        "type": "string"
-      },
-      "lovelaceAmount": {
-        "description": "Lovelace to lock (for lock action, default: 2,000,000 = 2 AP3X)",
-        "type": "number"
-      },
-      "utxoRef": {
-        "description": "Specific UTxO to spend from (optional, otherwise spends all UTxOs at script address)",
-        "type": "object",
-        "properties": {
-          "txHash": {
-            "type": "string"
-          },
-          "outputIndex": {
-            "type": "number"
-          }
-        },
-        "required": [
-          "txHash",
-          "outputIndex"
-        ]
-      },
-      "assets": {
-        "description": "Additional native assets for lock action: { 'policyId+assetNameHex': 'quantity' }",
-        "type": "object",
-        "propertyNames": {
-          "type": "string"
-        },
-        "additionalProperties": {
-          "type": "string"
-        }
-      }
-    },
-    "required": [
-      "scriptCbor",
-      "scriptType",
-      "action",
-      "mnemonic"
-    ],
     "$schema": "http://json-schema.org/draft-07/schema#"
   },
   "vector_message_agent": {
@@ -652,81 +713,6 @@
       "agentDid",
       "proposalType",
       "stakeApex"
-    ],
-    "$schema": "http://json-schema.org/draft-07/schema#"
-  },
-  "vector_send_apex": {
-    "type": "object",
-    "properties": {
-      "recipientAddress": {
-        "description": "Recipient Vector address (addr1...)",
-        "type": "string"
-      },
-      "amount": {
-        "description": "Amount of AP3X to send",
-        "type": "number",
-        "minimum": 1
-      },
-      "mnemonic": {
-        "description": "15 or 24-word BIP39 mnemonic for the sending wallet",
-        "type": "string"
-      },
-      "metadata": {
-        "description": "Optional transaction metadata in JSON format",
-        "type": "string"
-      },
-      "unsigned_only": {
-        "description": "If true, return unsigned TX CBOR without signing or submitting",
-        "default": false,
-        "type": "boolean"
-      }
-    },
-    "required": [
-      "recipientAddress",
-      "amount",
-      "mnemonic"
-    ],
-    "$schema": "http://json-schema.org/draft-07/schema#"
-  },
-  "vector_send_tokens": {
-    "type": "object",
-    "properties": {
-      "recipientAddress": {
-        "description": "Recipient Vector address (addr1...)",
-        "type": "string"
-      },
-      "policyId": {
-        "description": "Token policy ID",
-        "type": "string"
-      },
-      "assetName": {
-        "description": "Asset name (can be empty for policy-only tokens)",
-        "type": "string"
-      },
-      "amount": {
-        "description": "Amount of tokens to send",
-        "type": "string"
-      },
-      "mnemonic": {
-        "description": "15 or 24-word BIP39 mnemonic for the sending wallet",
-        "type": "string"
-      },
-      "adaAmount": {
-        "description": "Optional AP3X to include (uses minimum required if not specified)",
-        "type": "number"
-      },
-      "unsigned_only": {
-        "description": "If true, return unsigned TX CBOR without signing or submitting",
-        "default": false,
-        "type": "boolean"
-      }
-    },
-    "required": [
-      "recipientAddress",
-      "policyId",
-      "assetName",
-      "amount",
-      "mnemonic"
     ],
     "$schema": "http://json-schema.org/draft-07/schema#"
   },
