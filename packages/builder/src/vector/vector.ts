@@ -175,7 +175,7 @@ ${utxoList}`,
   // vector_build_send_apex - build an UNSIGNED AP3X payment (keyless)
   server.tool(
     "vector_build_send_apex",
-    "Build an UNSIGNED transaction sending AP3X to a recipient. Takes no key material - sign the returned CBOR with your local signer (vector_signer_sign), then broadcast with vector_submit_transaction.",
+    "Build an UNSIGNED transaction sending AP3X to a recipient. Takes no key material - sign the returned CBOR with your local signer (vector_signer_sign), then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     {
       changeAddress: z.string().describe("Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address."),
       recipientAddress: z.string().describe("Recipient Vector address (addr1...)"),
@@ -228,7 +228,7 @@ Non-custodial flow: 1) sign locally with vector_signer_sign { txCbor } — your 
   // vector_build_send_tokens - build an UNSIGNED native-token transfer (keyless)
   server.tool(
     "vector_build_send_tokens",
-    "Build an UNSIGNED transaction sending Vector native tokens. Takes no key material - sign the returned CBOR with your local signer (vector_signer_sign), then broadcast with vector_submit_transaction.",
+    "Build an UNSIGNED transaction sending Vector native tokens. Takes no key material - sign the returned CBOR with your local signer (vector_signer_sign), then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     {
       changeAddress: z.string().describe("Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address."),
       recipientAddress: z.string().describe("Recipient Vector address (addr1...)"),
@@ -285,7 +285,7 @@ Non-custodial flow: 1) sign locally with vector_signer_sign { txCbor }; 2) broad
   // vector_build_transaction - build an UNSIGNED multi-output transaction (keyless)
   server.tool(
     "vector_build_transaction",
-    "Build an UNSIGNED multi-output transaction with optional metadata. Takes no key material and never submits - sign the returned CBOR with your local signer (vector_signer_sign), then broadcast with vector_submit_transaction.",
+    "Build an UNSIGNED multi-output transaction with optional metadata. Takes no key material and never submits - sign the returned CBOR with your local signer (vector_signer_sign), then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     {
       changeAddress: z.string().describe("Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address."),
       outputs: z.array(z.object({
@@ -602,7 +602,7 @@ ${txList}
   // vector_build_deploy_contract - build an UNSIGNED contract deployment (keyless)
   server.tool(
     "vector_build_deploy_contract",
-    "Build an UNSIGNED transaction deploying a Plutus/Aiken smart contract (locks funds at its script address). Takes no key material - sign with your local signer, then broadcast with vector_submit_transaction.",
+    "Build an UNSIGNED transaction deploying a Plutus/Aiken smart contract (locks funds at its script address). Takes no key material - sign with your local signer, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     {
       changeAddress: z.string().describe("Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address."),
       scriptCbor: z.string().describe("Compiled Plutus/Aiken script in CBOR hex format"),
@@ -657,7 +657,7 @@ Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, 
   // vector_build_interact_contract - build an UNSIGNED contract interaction (keyless)
   server.tool(
     "vector_build_interact_contract",
-    "Build an UNSIGNED transaction interacting with a deployed Plutus/Aiken contract - lock AP3X at it or spend from it. Takes no key material - sign with your local signer, then broadcast with vector_submit_transaction.",
+    "Build an UNSIGNED transaction interacting with a deployed Plutus/Aiken contract - lock AP3X at it or spend from it. Takes no key material - sign with your local signer, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     {
       changeAddress: z.string().describe("Your wallet address (source of funds, change, and the required signer for spends). Get it from your local signer's vector_signer_get_address."),
       scriptCbor: z.string().describe("Compiled Plutus/Aiken script in CBOR hex"),

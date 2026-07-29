@@ -357,7 +357,7 @@ Save your Agent DID - you'll need it to update, deregister, or let other agents 
 
 **Troubleshooting Tips:**
 1. Ensure wallet has at least 12 AP3X (10 deposit + fees)
-2. Check spend limits with vector_get_spend_limits
+2. Server spend limits for this tool are set via VECTOR_SPEND_LIMIT_PER_TX / VECTOR_SPEND_LIMIT_DAILY
 3. Each wallet can register multiple agents (different seed UTxOs)
 4. Verify Ogmios endpoint is reachable at ${VECTOR_OGMIOS_URL}`,
           }],
@@ -451,7 +451,7 @@ The agent's profile has been updated on-chain. The identity NFT and deposit are 
 1. Verify the agent DID is correct
 2. Your wallet must be the agent's current owner
 3. Ensure wallet has enough AP3X for transaction fees
-4. Check spend limits with vector_get_spend_limits`,
+4. Server spend limits for this tool are set via VECTOR_SPEND_LIMIT_PER_TX / VECTOR_SPEND_LIMIT_DAILY`,
           }],
         };
       }
@@ -672,7 +672,7 @@ The message is recorded on-chain in TX metadata label 674.`,
 1. Verify the agent DID is correct: did:vector:agent:{policyId}:{nftAssetName}
 2. Ensure wallet has at least 3 AP3X (2 AP3X delivery + fees)
 3. Use vector_get_agent_profile to verify the agent exists first
-4. Check spend limits with vector_get_spend_limits`,
+4. Server spend limits for this tool are set via VECTOR_SPEND_LIMIT_PER_TX / VECTOR_SPEND_LIMIT_DAILY`,
           }],
         };
       }

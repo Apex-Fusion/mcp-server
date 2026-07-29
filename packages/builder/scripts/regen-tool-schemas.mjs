@@ -1,6 +1,9 @@
 // packages/builder/scripts/regen-tool-schemas.mjs
 // Boots the BUILT server, lists tools over SSE, rewrites the smoke snapshot
-// sorted by name. Run from the repo root: npm run build && node packages/builder/scripts/regen-tool-schemas.mjs
+// sorted by name. Run: npm run build && node packages/builder/scripts/regen-tool-schemas.mjs
+// (npm run build must still run from the repo root - or via `npm run build
+// --workspace=...` - since it's an npm script; but this script itself now
+// runs from any cwd, since its paths are resolved from its own location).
 //
 // Deviation from the original brief version: the brief used a flat 2000ms
 // sleep before connecting. On this machine that raced the server's actual
@@ -18,11 +21,18 @@
 // packages/builder/test/smoke/tool-inventory.test.ts for the full rationale.
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 
+// Resolved from this file's own location, not from process.cwd(), so the
+// script behaves identically regardless of where it's invoked from (repo
+// root, packages/builder, or anywhere else).
+const SERVER_ENTRY = resolve(import.meta.dirname, '../build/index.js');
+const SNAPSHOT_PATH = resolve(import.meta.dirname, '../test/smoke/tool-schemas.snapshot.json');
+
 const PORT = 3939;
-const server = spawn('node', ['packages/builder/build/index.js'], {
+const server = spawn('node', [SERVER_ENTRY], {
   env: { ...process.env, PORT: String(PORT) },
   stdio: ['ignore', 'ignore', 'pipe'],
 });
@@ -54,7 +64,7 @@ try {
       .sort(([a], [b]) => a.localeCompare(b)),
   );
   writeFileSync(
-    'packages/builder/test/smoke/tool-schemas.snapshot.json',
+    SNAPSHOT_PATH,
     JSON.stringify(snapshot, null, 2) + '\n',
   );
   console.log(`wrote ${tools.length} tool schemas`);

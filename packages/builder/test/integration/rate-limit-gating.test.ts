@@ -19,8 +19,8 @@ import type { RawServerHandle } from '../setup.ts';
 // validates the address with getAddressDetails() and throws BEFORE any
 // provider call - proven by Task 2's booby-trapped-provider test. Handlers
 // return caught errors as normal content, so isError stays false and this
-// probe is just as hermetic as the vector_get_spend_limits tool it replaces
-// (which vector.ts no longer has - Task 5 deleted it, since SafetyLayer state
+// probe is just as hermetic as the spend-limit-status tool it replaces
+// (vector.ts no longer has one - Task 5 deleted it, since SafetyLayer state
 // is no longer exposed to keyless callers).
 // vector_get_agent_profile (agent-network.ts) and
 // vector_self_improvement_analyze_metrics (self-improvement.ts) DO reach

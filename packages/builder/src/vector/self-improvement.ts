@@ -465,7 +465,7 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
       const stakeLovelace = stakeApex * 1_000_000;
       const safetyCheck = safetyLayer.checkTransaction(stakeLovelace + 4_000_000);
       if (!safetyCheck.allowed) {
-        return { content: [{ type: "text", text: `Safety limit exceeded: ${safetyCheck.reason}. Check limits with vector_get_spend_limits.` }] };
+        return { content: [{ type: "text", text: `Safety limit exceeded: ${safetyCheck.reason}. Server spend limits for this tool are set via VECTOR_SPEND_LIMIT_PER_TX / VECTOR_SPEND_LIMIT_DAILY.` }] };
       }
 
       try {
@@ -695,7 +695,7 @@ activity tracking token (\`pact_\`) minted. Visible on the Foundation dashboard.
 1. Ensure wallet has at least ${stakeApex + 5} AP3X (stake + fees)
 2. For Emergency proposals, your agent needs Established reputation (100+ AP3X staked in Game 3)
 3. proposalHash must be 64 hex characters (blake2b_256 of your proposal document)
-4. Check spend limits with vector_get_spend_limits`,
+4. Server spend limits for this tool are set via VECTOR_SPEND_LIMIT_PER_TX / VECTOR_SPEND_LIMIT_DAILY`,
           }],
         };
       }

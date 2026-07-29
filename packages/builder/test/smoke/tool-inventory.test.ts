@@ -7,9 +7,10 @@ import { startServer, stopServer, ServerContext } from '../setup.ts';
 /**
  * Snapshot of the current tool surface (23 tools) for the non-custodial split
  * series (see docs/architecture/non-custodial-split.md). PR 6 (Task 5) is the
- * PR that took this list from 25 to 23: it deleted `vector_get_address` and
- * `vector_get_spend_limits` outright (the safety-layer/wallet-info tools have
- * no keyless equivalent — spend limits are gone because the builder no longer
+ * PR that took this list from 25 to 23: it deleted `vector_get_address`
+ * outright, along with the tool that reported per-transaction/daily
+ * SafetyLayer spend status (the safety-layer/wallet-info tools have no
+ * keyless equivalent — spend status is gone because the builder no longer
  * holds keys to limit) as part of making the remaining query tools
  * (`vector_get_utxos`, `vector_get_transaction_history`, `vector_dry_run`)
  * keyless. PRs 2, 6, 7 and 8 each deliberately restructure and rename tool
@@ -140,6 +141,14 @@ describe('tool schema snapshot', () => {
       assert.ok(
         live,
         `Tool "${toolName}" is in the snapshot but was not returned by the live server's listTools().`
+      );
+      // Named separately from the deepStrictEqual below: a regen that
+      // silently drops descriptions (e.g. JSON.stringify dropping an
+      // `undefined` description key) should fail by naming exactly that,
+      // not just show up as an opaque diff.
+      assert.ok(
+        'description' in (schemaSnapshot[toolName] as any),
+        `Snapshot entry for "${toolName}" has no "description" key in test/smoke/tool-schemas.snapshot.json.`
       );
       assert.deepStrictEqual(
         { description: live.description, inputSchema: live.inputSchema },
