@@ -134,7 +134,7 @@ This is why governance is the last family: the LLM must drive a stateful, multi-
 
 ## 7. Tool inventory
 
-**Builder — 24 tools, zero keys.**
+**Builder — 24 tools at full migration, zero keys.**
 
 | Group | Tools |
 |---|---|
