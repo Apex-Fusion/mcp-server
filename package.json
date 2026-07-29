@@ -15,7 +15,7 @@
     "test:smoke": "npm run build && node --import tsx --test packages/builder/test/smoke/*.test.ts",
     "test:smoke:signer": "npm run build && node --import tsx --test packages/signer/test/smoke/*.test.ts",
     "test:integration": "npm run build && node --import tsx --test packages/builder/test/integration/*.test.ts",
-    "test:integration:auth": "npm run build && node --import tsx --test packages/builder/test/integration/auth-gating.test.ts packages/builder/test/integration/rate-limit-gating.test.ts"
+    "test:integration:auth": "npm run build && node --import tsx --test packages/builder/test/integration/auth-gating.test.ts packages/builder/test/integration/rate-limit-gating.test.ts",
     "test:integration:signer": "node --import tsx --test packages/signer/test/integration/*.test.ts"
   },
   "devDependencies": {
