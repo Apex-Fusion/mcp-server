@@ -21,6 +21,44 @@ interface OgmiosProviderConfig {
   koiosUrl?: string;
 }
 
+/**
+ * Interpret a submit-api response body as a transaction hash.
+ *
+ * Exported and pure so it can be tested without a network round trip — the
+ * class method that calls it cannot be, because provider.ts imports `fetch`
+ * from cross-fetch rather than reading the global.
+ *
+ * Refuses rather than guessing. The previous implementation fell back to the
+ * first 64 characters of the *submitted CBOR*, which is a well-formed 64-char
+ * hex string and therefore indistinguishable from a real hash to any caller.
+ */
+export function parseSubmitResponse(body: string): string {
+  const trimmed = body.trim();
+
+  // A transaction hash is 32 bytes: exactly 64 hex characters.
+  const isTxHash = (v: unknown): v is string =>
+    typeof v === 'string' && /^[0-9a-fA-F]{64}$/.test(v);
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (isTxHash(parsed)) return parsed;
+    const candidate = parsed?.txId ?? parsed?.txHash ?? parsed?.id;
+    if (isTxHash(candidate)) return candidate;
+  } catch {
+    // Not JSON — fall through to the bare-text form below.
+  }
+
+  const bare = trimmed.replace(/^"|"$/g, '');
+  if (isTxHash(bare)) return bare;
+
+  // Deliberately does not claim the submission failed: the request succeeded,
+  // only the response was unreadable.
+  throw new Error(
+    'Transaction was submitted but the response could not be parsed as a transaction hash. ' +
+      'The transaction may or may not have been accepted - check the explorer before retrying.'
+  );
+}
+
 export class OgmiosProvider implements Provider {
   private ogmiosUrl: string;
   private submitUrl: string;
@@ -413,14 +451,7 @@ export class OgmiosProvider implements Provider {
     }
 
     const result = await response.text();
-    // submit-api returns the tx hash as a JSON string
-    try {
-      const parsed = JSON.parse(result);
-      return typeof parsed === 'string' ? parsed : parsed.txId || parsed.txHash || tx.slice(0, 64);
-    } catch {
-      // If response is plain text tx hash
-      return result.replace(/"/g, '').trim();
-    }
+    return parseSubmitResponse(result);
   }
 
   /**

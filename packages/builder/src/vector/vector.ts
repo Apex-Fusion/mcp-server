@@ -14,6 +14,7 @@ import {
 } from '@apexfusion/vector-mcp-shared/config';
 import { safetyLayer } from './safety.js';
 import { limiterFor } from './rate-limiter.js';
+import { pollUntilConfirmed } from './poll.js';
 import { registerAgentNetworkTools } from './agent-network.js';
 import { registerSelfImprovementTools } from './self-improvement.js';
 import type {
@@ -1078,6 +1079,96 @@ No transaction was submitted to the network.`,
             text: `Dry run failed: ${error.message}`,
           }],
         };
+      }
+    }
+  );
+
+  // vector_submit_transaction - submit an externally signed transaction
+  server.tool(
+    "vector_submit_transaction",
+    "Submit an already-signed transaction to Vector. Use this to broadcast CBOR signed elsewhere (for example by a local signer). Does not sign anything.",
+    {
+      signedTxCbor: z.string().describe("Hex-encoded CBOR of a fully signed transaction"),
+    },
+    async ({ signedTxCbor }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
+      try {
+        const provider = new OgmiosProvider({
+          ogmiosUrl: VECTOR_OGMIOS_URL,
+          submitUrl: VECTOR_SUBMIT_URL,
+          koiosUrl: VECTOR_KOIOS_URL,
+        });
+        const txHash = await provider.submitTx(signedTxCbor);
+        return {
+          content: [{
+            type: "text",
+            text: `# Transaction Submitted
+
+Transaction Hash: ${txHash}
+
+[View on Explorer](${explorerTxLink(txHash)})`,
+          }],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to submit transaction: ${error.message}
+
+**Troubleshooting Tips:**
+1. Ensure the CBOR is a fully signed transaction, not an unsigned one
+2. A transaction can only be submitted once - check the explorer if unsure
+3. Verify the submit endpoint is reachable`,
+          }],
+        };
+      }
+    }
+  );
+
+  // vector_await_transaction - wait for on-chain confirmation
+  server.tool(
+    "vector_await_transaction",
+    "Wait for a submitted transaction to be confirmed on Vector. Polls until it appears on-chain or the timeout elapses.",
+    {
+      txHash: z.string().describe("Transaction hash returned by vector_submit_transaction"),
+      timeoutSeconds: z.number().min(1).max(300).optional().describe("How long to wait before giving up (default: 120)"),
+    },
+    async ({ txHash, timeoutSeconds }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
+      try {
+        const provider = new OgmiosProvider({
+          ogmiosUrl: VECTOR_OGMIOS_URL,
+          submitUrl: VECTOR_SUBMIT_URL,
+          koiosUrl: VECTOR_KOIOS_URL,
+        });
+        const budgetMs = (timeoutSeconds ?? 120) * 1000;
+        const intervalMs = 3000;
+        const confirmed = await pollUntilConfirmed(
+          async () => {
+            const utxos = await provider.getUtxosByOutRef([{ txHash, outputIndex: 0 }]).catch(() => []);
+            return utxos.length > 0;
+          },
+          budgetMs,
+          intervalMs,
+        );
+        return {
+          content: [{
+            type: "text",
+            text: confirmed
+              ? `# Transaction Confirmed\n\nTransaction Hash: ${txHash}\n\n[View on Explorer](${explorerTxLink(txHash)})`
+              : `# Not Confirmed Yet\n\nTransaction ${txHash} did not appear on-chain within ${timeoutSeconds ?? 120}s.\n\nThis does not mean it failed - it may still be pending. Check the explorer.\n\n[View on Explorer](${explorerTxLink(txHash)})`,
+          }],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return { content: [{ type: "text", text: `Failed to check transaction status: ${error.message}` }] };
       }
     }
   );
