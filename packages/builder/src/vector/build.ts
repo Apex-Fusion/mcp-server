@@ -127,7 +127,7 @@ export async function buildDeployContract(
   };
   const scriptAddress = validatorToAddress('Mainnet', validator);
   const scriptHash = validatorToScriptHash(validator);
-  const datum = p.initialDatum || Data.void();
+  const datum = p.initialDatum ?? Data.void();
   const lovelace = BigInt(p.lovelaceAmount ?? 2_000_000);
   const tx = lucid.newTx()
     .pay.ToAddressWithData(scriptAddress, { kind: 'inline', value: datum }, { lovelace });
@@ -149,7 +149,8 @@ export async function buildInteractContract(
   const scriptAddress = validatorToAddress('Mainnet', validator);
 
   if (p.action === 'lock') {
-    const datumData = p.datum || Data.void();
+    // '' must NOT silently become void - ?? lets a caller bug fail loudly downstream
+    const datumData = p.datum ?? Data.void();
     const outputAssets: Record<string, bigint> = { lovelace: BigInt(p.lovelaceAmount ?? 2_000_000) };
     if (p.assets) {
       for (const [unit, qty] of Object.entries(p.assets)) outputAssets[unit] = BigInt(qty);
@@ -157,31 +158,39 @@ export async function buildInteractContract(
     const tx = lucid.newTx()
       .pay.ToAddressWithData(scriptAddress, { kind: 'inline', value: datumData }, outputAssets);
     return { ...toBuildResult(await tx.complete()), scriptAddress, action: 'lock' };
+  } else if (p.action === 'spend') {
+    // SPEND: collect from the script back to the wallet.
+    // no utxoRef: sweep ALL UTxOs at the script address - old tool's documented
+    // semantic ("otherwise spends all UTxOs at script address"), preserved here
+    // for behavior parity; this is not a gap, do not "fix" it.
+    const scriptUtxos = p.utxoRef
+      ? await lucid.utxosByOutRef([p.utxoRef])
+      : await lucid.utxosAt(scriptAddress);
+    if (!scriptUtxos || scriptUtxos.length === 0) {
+      throw new Error(`No UTxOs found at script address ${scriptAddress}`);
+    }
+    if (p.utxoRef && scriptUtxos.some((u) => u.address !== scriptAddress)) {
+      throw new Error(`UTxO ${p.utxoRef.txHash}#${p.utxoRef.outputIndex} is not at script address ${scriptAddress}`);
+    }
+    const redeemerData = p.redeemer ?? Data.void();
+    let completed;
+    try {
+      completed = await lucid.newTx()
+        .collectFrom(scriptUtxos, redeemerData)
+        .attach.SpendingValidator(validator)
+        .addSigner(p.changeAddress)
+        .complete();
+    } catch {
+      // Retry without the native UPLC evaluator — falls back to the provider's
+      // evaluateTx (network); mirrors the pre-split behaviour for chain quirks.
+      completed = await lucid.newTx()
+        .collectFrom(scriptUtxos, redeemerData)
+        .attach.SpendingValidator(validator)
+        .addSigner(p.changeAddress)
+        .complete({ localUPLCEval: false });
+    }
+    return { ...toBuildResult(completed), scriptAddress, action: 'spend' };
+  } else {
+    throw new Error(`Invalid action: ${String(p.action)} - expected 'lock' or 'spend'`);
   }
-
-  // SPEND: collect from the script back to the wallet
-  const scriptUtxos = p.utxoRef
-    ? await lucid.utxosByOutRef([p.utxoRef])
-    : await lucid.utxosAt(scriptAddress);
-  if (!scriptUtxos || scriptUtxos.length === 0) {
-    throw new Error(`No UTxOs found at script address ${scriptAddress}`);
-  }
-  const redeemerData = p.redeemer || Data.void();
-  let completed;
-  try {
-    completed = await lucid.newTx()
-      .collectFrom(scriptUtxos, redeemerData)
-      .attach.SpendingValidator(validator)
-      .addSigner(p.changeAddress)
-      .complete();
-  } catch {
-    // Retry without the native UPLC evaluator — falls back to the provider's
-    // evaluateTx (network); mirrors the pre-split behaviour for chain quirks.
-    completed = await lucid.newTx()
-      .collectFrom(scriptUtxos, redeemerData)
-      .attach.SpendingValidator(validator)
-      .addSigner(p.changeAddress)
-      .complete({ localUPLCEval: false });
-  }
-  return { ...toBuildResult(completed), scriptAddress, action: 'spend' };
 }
