@@ -59,6 +59,25 @@ export function parseSubmitResponse(body: string): string {
   );
 }
 
+/**
+ * Interpret a parsed Koios `tx_status` response body as a confirmation
+ * signal.
+ *
+ * Exported and pure so it can be tested without a network round trip - same
+ * rationale as `parseSubmitResponse` above. By the time this runs, the
+ * caller (`OgmiosProvider.getKoiosTxStatus`) has already thrown on a genuine
+ * transport/HTTP failure, so anything reaching here is a syntactically valid
+ * response from a reachable Koios. A missing hash (empty array - Koios has
+ * not indexed it yet), a present-but-zero-confirmation entry, or a body that
+ * does not match the expected shape are all treated as "not yet confirmed"
+ * (false) rather than an error: none of them mean the check itself failed.
+ */
+export function koiosIndicatesConfirmed(data: unknown): boolean {
+  if (!Array.isArray(data) || data.length === 0) return false;
+  const entry = data[0] as { num_confirmations?: unknown } | undefined;
+  return typeof entry?.num_confirmations === 'number' && entry.num_confirmations > 0;
+}
+
 export class OgmiosProvider implements Provider {
   private ogmiosUrl: string;
   private submitUrl: string;
@@ -286,6 +305,52 @@ export class OgmiosProvider implements Provider {
     throw new Error(`Datum not found for hash: ${datumHash}. Datum lookups require Koios indexer.`);
   }
 
+  /**
+   * Query Koios for a transaction's confirmation status, once.
+   *
+   * Thin and deliberately does not interpret the response - see
+   * `koiosIndicatesConfirmed` above, kept separate so it can be unit tested
+   * without a network round trip. Unlike the Koios branch inside `awaitTx`
+   * below (which swallows every failure into "keep polling"), this throws on
+   * a network failure or a non-OK response: the caller could not determine
+   * status, which is a different situation from "asked, and it is not
+   * confirmed yet", and callers such as `pollUntilConfirmed`
+   * (packages/builder/src/vector/poll.ts) need to be able to tell the two
+   * apart.
+   */
+  async getKoiosTxStatus(txHash: string): Promise<unknown> {
+    if (!this.koiosUrl) {
+      throw new Error(
+        'Koios URL is not configured. Transaction status checks require Koios indexer. ' +
+        'Set VECTOR_KOIOS_URL in your environment.'
+      );
+    }
+
+    const response = await fetch(`${this.koiosUrl}/api/v1/tx_status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ _tx_hashes: [txHash] }),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Koios tx_status query failed (${response.status}): ${text}`);
+    }
+    return response.json();
+  }
+
+  /**
+   * Required by the @lucid-evolution/lucid `Provider` interface that this
+   * class implements, but otherwise unused repo-wide: `vector_await_transaction`
+   * builds its own poll loop on top of `getKoiosTxStatus`/`getUtxosByOutRef`
+   * (see packages/builder/src/vector/poll.ts) instead of calling this,
+   * because this method's fixed 60-attempt/3s-interval budget cannot be
+   * configured by a caller and it swallows every failure - network error,
+   * non-OK response, malformed body - into "keep polling", which is
+   * indistinguishable from "checked and it is not there yet". Left
+   * unmodified rather than deleted or reworked: TypeScript requires it to
+   * satisfy `implements Provider`, and changing its own retry/error
+   * semantics is out of scope here since nothing depends on them.
+   */
   async awaitTx(txHash: string, checkInterval: number = 3000): Promise<boolean> {
     // Poll for tx confirmation
     const maxAttempts = 60; // ~3 minutes at 3s intervals

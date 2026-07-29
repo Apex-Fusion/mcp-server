@@ -1,4 +1,5 @@
-// Generic bounded polling loop used by vector_await_transaction.
+// Generic bounded polling loop used by vector_await_transaction, plus the
+// logic that picks what each poll attempt actually checks.
 //
 // OgmiosProvider already has an `awaitTx`, but it is not reused here: it
 // hard-codes a 60-attempt budget (~3 minutes at a fixed 3s interval) with no
@@ -43,4 +44,28 @@ export async function pollUntilConfirmed(
     await sleep(Math.min(intervalMs, remaining));
   }
   return false;
+}
+
+/**
+ * Choose which confirmation check `pollUntilConfirmed` should run: Koios's
+ * `tx_status` when configured (a direct signal), the outRef heuristic when
+ * it is not - the same preference order as `OgmiosProvider.awaitTx`, without
+ * reusing it (see the file header above).
+ *
+ * Takes both checks as already-built functions, rather than a provider and
+ * txHash, so the selection itself can be pinned with fakes the same way
+ * `pollUntilConfirmed`'s own `now`/`sleep` are injected above - no network
+ * call happens here. Whichever function is selected is returned as-is, not
+ * wrapped in a try/catch, so a rejection from it propagates unchanged
+ * through `pollUntilConfirmed` to the tool's outer `try/catch` - it is not
+ * reinterpreted as "not yet confirmed". `checkKoios` and `checkOutRef`
+ * carrying that same no-swallow contract is the caller's responsibility
+ * (see the vector_await_transaction call site).
+ */
+export function buildConfirmationCheck(
+  koiosConfigured: boolean,
+  checkKoios: () => Promise<boolean>,
+  checkOutRef: () => Promise<boolean>,
+): () => Promise<boolean> {
+  return koiosConfigured ? checkKoios : checkOutRef;
 }

@@ -7,14 +7,14 @@ import * as dotenv from 'dotenv';
 import { resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
-import { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
+import { OgmiosProvider, koiosIndicatesConfirmed } from '@apexfusion/vector-mcp-shared/provider';
 import { lovelaceToAda, formatAssetName } from '@apexfusion/vector-mcp-shared/tx';
 import {
   VECTOR_OGMIOS_URL, VECTOR_SUBMIT_URL, VECTOR_KOIOS_URL, VECTOR_EXPLORER_URL, explorerTxLink,
 } from '@apexfusion/vector-mcp-shared/config';
 import { safetyLayer } from './safety.js';
 import { limiterFor } from './rate-limiter.js';
-import { pollUntilConfirmed } from './poll.js';
+import { pollUntilConfirmed, buildConfirmationCheck } from './poll.js';
 import { registerAgentNetworkTools } from './agent-network.js';
 import { registerSelfImprovementTools } from './self-improvement.js';
 import type {
@@ -1151,10 +1151,14 @@ Transaction Hash: ${txHash}
         const budgetMs = (timeoutSeconds ?? 120) * 1000;
         const intervalMs = 3000;
         const confirmed = await pollUntilConfirmed(
-          async () => {
-            const utxos = await provider.getUtxosByOutRef([{ txHash, outputIndex: 0 }]).catch(() => []);
-            return utxos.length > 0;
-          },
+          buildConfirmationCheck(
+            Boolean(VECTOR_KOIOS_URL),
+            async () => koiosIndicatesConfirmed(await provider.getKoiosTxStatus(txHash)),
+            async () => {
+              const utxos = await provider.getUtxosByOutRef([{ txHash, outputIndex: 0 }]);
+              return utxos.length > 0;
+            },
+          ),
           budgetMs,
           intervalMs,
         );

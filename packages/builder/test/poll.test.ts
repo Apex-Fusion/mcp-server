@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pollUntilConfirmed } from '../src/vector/poll.ts';
+import { pollUntilConfirmed, buildConfirmationCheck } from '../src/vector/poll.ts';
 
 /**
  * A fake clock: `sleep` advances `t` by exactly the requested amount instead
@@ -179,5 +179,115 @@ describe('pollUntilConfirmed', () => {
     const result = await pollUntilConfirmed(async () => true, 5000, 3000);
     assert.equal(result, true);
     assert.ok(Date.now() - start < 1000, 'first attempt succeeds without waiting a full interval');
+  });
+});
+
+describe('buildConfirmationCheck', () => {
+  // vector_await_transaction wires this up as:
+  //   buildConfirmationCheck(Boolean(VECTOR_KOIOS_URL), koiosCheck, outRefCheck)
+  // Both checkKoios/checkOutRef stand in for provider calls (Koios tx_status,
+  // Ogmios getUtxosByOutRef) without ever touching the network - this pins
+  // the selection and propagation behavior, not the HTTP calls themselves.
+
+  test('selects checkKoios when Koios is configured, and never calls checkOutRef', async () => {
+    let outRefCalls = 0;
+    const check = buildConfirmationCheck(
+      true,
+      async () => true,
+      async () => { outRefCalls++; return true; },
+    );
+    assert.equal(await check(), true);
+    assert.equal(outRefCalls, 0, 'the outRef check must not run when Koios is preferred');
+  });
+
+  test('selects checkOutRef when Koios is not configured, and never calls checkKoios', async () => {
+    let koiosCalls = 0;
+    const check = buildConfirmationCheck(
+      false,
+      async () => { koiosCalls++; return true; },
+      async () => false,
+    );
+    assert.equal(await check(), false);
+    assert.equal(koiosCalls, 0, 'the Koios check must not run as a fallback is not a retry path');
+  });
+
+  test('propagates the selected check\'s resolved value unchanged, true or false, in either branch', async () => {
+    assert.equal(await buildConfirmationCheck(true, async () => true, async () => { throw new Error('unused'); })(), true);
+    assert.equal(await buildConfirmationCheck(true, async () => false, async () => { throw new Error('unused'); })(), false);
+    assert.equal(await buildConfirmationCheck(false, async () => { throw new Error('unused'); }, async () => true)(), true);
+    assert.equal(await buildConfirmationCheck(false, async () => { throw new Error('unused'); }, async () => false)(), false);
+  });
+
+  test('propagates a rejection from checkKoios rather than treating it as "not yet confirmed"', async () => {
+    const check = buildConfirmationCheck(
+      true,
+      async () => { throw new Error('Koios tx_status query failed (503): upstream down'); },
+      async () => false,
+    );
+    await assert.rejects(check, /Koios tx_status query failed/);
+  });
+
+  test('propagates a rejection from checkOutRef rather than treating it as "not yet confirmed"', async () => {
+    const check = buildConfirmationCheck(
+      false,
+      async () => false,
+      async () => { throw new Error('Ogmios RPC error (500): boom'); },
+    );
+    await assert.rejects(check, /Ogmios RPC error/);
+  });
+
+  describe('composed with pollUntilConfirmed (matching the real vector_await_transaction call site)', () => {
+    function fakeClock(start = 0) {
+      let t = start;
+      const sleeps: number[] = [];
+      return {
+        now: () => t,
+        sleep: async (ms: number) => { sleeps.push(ms); t += ms; },
+        sleeps,
+      };
+    }
+
+    test('a Koios failure on the first attempt rejects immediately, without ever sleeping or falling back to outRef', async () => {
+      const clock = fakeClock();
+      let outRefCalls = 0;
+      const check = buildConfirmationCheck(
+        true,
+        async () => { throw new Error('Koios unreachable'); },
+        async () => { outRefCalls++; return true; },
+      );
+      await assert.rejects(
+        () => pollUntilConfirmed(check, 9000, 3000, clock.now, clock.sleep),
+        /Koios unreachable/,
+      );
+      assert.deepEqual(clock.sleeps, [], 'a check that cannot determine status must not be retried like a pending tx');
+      assert.equal(outRefCalls, 0);
+    });
+
+    test('outRef polling that never confirms resolves false (not an error) once the budget elapses, with Koios not configured', async () => {
+      const clock = fakeClock();
+      let koiosCalls = 0;
+      const check = buildConfirmationCheck(
+        false,
+        async () => { koiosCalls++; return true; },
+        async () => false,
+      );
+      const result = await pollUntilConfirmed(check, 9000, 3000, clock.now, clock.sleep);
+      assert.equal(result, false);
+      assert.equal(koiosCalls, 0);
+    });
+
+    test('Koios reporting confirmed on a later attempt resolves true without exhausting the budget', async () => {
+      const clock = fakeClock();
+      let attempts = 0;
+      const check = buildConfirmationCheck(
+        true,
+        async () => { attempts++; return attempts >= 2; },
+        async () => { throw new Error('outRef must not run when Koios is configured'); },
+      );
+      const result = await pollUntilConfirmed(check, 9000, 3000, clock.now, clock.sleep);
+      assert.equal(result, true);
+      assert.equal(attempts, 2);
+      assert.deepEqual(clock.sleeps, [3000]);
+    });
   });
 });
