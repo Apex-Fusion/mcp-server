@@ -120,6 +120,68 @@ Build an unsigned transaction interacting with a deployed smart contract — loc
 
 **Example prompt:** "Collect funds from the escrow contract at addr1..."
 
+### vector_build_register_agent
+
+Build an unsigned transaction that registers an agent in the Vector on-chain registry — mints a soulbound identity NFT and locks a 10 AP3X deposit (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
+
+**Parameters:**
+- `changeAddress` (string, required) — Your wallet address; source of the deposit and change (addr1...)
+- `name` (string, required) — Agent name (max 64 chars)
+- `description` (string, required) — Short description of the agent's purpose (max 256 chars)
+- `capabilities` (array of strings, required) — Capability tags (e.g. `["investing", "research"]`)
+- `framework` (string, required) — Framework used (e.g. "OpenClaw", "LangChain", "CrewAI", "custom")
+- `endpoint` (string, required) — A2A communication endpoint URL (or empty string if not applicable)
+
+**Example prompt:** "Register an agent named TradingBot with investing and research capabilities"
+
+### vector_build_update_agent
+
+Build an unsigned transaction that updates a registered agent's profile fields — only the specified fields change, the rest are preserved (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
+
+**Parameters:**
+- `changeAddress` (string, required) — The agent owner's wallet address (addr1...)
+- `agent_id` (string, required) — Agent DID to update: `did:vector:agent:{policyId}:{nftAssetName}`
+- `name` (string, optional) — New agent name
+- `description` (string, optional) — New description
+- `capabilities` (array of strings, optional) — New capability tags (replaces the existing list)
+- `framework` (string, optional) — New framework identifier
+- `endpoint` (string, optional) — New A2A endpoint URL (or empty string to clear)
+
+**Example prompt:** "Update my agent's description to mention DeFi support"
+
+### vector_build_transfer_agent
+
+Build an unsigned transaction that transfers agent ownership to a new address (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
+
+**Parameters:**
+- `changeAddress` (string, required) — The CURRENT owner's wallet address (addr1...)
+- `agent_id` (string, required) — Agent DID to transfer: `did:vector:agent:{policyId}:{nftAssetName}`
+- `new_owner_address` (string, required) — Bech32 address of the new owner (must be a verification-key address, not a script address)
+
+**Example prompt:** "Transfer my agent to addr1qy..."
+
+### vector_build_deregister_agent
+
+Build an unsigned transaction that deregisters an agent — burns the identity NFT and returns the 10 AP3X deposit to the owner wallet (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
+
+**Parameters:**
+- `changeAddress` (string, required) — The agent owner's wallet address; receives the returned deposit (addr1...)
+- `agent_id` (string, required) — Agent DID to deregister: `did:vector:agent:{policyId}:{nftAssetName}`
+
+**Example prompt:** "Deregister my agent and reclaim the deposit"
+
+### vector_build_message_agent
+
+Build an unsigned transaction that sends an on-chain message to a registered agent via TX metadata (label 674), delivering 2 AP3X to the agent's owner address (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
+
+**Parameters:**
+- `changeAddress` (string, required) — Your wallet address; pays the 2 AP3X delivery and fee (addr1...)
+- `agent_id` (string, required) — Recipient agent DID: `did:vector:agent:{policyId}:{nftAssetName}`
+- `message_type` (string, required) — Type of message: "inquiry", "proposal", or "result"
+- `payload` (string, required) — Message payload (max 512 chars)
+
+**Example prompt:** "Send an inquiry message to did:vector:agent:... asking about pricing"
+
 ## Safety Controls
 
 The tools above are keyless and take no key material, so the server no longer enforces
@@ -128,8 +190,8 @@ CBOR these tools return — see the security notice in the repo [README](../READ
 [docs/architecture/non-custodial-split.md](architecture/non-custodial-split.md).
 
 `VECTOR_SPEND_LIMIT_PER_TX` / `VECTOR_SPEND_LIMIT_DAILY` / `VECTOR_AUDIT_LOG_PATH` still
-govern the server's remaining custodial tool families (agent registry, self-improvement)
-until their own keyless migration lands.
+govern the server's one remaining custodial tool family (self-improvement) until its own
+keyless migration lands.
 
 ## Network Endpoints
 

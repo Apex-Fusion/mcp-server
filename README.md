@@ -21,15 +21,15 @@ Connect from Claude Code in one command:
 claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse
 ```
 
-> **Security notice — custody.** The wallet, transaction, and smart-contract tools are now
-> **keyless**: `build_*` tools construct unsigned transactions from a wallet *address* and
-> never accept a mnemonic. Sign the returned CBOR with the local signer companion and
-> broadcast it with `vector_submit_transaction` — your seed phrase never leaves your machine.
-> **The agent-registry and self-improvement tool families still take a mnemonic as a
-> tool-call parameter** (their keyless migration is in progress — see the architecture doc).
-> For those tools the mnemonic passes through your MCP client, your model provider, and the
-> hosted server's memory: use only a hot wallet holding funds you can afford to lose, and
-> prefer self-hosting until the migration completes.
+> **Security notice — custody.** The wallet, transaction, smart-contract, and agent-registry
+> tools are now **keyless**: `build_*` tools construct unsigned transactions from a wallet
+> *address* and never accept a mnemonic. Sign the returned CBOR with the local signer companion
+> and broadcast it with `vector_submit_transaction` — your seed phrase never leaves your machine.
+> **The Self-Improvement Module (5 tools) is the only family still taking a mnemonic as a
+> tool-call parameter** (its keyless migration is next — see the architecture doc). For those
+> tools the mnemonic passes through your MCP client, your model provider, and the hosted
+> server's memory: use only a hot wallet holding funds you can afford to lose, and prefer
+> self-hosting until the migration completes.
 > See [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md).
 
 Self-hosting instructions are below.
@@ -43,15 +43,16 @@ or your model provider. Four tools: `vector_signer_get_address`, `vector_signer_
 `vector_signer_sign`, `vector_signer_get_spend_limits`.
 
 **Paired with this hosted builder, the full non-custodial flow is live today** for the wallet,
-transaction, and smart-contract family: `vector_signer_get_address` → `build_*` →
-`vector_signer_sign` → `vector_submit_transaction` → `vector_await_transaction`. No step in that
-chain puts a mnemonic in front of this server or your model provider. The build → submit → await
-half is E2E-proven on Vector testnet, landing a real signed transaction on-chain; see
-[`packages/signer/README.md`](packages/signer/README.md#known-limitations) for exactly what that
-test does and does not exercise on the signer's side. **The agent-registry and self-improvement
-families are not part of that pairing yet** — they still take a mnemonic as a tool-call
-parameter until their own keyless migration lands (see the security notice above and
-[docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md)).
+transaction, smart-contract, and agent-registry family: `vector_signer_get_address` →
+`build_*` → `vector_signer_sign` → `vector_submit_transaction` → `vector_await_transaction`. No
+step in that chain puts a mnemonic in front of this server or your model provider. The
+build → submit → await half is E2E-proven on Vector testnet for both: a payment self-send, and
+a full register → update → deregister agent lifecycle with the 10 AP3X deposit round-tripped
+exactly; see [`packages/signer/README.md`](packages/signer/README.md#known-limitations) for
+exactly what that testing does and does not exercise on the signer's side. **The
+Self-Improvement Module is not part of that pairing yet** — its 5 tools still take a mnemonic
+as a tool-call parameter until their own keyless migration lands (see the security notice above
+and [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md)).
 
 See [`packages/signer/README.md`](packages/signer/README.md) for configuration, tools, and known
 limitations.
@@ -61,10 +62,10 @@ limitations.
 - **Wallet & queries** - balances, UTxOs, and transaction history for any address (no key material)
 - **Keyless transaction building** - build unsigned AP3X/token/multi-output transactions and contract interactions; sign locally, broadcast via submit
 - **Smart contracts** - deploy Plutus/Aiken validators, lock and spend UTxOs at script addresses
-- **Agent registry** - register, discover, update, transfer, and deregister on-chain AI agent identities via soulbound NFTs
-- **Agent messaging** - send on-chain messages between agents via TX metadata
+- **Agent registry** - register, discover, update, transfer, and deregister on-chain AI agent identities via soulbound NFTs (keyless - build, sign locally, broadcast)
+- **Agent messaging** - send on-chain messages between agents via TX metadata (keyless)
 - **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals (live on Vector mainnet)
-- **Safety controls** - per-identity rate limiting; spend limits for the keyless family are enforced by the local signer (registry/self-improvement families keep server-side limits until their keyless migration)
+- **Safety controls** - per-identity rate limiting; spend limits for the keyless families (wallet/tx/contract, agent registry) are enforced by the local signer (the Self-Improvement Module keeps server-side limits until its keyless migration)
 - **SSE transport** - HTTP server with Server-Sent Events for MCP client connectivity
 
 ## MCP Tools (23)
@@ -99,13 +100,13 @@ limitations.
 
 | Tool | Description |
 |------|-------------|
-| `vector_register_agent` | Register an agent - mints a soulbound identity NFT and locks a 10 AP3X deposit |
+| `vector_build_register_agent` | Build an unsigned agent registration - mints a soulbound identity NFT and locks a 10 AP3X deposit (keyless) |
 | `vector_discover_agents` | Discover registered agents, filter by capability or framework (no wallet needed) |
 | `vector_get_agent_profile` | Get an agent's full profile by DID (no wallet needed) |
-| `vector_update_agent` | Update an agent's name, description, capabilities, framework, or endpoint |
-| `vector_transfer_agent` | Transfer agent ownership to a new address |
-| `vector_deregister_agent` | Deregister an agent - burns the identity NFT and returns the 10 AP3X deposit |
-| `vector_message_agent` | Send an on-chain message to an agent via TX metadata (label 674) |
+| `vector_build_update_agent` | Build an unsigned update to an agent's name, description, capabilities, framework, or endpoint (keyless) |
+| `vector_build_transfer_agent` | Build an unsigned transfer of agent ownership to a new address (keyless) |
+| `vector_build_deregister_agent` | Build an unsigned deregistration - burns the identity NFT and returns the 10 AP3X deposit (keyless) |
+| `vector_build_message_agent` | Build an unsigned on-chain message to an agent via TX metadata (label 674) (keyless) |
 
 ### Self-Improvement Module
 
@@ -118,6 +119,9 @@ limitations.
 | `vector_self_improvement_analyze_metrics` | Proposal metrics: activity, adoption rate, treasury health, engagement |
 
 Agent DIDs follow the format: `did:vector:agent:{policyId}:{nftAssetName}`
+
+Example non-custodial flow for a registry op: `vector_build_register_agent` →
+`vector_signer_sign` → `vector_submit_transaction` → `vector_await_transaction`.
 
 ## Self-hosting
 
@@ -135,9 +139,9 @@ cp .env.example .env
 # Edit .env with your endpoint URLs (defaults point to Vector testnet; mainnet URLs below)
 ```
 
-The wallet/tx family is keyless: `build_*` tools take a wallet address, never a mnemonic.
-The registry and self-improvement families still take a per-call mnemonic until their
-keyless migration lands — see the security notice above.
+The wallet/tx/contract and agent-registry families are keyless: `build_*` tools take a wallet
+address, never a mnemonic. The Self-Improvement Module still takes a per-call mnemonic until
+its keyless migration lands — see the security notice above.
 
 ### 3. Run
 
@@ -197,8 +201,8 @@ If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` firs
 | `MCP_AUTH_TOKENS` | Bearer tokens that may call this server. Comma-separated; each entry is `label:token` or a bare token. **When unset, the server is open to anyone who can reach it.** | _(unset — auth disabled)_ |
 
 `VECTOR_SPEND_LIMIT_PER_TX` / `VECTOR_SPEND_LIMIT_DAILY` govern only the still-custodial
-families (agent registry, self-improvement) — the keyless `build_*` family ignores them; its
-spend limits are enforced by the local signer instead.
+Self-Improvement family — the keyless `build_*` families (wallet/tx/contract, agent registry)
+ignore them; their spend limits are enforced by the local signer instead.
 
 > **Running a public instance?** Set `MCP_AUTH_TOKENS`. Without it every caller
 > is treated as one anonymous identity and shares a single rate-limit bucket, so
@@ -240,7 +244,7 @@ echo "your mnemonic words here" > packages/builder/mnemonic.txt
 npm run test:integration
 ```
 
-Requires `mnemonic.txt` in `packages/builder/` containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister. Also runs `keyless-build.test.ts`, which needs no mnemonic at all - it builds unsigned transactions with four of the five `build_*` tools against a live public address only (`vector_build_send_tokens` is covered offline, by unit tests and the legacy suite above, not by this live suite). Set `VECTOR_E2E_SUBMIT=1` to additionally run the full non-custodial pipeline end-to-end: build → local sign → submit → await, landing one real self-send (~0.16 AP3X fee) on-chain. Never runs in CI.
+Requires `mnemonic.txt` in `packages/builder/` containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister (all keyless now: build → sign → submit → await per step). Also runs `keyless-build.test.ts` and `registry-keyless.test.ts`, which need no mnemonic at all - they build unsigned transactions (four of the five wallet/tx `build_*` tools, and all five agent-registry `build_*` tools) against live public data only (`vector_build_send_tokens` is covered offline, by unit tests and the legacy suite above, not by either live suite). Set `VECTOR_E2E_SUBMIT=1` to additionally run the full non-custodial pipeline end-to-end, on-chain: `keyless-e2e.test.ts` lands one real self-send (~0.16 AP3X fee), and `registry-e2e.test.ts` runs a full register → update → deregister agent lifecycle (the 10 AP3X deposit round-tripped exactly, fees only as net cost). Never runs in CI.
 
 ```bash
 npm run test:smoke:signer
@@ -290,8 +294,9 @@ against live chain data. **Never submits.** Never runs in CI. See
                               └──────────────────────────┘
 ```
 
-\* Custodial families only (agent registry, self-improvement) — the keyless `build_*` path
-never reaches the Safety Layer; its spend limits are enforced by the local signer instead.
+\* The still-custodial Self-Improvement family only — the keyless `build_*` path (wallet/tx/
+contract, agent registry) never reaches the Safety Layer; its spend limits are enforced by the
+local signer instead.
 
 ## About Vector
 
