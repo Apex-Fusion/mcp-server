@@ -123,6 +123,8 @@ npm start
 # Server listens on port 3000 (configurable via PORT env var)
 ```
 
+If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` first - see [Configuration](#configuration) below.
+
 ### 4. Add to Claude Desktop
 
 Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
@@ -153,6 +155,8 @@ npm run build
 docker build -t vector-mcp .
 docker run -p 3000:3000 vector-mcp
 ```
+
+If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` first - see [Configuration](#configuration) below (`docker-compose.yml` in this repo binds `127.0.0.1` by default; the command above does not).
 
 ## Configuration
 
