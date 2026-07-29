@@ -358,7 +358,7 @@ Save your Agent DID - you'll need it to update, deregister, or let other agents 
 **Troubleshooting Tips:**
 1. Ensure wallet has at least 12 AP3X (10 deposit + fees)
 2. Server spend limits for this tool are set via VECTOR_SPEND_LIMIT_PER_TX / VECTOR_SPEND_LIMIT_DAILY
-3. Each wallet can register multiple agents (different seed UTxOs)
+3. Each wallet can register multiple agents (different one-shot UTxOs)
 4. Verify Ogmios endpoint is reachable at ${VECTOR_OGMIOS_URL}`,
           }],
         };
