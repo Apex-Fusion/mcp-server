@@ -1,8 +1,8 @@
-// packages/builder/test/fixtures/fixture-provider.test.ts
+// packages/builder/test/fixture-provider.test.ts
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Lucid } from '@lucid-evolution/lucid';
-import { FixtureProvider, fixtureProtocolParameters, FIXTURE_UTXOS, OWN_ADDRESS, FOREIGN_ADDRESS } from './fixture-provider.ts';
+import { FixtureProvider, fixtureProtocolParameters, FIXTURE_UTXOS, OWN_ADDRESS, FOREIGN_ADDRESS } from './fixtures/fixture-provider.ts';
 
 describe('FixtureProvider', () => {
   test('serves the captured protocol parameters with bigints revived', () => {
