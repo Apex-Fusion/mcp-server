@@ -628,7 +628,7 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
         } catch {
           throw new Error(
             `Agent registry NFT not found on-chain. Expected token: ${AGENT_REGISTRY_POLICY.slice(0, 12)}...${agentDid.slice(0, 12)}... ` +
-            `The agent may need to re-register with vector_register_agent.`
+            `The agent may need to re-register with vector_build_register_agent.`
           );
         }
 
