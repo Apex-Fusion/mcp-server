@@ -5,13 +5,17 @@ import { resolve } from 'node:path';
 import { startServer, stopServer, ServerContext } from '../setup.ts';
 
 /**
- * Snapshot of the pre-migration tool surface (23 tools), captured from a real
- * `listTools()` call against a built server on the `ci/harness-and-gitignore`
- * branch. This is the baseline for the non-custodial split series
- * (see docs/architecture/non-custodial-split.md) — PRs 2, 6, 7 and 8
- * deliberately restructure and rename tool families, and each of those PRs is
- * expected to update this list deliberately, not accidentally. No wallet,
- * no network beyond localhost — this never needs a mnemonic.
+ * Snapshot of the current tool surface (23 tools) for the non-custodial split
+ * series (see docs/architecture/non-custodial-split.md). PR 6 (Task 5) is the
+ * PR that took this list from 25 to 23: it deleted `vector_get_address` and
+ * `vector_get_spend_limits` outright (the safety-layer/wallet-info tools have
+ * no keyless equivalent — spend limits are gone because the builder no longer
+ * holds keys to limit) as part of making the remaining query tools
+ * (`vector_get_utxos`, `vector_get_transaction_history`, `vector_dry_run`)
+ * keyless. PRs 2, 6, 7 and 8 each deliberately restructure and rename tool
+ * families, and each of those PRs is expected to update this list
+ * deliberately, not accidentally. No wallet, no network beyond localhost —
+ * this never needs a mnemonic.
  */
 const EXPECTED_TOOLS = [
   'vector_await_transaction',
@@ -23,10 +27,8 @@ const EXPECTED_TOOLS = [
   'vector_deregister_agent',
   'vector_discover_agents',
   'vector_dry_run',
-  'vector_get_address',
   'vector_get_agent_profile',
   'vector_get_balance',
-  'vector_get_spend_limits',
   'vector_get_transaction_history',
   'vector_get_utxos',
   'vector_message_agent',
@@ -42,33 +44,40 @@ const EXPECTED_TOOLS = [
 ];
 
 /**
- * Full-schema snapshot: the exact `inputSchema` (JSON Schema) the live server
- * advertises for every tool, keyed by tool name. This is a change detector,
- * not a freeze — PRs 6, 7 and 8 deliberately restructure tool schemas as part
- * of the non-custodial split, and each of those PRs is expected to
- * regenerate this fixture to match its intentional changes (boot the built
- * server, call listTools(), and dump { [name]: inputSchema } sorted by
- * name — do not hand-edit the JSON).
+ * Full-schema snapshot: the exact `description` and `inputSchema` (JSON
+ * Schema) the live server advertises for every tool, keyed by tool name.
+ * This is a change detector, not a freeze — PRs 6, 7 and 8 deliberately
+ * restructure tool schemas as part of the non-custodial split, and each of
+ * those PRs is expected to regenerate this fixture to match its intentional
+ * changes: run `npm run build && node packages/builder/scripts/regen-tool-schemas.mjs`
+ * (boots the built server, calls listTools(), and dumps
+ * { [name]: { description, inputSchema } } sorted by name — do not hand-edit
+ * the JSON).
  *
- * What this guards against is an *unintended* wire-format change slipping
- * through unnoticed: the name/count checks above only catch a tool being
- * added, removed, or renamed — they say nothing about a tool's argument
- * schema quietly changing shape. That happened once already: converting
- * vector.ts's Zod import from "zod" to "zod/v4" (for the MCP SDK's Zod 4
- * type inference) also switched which JSON Schema serializer the SDK uses
- * for that file's tools — Zod v3 schemas go through the vendored
- * zod-to-json-schema, Zod v4 schemas go through Zod's own native
+ * What this guards against is an *unintended* wire-format or copy change
+ * slipping through unnoticed: the name/count checks above only catch a tool
+ * being added, removed, or renamed — they say nothing about a tool's argument
+ * schema or description quietly changing shape. The inputSchema half happened
+ * once already: converting vector.ts's Zod import from "zod" to "zod/v4"
+ * (for the MCP SDK's Zod 4 type inference) also switched which JSON Schema
+ * serializer the SDK uses for that file's tools — Zod v3 schemas go through
+ * the vendored zod-to-json-schema, Zod v4 schemas go through Zod's own native
  * toJSONSchema — and the two disagree on whether object schemas get
  * `additionalProperties: false`. Nothing in the original name/count smoke
- * test could see that; this fixture exists so the next silent schema drift
- * fails loudly instead.
+ * test could see that. `description` was folded into this same fixture in
+ * PR 6 (Task 5) because several tool descriptions are the only place a
+ * caller learns the non-custodial build → sign → submit → confirm flow
+ * (vector_signer_sign / vector_submit_transaction / vector_await_transaction)
+ * — a silently edited or dropped sentence there is a real regression this
+ * fixture should catch too, not just a JSON Schema shape change.
  */
 const SNAPSHOT_PATH = resolve(import.meta.dirname!, 'tool-schemas.snapshot.json');
-const schemaSnapshot: Record<string, unknown> = JSON.parse(readFileSync(SNAPSHOT_PATH, 'utf-8'));
+const schemaSnapshot: Record<string, { description?: string; inputSchema: unknown }> =
+  JSON.parse(readFileSync(SNAPSHOT_PATH, 'utf-8'));
 
 let ctx: ServerContext;
 let actualNames: string[];
-let actualToolsByName: Map<string, { name: string; inputSchema: unknown }>;
+let actualToolsByName: Map<string, { name: string; description?: string; inputSchema: unknown }>;
 
 before(async () => {
   ctx = await startServer();
@@ -82,11 +91,11 @@ after(async () => {
 });
 
 describe('tool inventory smoke test', () => {
-  test('exposes exactly 25 tools', () => {
+  test('exposes exactly 23 tools', () => {
     assert.equal(
       actualNames.length,
-      25,
-      `expected 25 tools, got ${actualNames.length}: ${JSON.stringify(actualNames)}`
+      23,
+      `expected 23 tools, got ${actualNames.length}: ${JSON.stringify(actualNames)}`
     );
   });
 
@@ -117,7 +126,7 @@ describe('tool schema snapshot', () => {
       'test/smoke/tool-schemas.snapshot.json keys do not match the live tool set.\n' +
         `  live tools missing from snapshot: ${missingFromSnapshot.length ? JSON.stringify(missingFromSnapshot) : '(none)'}\n` +
         `  snapshot entries with no live tool: ${staleInSnapshot.length ? JSON.stringify(staleInSnapshot) : '(none)'}\n` +
-        'Regenerate the snapshot from a live built server if this drift is intentional.'
+        'Regenerate the snapshot from a live built server (packages/builder/scripts/regen-tool-schemas.mjs) if this drift is intentional.'
     );
   });
 
@@ -126,18 +135,19 @@ describe('tool schema snapshot', () => {
   // diff of just that tool's schema, instead of "objects differ" over an
   // unreadable combined structure.
   for (const toolName of Object.keys(schemaSnapshot).sort()) {
-    test(`inputSchema unchanged: ${toolName}`, () => {
+    test(`schema+description unchanged: ${toolName}`, () => {
       const live = actualToolsByName.get(toolName);
       assert.ok(
         live,
         `Tool "${toolName}" is in the snapshot but was not returned by the live server's listTools().`
       );
       assert.deepStrictEqual(
-        live.inputSchema,
+        { description: live.description, inputSchema: live.inputSchema },
         schemaSnapshot[toolName],
-        `inputSchema for "${toolName}" differs from the checked-in snapshot in test/smoke/tool-schemas.snapshot.json.\n` +
-          'If this is a deliberate schema change (e.g. PRs 6-8 restructuring tool families), regenerate the snapshot ' +
-          'from a live built server. If not, this is the exact class of silent wire-format regression this test exists to catch.'
+        `description/inputSchema for "${toolName}" differs from the checked-in snapshot in test/smoke/tool-schemas.snapshot.json.\n` +
+          'If this is a deliberate schema or copy change (e.g. PRs 6-8 restructuring tool families), regenerate the snapshot ' +
+          'from a live built server (packages/builder/scripts/regen-tool-schemas.mjs). If not, this is the exact class of silent ' +
+          'wire-format/copy regression this test exists to catch.'
       );
     });
   }
