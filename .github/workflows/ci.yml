@@ -45,6 +45,9 @@ jobs:
 
       - name: Auth gating and rate-limit integration tests
         run: npm run test:integration:auth
+
+      - name: Signer smoke test
+        run: npm run test:smoke:signer
         env:
           NODE_OPTIONS: --max-old-space-size=12288
 

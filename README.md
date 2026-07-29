@@ -32,6 +32,21 @@ claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.
 
 Self-hosting instructions are below.
 
+## Local signer (non-custodial path)
+
+`packages/signer` is a local MCP server that holds your key and signs transactions locally
+instead of handing your mnemonic to a shared host. It has **no network access at all** —
+stdio transport, no Provider, no egress — so a key given to it never reaches a shared server
+or your model provider.
+
+See [`packages/signer/README.md`](packages/signer/README.md) for configuration, its tools, and
+known limitations — including the gap that matters most right now: the hosted builder's tools
+above still require your mnemonic as a call parameter, so pairing the signer with *this*
+hosted builder does not yet remove the custody exposure described above. Closing that gap is
+the next stage of the migration described in
+[`docs/architecture/non-custodial-split.md`](docs/architecture/non-custodial-split.md); until
+it ships, the security notice above still applies.
+
 ## Features
 
 - **Wallet management** - derive addresses from mnemonic, query balances and UTxOs
@@ -214,6 +229,24 @@ npm run test:integration
 ```
 
 Requires `mnemonic.txt` in `packages/builder/` containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister. Never runs in CI.
+
+```bash
+npm run test:smoke:signer
+```
+
+Builds the local signer (`packages/signer`), boots it over stdio, and exercises all four of
+its tools, including the fail-closed audit-write-failure path. No wallet, no network. CI runs
+this on every PR alongside the two smoke tests above.
+
+```bash
+export VECTOR_SIGNER_MNEMONIC_FILE=/absolute/path/to/testnet-mnemonic.txt
+npm run test:integration:signer
+```
+
+Requires a **funded Vector testnet** wallet. Builds a real unsigned transaction the way the
+hosted builder does (no key), then has the local signer decode, policy-check, and sign it
+against live chain data. **Never submits.** Never runs in CI. See
+[`packages/signer/README.md`](packages/signer/README.md#testing).
 
 ## Architecture
 

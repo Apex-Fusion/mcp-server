@@ -1,0 +1,21 @@
+{
+  "name": "@apexfusion/vector-mcp-signer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local signing companion for the Vector MCP server. Holds the key; no network.",
+  "bin": { "vector-mcp-signer": "./build/index.js" },
+  "scripts": {
+    "build": "tsup && chmod +x build/index.js",
+    "start": "node build/index.js"
+  },
+  "dependencies": {
+    "@anastasia-labs/cardano-multiplatform-lib-nodejs": "6.0.2-3",
+    "@lucid-evolution/wallet": "^0.1.72",
+    "@modelcontextprotocol/sdk": "^1.4.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@apexfusion/vector-mcp-shared": "*"
+  }
+}
