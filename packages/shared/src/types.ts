@@ -131,6 +131,25 @@ export interface VectorInteractContractResult {
   };
 }
 
+// --- Keyless build results (non-custodial split, family 1) ---
+// Every build_* tool returns unsigned CBOR; signing happens on the local
+// signer, submission via vector_submit_transaction.
+
+export interface VectorUnsignedBuildResult {
+  txCbor: string;   // hex CBOR of the UNSIGNED transaction
+  txHash: string;   // body hash — stable across signing
+  fee: string;      // lovelace
+  feeAda: string;
+}
+
+export interface VectorBuildDeployResult extends VectorUnsignedBuildResult {
+  scriptAddress: string; scriptHash: string; scriptType: string;
+}
+
+export interface VectorBuildInteractResult extends VectorUnsignedBuildResult {
+  scriptAddress: string; action: 'lock' | 'spend';
+}
+
 // --- Agent Network ---
 
 export interface AgentProfile {
