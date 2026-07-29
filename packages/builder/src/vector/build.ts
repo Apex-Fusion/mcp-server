@@ -94,3 +94,94 @@ export async function buildSendTokens(
   });
   return toBuildResult(await tx.complete());
 }
+
+export async function buildMultiOutput(
+  lucid: LucidEvolution,
+  p: { outputs: TxOutput[]; metadataJson?: string },
+): Promise<VectorUnsignedBuildResult> {
+  if (!p.outputs || p.outputs.length === 0) {
+    throw new Error('At least one output is required');
+  }
+  for (const o of p.outputs) requireValidRecipient(o.address);
+  let tx = lucid.newTx();
+  for (const output of p.outputs) {
+    const assets: Record<string, bigint> = { lovelace: BigInt(output.lovelace) };
+    if (output.assets) {
+      for (const [unit, qty] of Object.entries(output.assets)) assets[unit] = BigInt(qty);
+    }
+    tx = tx.pay.ToAddress(output.address, assets);
+  }
+  if (p.metadataJson) {
+    tx = tx.attachMetadata(674, JSON.parse(p.metadataJson));
+  }
+  return toBuildResult(await tx.complete());
+}
+
+export async function buildDeployContract(
+  lucid: LucidEvolution,
+  p: { scriptCbor: string; scriptType: 'PlutusV1' | 'PlutusV2' | 'PlutusV3'; initialDatum?: string; lovelaceAmount?: number },
+): Promise<VectorBuildDeployResult> {
+  const validator: SpendingValidator = {
+    type: p.scriptType,
+    script: applyDoubleCborEncoding(p.scriptCbor),
+  };
+  const scriptAddress = validatorToAddress('Mainnet', validator);
+  const scriptHash = validatorToScriptHash(validator);
+  const datum = p.initialDatum || Data.void();
+  const lovelace = BigInt(p.lovelaceAmount ?? 2_000_000);
+  const tx = lucid.newTx()
+    .pay.ToAddressWithData(scriptAddress, { kind: 'inline', value: datum }, { lovelace });
+  return { ...toBuildResult(await tx.complete()), scriptAddress, scriptHash, scriptType: p.scriptType };
+}
+
+export async function buildInteractContract(
+  lucid: LucidEvolution,
+  p: {
+    scriptCbor: string; scriptType: 'PlutusV1' | 'PlutusV2' | 'PlutusV3'; action: 'lock' | 'spend';
+    changeAddress: string; redeemer?: string; datum?: string; lovelaceAmount?: number;
+    utxoRef?: { txHash: string; outputIndex: number }; assets?: Record<string, string>;
+  },
+): Promise<VectorBuildInteractResult> {
+  const validator: SpendingValidator = {
+    type: p.scriptType,
+    script: applyDoubleCborEncoding(p.scriptCbor),
+  };
+  const scriptAddress = validatorToAddress('Mainnet', validator);
+
+  if (p.action === 'lock') {
+    const datumData = p.datum || Data.void();
+    const outputAssets: Record<string, bigint> = { lovelace: BigInt(p.lovelaceAmount ?? 2_000_000) };
+    if (p.assets) {
+      for (const [unit, qty] of Object.entries(p.assets)) outputAssets[unit] = BigInt(qty);
+    }
+    const tx = lucid.newTx()
+      .pay.ToAddressWithData(scriptAddress, { kind: 'inline', value: datumData }, outputAssets);
+    return { ...toBuildResult(await tx.complete()), scriptAddress, action: 'lock' };
+  }
+
+  // SPEND: collect from the script back to the wallet
+  const scriptUtxos = p.utxoRef
+    ? await lucid.utxosByOutRef([p.utxoRef])
+    : await lucid.utxosAt(scriptAddress);
+  if (!scriptUtxos || scriptUtxos.length === 0) {
+    throw new Error(`No UTxOs found at script address ${scriptAddress}`);
+  }
+  const redeemerData = p.redeemer || Data.void();
+  let completed;
+  try {
+    completed = await lucid.newTx()
+      .collectFrom(scriptUtxos, redeemerData)
+      .attach.SpendingValidator(validator)
+      .addSigner(p.changeAddress)
+      .complete();
+  } catch {
+    // Retry without the native UPLC evaluator — falls back to the provider's
+    // evaluateTx (network); mirrors the pre-split behaviour for chain quirks.
+    completed = await lucid.newTx()
+      .collectFrom(scriptUtxos, redeemerData)
+      .attach.SpendingValidator(validator)
+      .addSigner(p.changeAddress)
+      .complete({ localUPLCEval: false });
+  }
+  return { ...toBuildResult(completed), scriptAddress, action: 'spend' };
+}
