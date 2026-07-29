@@ -7,13 +7,14 @@ import * as dotenv from 'dotenv';
 import { resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
-import { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
+import { OgmiosProvider, koiosIndicatesConfirmed } from '@apexfusion/vector-mcp-shared/provider';
 import { lovelaceToAda, formatAssetName } from '@apexfusion/vector-mcp-shared/tx';
 import {
   VECTOR_OGMIOS_URL, VECTOR_SUBMIT_URL, VECTOR_KOIOS_URL, VECTOR_EXPLORER_URL, explorerTxLink,
 } from '@apexfusion/vector-mcp-shared/config';
 import { safetyLayer } from './safety.js';
-import { rateLimiter } from './rate-limiter.js';
+import { limiterFor } from './rate-limiter.js';
+import { pollUntilConfirmed, buildConfirmationCheck } from './poll.js';
 import { registerAgentNetworkTools } from './agent-network.js';
 import { registerSelfImprovementTools } from './self-improvement.js';
 import type {
@@ -473,7 +474,8 @@ export async function interactWithContract(
 }
 
 // Register all Vector MCP tools
-export function registerVectorTools(server: McpServer) {
+export function registerVectorTools(server: McpServer, identity: string) {
+  const rateLimiter = limiterFor(identity);
 
   // vector_get_balance - Get balance for any address
   server.tool(
@@ -1081,6 +1083,100 @@ No transaction was submitted to the network.`,
     }
   );
 
+  // vector_submit_transaction - submit an externally signed transaction
+  server.tool(
+    "vector_submit_transaction",
+    "Submit an already-signed transaction to Vector. Use this to broadcast CBOR signed elsewhere (for example by a local signer). Does not sign anything.",
+    {
+      signedTxCbor: z.string().describe("Hex-encoded CBOR of a fully signed transaction"),
+    },
+    async ({ signedTxCbor }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
+      try {
+        const provider = new OgmiosProvider({
+          ogmiosUrl: VECTOR_OGMIOS_URL,
+          submitUrl: VECTOR_SUBMIT_URL,
+          koiosUrl: VECTOR_KOIOS_URL,
+        });
+        const txHash = await provider.submitTx(signedTxCbor);
+        return {
+          content: [{
+            type: "text",
+            text: `# Transaction Submitted
+
+Transaction Hash: ${txHash}
+
+[View on Explorer](${explorerTxLink(txHash)})`,
+          }],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to submit transaction: ${error.message}
+
+**Troubleshooting Tips:**
+1. Ensure the CBOR is a fully signed transaction, not an unsigned one
+2. A transaction can only be submitted once - check the explorer if unsure
+3. Verify the submit endpoint is reachable`,
+          }],
+        };
+      }
+    }
+  );
+
+  // vector_await_transaction - wait for on-chain confirmation
+  server.tool(
+    "vector_await_transaction",
+    "Wait for a submitted transaction to be confirmed on Vector. Polls until it appears on-chain or the timeout elapses.",
+    {
+      txHash: z.string().describe("Transaction hash returned by vector_submit_transaction"),
+      timeoutSeconds: z.number().min(1).max(300).optional().describe("How long to wait before giving up (default: 120)"),
+    },
+    async ({ txHash, timeoutSeconds }) => {
+      const rateCheck = rateLimiter.check();
+      if (!rateCheck.allowed) {
+        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
+      }
+      try {
+        const provider = new OgmiosProvider({
+          ogmiosUrl: VECTOR_OGMIOS_URL,
+          submitUrl: VECTOR_SUBMIT_URL,
+          koiosUrl: VECTOR_KOIOS_URL,
+        });
+        const budgetMs = (timeoutSeconds ?? 120) * 1000;
+        const intervalMs = 3000;
+        const confirmed = await pollUntilConfirmed(
+          buildConfirmationCheck(
+            Boolean(VECTOR_KOIOS_URL),
+            async () => koiosIndicatesConfirmed(await provider.getKoiosTxStatus(txHash)),
+            async () => {
+              const utxos = await provider.getUtxosByOutRef([{ txHash, outputIndex: 0 }]);
+              return utxos.length > 0;
+            },
+          ),
+          budgetMs,
+          intervalMs,
+        );
+        return {
+          content: [{
+            type: "text",
+            text: confirmed
+              ? `# Transaction Confirmed\n\nTransaction Hash: ${txHash}\n\n[View on Explorer](${explorerTxLink(txHash)})`
+              : `# Not Confirmed Yet\n\nTransaction ${txHash} did not appear on-chain within ${timeoutSeconds ?? 120}s.\n\nThis does not mean it failed - it may still be pending. Check the explorer.\n\n[View on Explorer](${explorerTxLink(txHash)})`,
+          }],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return { content: [{ type: "text", text: `Failed to check transaction status: ${error.message}` }] };
+      }
+    }
+  );
+
   // vector_get_transaction_history - Get transaction history via Koios
   server.tool(
     "vector_get_transaction_history",
@@ -1286,8 +1382,8 @@ Funds ${actionVerb} the script address.
 
   // Agent network tools (register, discover, message, profile) live in agent-network.ts
   // to isolate C (Cardano WASM) imports from tsc's complex type inference
-  registerAgentNetworkTools(server);
+  registerAgentNetworkTools(server, identity);
 
   // Self-Improvement Module tools (Module 6)
-  registerSelfImprovementTools(server);
+  registerSelfImprovementTools(server, identity);
 }

@@ -24,4 +24,23 @@ export class RateLimiter {
 }
 
 const RATE_LIMIT_PER_MINUTE = parseInt(process.env.VECTOR_RATE_LIMIT_PER_MINUTE || '60');
-export const rateLimiter = new RateLimiter(RATE_LIMIT_PER_MINUTE);
+
+// One bucket per identity. A process-global limiter meant one busy caller
+// throttled everyone on the box; keying by identity fixes that. The registry
+// is keyed rather than per-connection so a caller cannot reset its own budget
+// by reconnecting.
+const limiters = new Map<string, RateLimiter>();
+
+export function limiterFor(identity: string): RateLimiter {
+  let limiter = limiters.get(identity);
+  if (!limiter) {
+    limiter = new RateLimiter(RATE_LIMIT_PER_MINUTE);
+    limiters.set(identity, limiter);
+  }
+  return limiter;
+}
+
+/** Test-only. Clears every bucket. */
+export function resetLimiters(): void {
+  limiters.clear();
+}

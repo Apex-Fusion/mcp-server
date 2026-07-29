@@ -1,4 +1,23 @@
 {
+  "vector_await_transaction": {
+    "type": "object",
+    "properties": {
+      "txHash": {
+        "description": "Transaction hash returned by vector_submit_transaction",
+        "type": "string"
+      },
+      "timeoutSeconds": {
+        "description": "How long to wait before giving up (default: 120)",
+        "type": "number",
+        "minimum": 1,
+        "maximum": 300
+      }
+    },
+    "required": [
+      "txHash"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
   "vector_build_transaction": {
     "type": "object",
     "properties": {
@@ -708,6 +727,19 @@
       "assetName",
       "amount",
       "mnemonic"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "vector_submit_transaction": {
+    "type": "object",
+    "properties": {
+      "signedTxCbor": {
+        "description": "Hex-encoded CBOR of a fully signed transaction",
+        "type": "string"
+      }
+    },
+    "required": [
+      "signedTxCbor"
     ],
     "$schema": "http://json-schema.org/draft-07/schema#"
   },

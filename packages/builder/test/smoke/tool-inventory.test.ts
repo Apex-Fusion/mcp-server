@@ -14,6 +14,7 @@ import { startServer, stopServer, ServerContext } from '../setup.ts';
  * no network beyond localhost — this never needs a mnemonic.
  */
 const EXPECTED_TOOLS = [
+  'vector_await_transaction',
   'vector_build_transaction',
   'vector_deploy_contract',
   'vector_deregister_agent',
@@ -35,6 +36,7 @@ const EXPECTED_TOOLS = [
   'vector_self_improvement_submit_proposal',
   'vector_send_apex',
   'vector_send_tokens',
+  'vector_submit_transaction',
   'vector_transfer_agent',
   'vector_update_agent',
 ];
@@ -80,11 +82,11 @@ after(async () => {
 });
 
 describe('tool inventory smoke test', () => {
-  test('exposes exactly 23 tools', () => {
+  test('exposes exactly 25 tools', () => {
     assert.equal(
       actualNames.length,
-      23,
-      `expected 23 tools, got ${actualNames.length}: ${JSON.stringify(actualNames)}`
+      25,
+      `expected 25 tools, got ${actualNames.length}: ${JSON.stringify(actualNames)}`
     );
   });
 

@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks, exposing all 23 tools:
+Hosted instances run on both networks, exposing all 25 tools:
 
 | Network | Endpoint |
 |---------|----------|
@@ -25,8 +25,10 @@ claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.
 > tool-call parameter. It therefore passes through your MCP client, your model provider,
 > and the hosted server's memory — it is not written to disk, but it is exposed. Use only
 > a hot wallet holding funds you can afford to lose, and prefer self-hosting until the
-> non-custodial migration lands. See
-> [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md).
+> non-custodial migration lands. `vector_submit_transaction` and `vector_await_transaction`
+> are the exception — they take no mnemonic and sign nothing; they only broadcast a
+> transaction signed elsewhere (for example by a local signer) and poll for confirmation.
+> See [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md).
 
 Self-hosting instructions are below.
 
@@ -56,7 +58,7 @@ it ships, the security notice above still applies.
 - **Safety controls** - per-transaction and daily spend limits, persistent audit log, rate limiting
 - **SSE transport** - HTTP server with Server-Sent Events for MCP client connectivity
 
-## MCP Tools (23)
+## MCP Tools (25)
 
 ### Wallet & Queries
 
@@ -76,6 +78,8 @@ it ships, the security notice above still applies.
 | `vector_send_tokens` | Send native tokens with optional AP3X |
 | `vector_build_transaction` | Build multi-output transactions (sign+submit or return unsigned CBOR) |
 | `vector_dry_run` | Simulate a transaction without submitting - estimate fees and validate |
+| `vector_submit_transaction` | Broadcast an already-signed transaction (for example one signed by the local signer) |
+| `vector_await_transaction` | Wait for a submitted transaction to be confirmed on-chain |
 
 ### Smart Contracts
 
@@ -134,6 +138,8 @@ npm start
 # Server listens on port 3000 (configurable via PORT env var)
 ```
 
+If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` first - see [Configuration](#configuration) below.
+
 ### 4. Add to Claude Desktop
 
 Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
@@ -165,6 +171,8 @@ docker build -t vector-mcp .
 docker run -p 3000:3000 vector-mcp
 ```
 
+If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` first - see [Configuration](#configuration) below (`docker-compose.yml` in this repo binds `127.0.0.1` by default; the command above does not).
+
 ## Configuration
 
 | Variable | Description | Default |
@@ -178,6 +186,19 @@ docker run -p 3000:3000 vector-mcp
 | `VECTOR_SPEND_LIMIT_DAILY` | Max lovelace per day | `500000000` (500 AP3X) |
 | `VECTOR_AUDIT_LOG_PATH` | Persistent audit log file path | `./vector-audit-log.json` |
 | `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute | `60` |
+| `MCP_AUTH_TOKENS` | Bearer tokens that may call this server. Comma-separated; each entry is `label:token` or a bare token. **When unset, the server is open to anyone who can reach it.** | _(unset — auth disabled)_ |
+
+> **Running a public instance?** Set `MCP_AUTH_TOKENS`. Without it every caller
+> is treated as one anonymous identity and shares a single rate-limit bucket, so
+> one busy client throttles everyone. Rate limits are applied per identity, so
+> give each client its own token.
+
+> **Malformed values fail loudly, not silently.** The server refuses to start if
+> `MCP_AUTH_TOKENS` contains an empty token, a token with embedded whitespace, a
+> duplicate token, or a value where every comma-separated entry is blank (e.g. a
+> stray `,,,`) — each raises a startup error that names the problem but never
+> echoes a token value. Commas delimit entries and cannot be escaped, so generate
+> tokens from a comma-free charset (hex / base64url / alphanumeric).
 
 ### Mainnet endpoints
 
