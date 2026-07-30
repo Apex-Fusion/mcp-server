@@ -243,6 +243,220 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
+  "vector_build_self_improvement_critique": {
+    "description": "Build an UNSIGNED transaction that submits a critique on an improvement proposal (Supportive, Opposing, or Amendment). Requires staking at least 10 AP3X. Provide critiqueDocument for automatic IPFS upload, or critiqueHash and storageUri manually. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. Find a proposalTxHash to critique with vector_self_improvement_browse.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address (holds the stake AP3X; receives change). Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "agentDid": {
+          "description": "Agent DID (hex)",
+          "type": "string"
+        },
+        "proposalTxHash": {
+          "description": "TX hash of the proposal UTxO to critique",
+          "type": "string"
+        },
+        "proposalOutputIndex": {
+          "description": "Output index of the proposal UTxO",
+          "default": 0,
+          "type": "number"
+        },
+        "critiqueDocument": {
+          "description": "Full critique document as JSON string. Uploaded to IPFS via Filebase; hash and CID computed automatically.",
+          "type": "string"
+        },
+        "critiqueHash": {
+          "description": "blake2b_256 hash of critique document (64 hex chars). Required if critiqueDocument is not provided.",
+          "type": "string"
+        },
+        "critiqueType": {
+          "description": "Type of critique",
+          "type": "string",
+          "enum": [
+            "Supportive",
+            "Opposing",
+            "Amendment"
+          ]
+        },
+        "storageUri": {
+          "description": "Off-chain storage URI for the critique document. Required if critiqueDocument is not provided.",
+          "type": "string"
+        },
+        "stakeApex": {
+          "description": "AP3X to stake (minimum 10)",
+          "type": "number",
+          "minimum": 10
+        }
+      },
+      "required": [
+        "changeAddress",
+        "agentDid",
+        "proposalTxHash",
+        "critiqueType",
+        "stakeApex"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_self_improvement_endorse": {
+    "description": "Build an UNSIGNED transaction that endorses an improvement proposal by staking at least 5 AP3X. Endorsements signal support to the Foundation Council and are weighted by stake amount. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. Find a proposalTxHash to endorse with vector_self_improvement_browse.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address (holds the stake AP3X; receives change). Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "agentDid": {
+          "description": "Agent DID (hex)",
+          "type": "string"
+        },
+        "proposalTxHash": {
+          "description": "TX hash of the proposal UTxO to endorse",
+          "type": "string"
+        },
+        "proposalOutputIndex": {
+          "description": "Output index of the proposal UTxO",
+          "default": 0,
+          "type": "number"
+        },
+        "stakeApex": {
+          "description": "AP3X to stake as endorsement (minimum 5)",
+          "type": "number",
+          "minimum": 5
+        }
+      },
+      "required": [
+        "changeAddress",
+        "agentDid",
+        "proposalTxHash",
+        "stakeApex"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_self_improvement_proposal_lock": {
+    "description": "Build an UNSIGNED transaction that locks an improvement-proposal stake (step 1 of 2). Requires staking at least 25 AP3X. Provide proposalDocument for automatic IPFS upload, or proposalHash and storageUri manually. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. After this confirms, call this tool's counterpart, vector_build_self_improvement_proposal_spend, with the lock transaction hash to complete the submission.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address (holds the stake AP3X; receives change). Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "agentDid": {
+          "description": "Agent DID (hex) - the asset name from Agent Registry NFT",
+          "type": "string"
+        },
+        "proposalType": {
+          "description": "Category of the proposal",
+          "type": "string",
+          "enum": [
+            "ParameterChange",
+            "TreasurySpend",
+            "ProtocolUpgrade",
+            "GameActivation",
+            "GeneralSuggestion"
+          ]
+        },
+        "stakeApex": {
+          "description": "AP3X to stake (minimum 25)",
+          "type": "number",
+          "minimum": 25
+        },
+        "typeParams": {
+          "description": "Type-specific parameters (required for ParameterChange and TreasurySpend)",
+          "type": "object",
+          "properties": {
+            "paramName": {
+              "type": "string"
+            },
+            "currentValue": {
+              "type": "number"
+            },
+            "proposedValue": {
+              "type": "number"
+            },
+            "amount": {
+              "type": "number"
+            },
+            "recipientDescription": {
+              "type": "string"
+            },
+            "upgradeHash": {
+              "type": "string"
+            },
+            "gameId": {
+              "type": "number"
+            }
+          }
+        },
+        "priority": {
+          "description": "Priority level (Emergency requires higher stake and reputation)",
+          "default": "Standard",
+          "type": "string",
+          "enum": [
+            "Standard",
+            "Emergency"
+          ]
+        },
+        "proposalDocument": {
+          "description": "Full proposal document as JSON string. Uploaded to IPFS via Filebase; hash and CID computed automatically. If provided, proposalHash and storageUri are ignored.",
+          "type": "string"
+        },
+        "proposalHash": {
+          "description": "blake2b_256 hash of proposal document (64 hex chars). Required if proposalDocument is not provided.",
+          "type": "string"
+        },
+        "storageUri": {
+          "description": "Off-chain storage URI for the full proposal (IPFS CID or OriginTrail UAL). Required if proposalDocument is not provided.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeAddress",
+        "agentDid",
+        "proposalType",
+        "stakeApex"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_self_improvement_proposal_spend": {
+    "description": "Build an UNSIGNED transaction that completes an improvement-proposal submission (step 2 of 2): spends the locked stake through the module validator and mints the proposal and activity tokens. Requires the confirmed lock transaction hash from vector_build_self_improvement_proposal_lock. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "The SAME wallet address used to build the proposal lock. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "agentDid": {
+          "description": "Agent DID (hex) - must match the proposer DID in the locked proposal",
+          "type": "string"
+        },
+        "lockTxHash": {
+          "description": "The CONFIRMED transaction hash from the proposal lock step",
+          "type": "string"
+        },
+        "lockOutputIndex": {
+          "description": "Output index of the locked proposal UTxO (default: 0)",
+          "default": 0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "changeAddress",
+        "agentDid",
+        "lockTxHash"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
   "vector_build_send_apex": {
     "description": "Build an UNSIGNED transaction sending AP3X to a recipient. Takes no key material - sign the returned CBOR with your local signer (vector_signer_sign), then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     "inputSchema": {
@@ -589,7 +803,7 @@
     }
   },
   "vector_self_improvement_analyze_metrics": {
-    "description": "Analyze proposal metrics: proposal activity, adoption rate, treasury health, and engagement statistics. Read-only - no mnemonic needed.",
+    "description": "Analyze proposal metrics: proposal activity, adoption rate, treasury health, and engagement statistics. Read-only, takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -642,189 +856,6 @@
       },
       "required": [
         "entity"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
-  "vector_self_improvement_critique": {
-    "description": "Submit a critique on an improvement proposal. Critiques can support, oppose, or propose amendments. Requires staking AP3X. Provide critiqueDocument (JSON string) for automatic IPFS upload, or critiqueHash + storageUri manually.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "mnemonic": {
-          "description": "15 or 24-word BIP39 mnemonic for the wallet",
-          "type": "string"
-        },
-        "agentDid": {
-          "description": "Agent DID (hex)",
-          "type": "string"
-        },
-        "proposalTxHash": {
-          "description": "TX hash of the proposal UTxO to critique",
-          "type": "string"
-        },
-        "proposalOutputIndex": {
-          "description": "Output index of the proposal UTxO",
-          "default": 0,
-          "type": "number"
-        },
-        "critiqueDocument": {
-          "description": "Full critique document as JSON string. Uploaded to IPFS via Filebase; hash and CID computed automatically.",
-          "type": "string"
-        },
-        "critiqueHash": {
-          "description": "blake2b_256 hash of critique document (64 hex chars). Required if critiqueDocument is not provided.",
-          "type": "string"
-        },
-        "critiqueType": {
-          "description": "Type of critique",
-          "type": "string",
-          "enum": [
-            "Supportive",
-            "Opposing",
-            "Amendment"
-          ]
-        },
-        "storageUri": {
-          "description": "Off-chain storage URI for the critique document. Required if critiqueDocument is not provided.",
-          "type": "string"
-        },
-        "stakeApex": {
-          "description": "AP3X to stake (minimum 10)",
-          "type": "number",
-          "minimum": 10
-        }
-      },
-      "required": [
-        "mnemonic",
-        "agentDid",
-        "proposalTxHash",
-        "critiqueType",
-        "stakeApex"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
-  "vector_self_improvement_endorse": {
-    "description": "Endorse an improvement proposal by staking AP3X. Endorsements signal support to the Foundation Council and are weighted by stake amount.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "mnemonic": {
-          "description": "15 or 24-word BIP39 mnemonic for the wallet",
-          "type": "string"
-        },
-        "agentDid": {
-          "description": "Agent DID (hex)",
-          "type": "string"
-        },
-        "proposalTxHash": {
-          "description": "TX hash of the proposal UTxO to endorse",
-          "type": "string"
-        },
-        "proposalOutputIndex": {
-          "description": "Output index of the proposal UTxO",
-          "default": 0,
-          "type": "number"
-        },
-        "stakeApex": {
-          "description": "AP3X to stake as endorsement (minimum 5)",
-          "type": "number",
-          "minimum": 5
-        }
-      },
-      "required": [
-        "mnemonic",
-        "agentDid",
-        "proposalTxHash",
-        "stakeApex"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
-  "vector_self_improvement_submit_proposal": {
-    "description": "Submit an improvement proposal to the Vector Self-Improvement Module. Requires staking AP3X. Provide proposalDocument (JSON string) for automatic IPFS upload via Filebase and blake2b_256 hashing, OR provide proposalHash and storageUri manually.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "mnemonic": {
-          "description": "15 or 24-word BIP39 mnemonic for the wallet",
-          "type": "string"
-        },
-        "agentDid": {
-          "description": "Agent DID (hex) - the asset name from Agent Registry NFT",
-          "type": "string"
-        },
-        "proposalDocument": {
-          "description": "Full proposal document as JSON string. Uploaded to IPFS via Filebase; hash and CID computed automatically. If provided, proposalHash and storageUri are ignored.",
-          "type": "string"
-        },
-        "proposalHash": {
-          "description": "blake2b_256 hash of proposal document (64 hex chars). Required if proposalDocument is not provided.",
-          "type": "string"
-        },
-        "proposalType": {
-          "description": "Category of the proposal",
-          "type": "string",
-          "enum": [
-            "ParameterChange",
-            "TreasurySpend",
-            "ProtocolUpgrade",
-            "GameActivation",
-            "GeneralSuggestion"
-          ]
-        },
-        "storageUri": {
-          "description": "Off-chain storage URI for the full proposal (IPFS CID or OriginTrail UAL). Required if proposalDocument is not provided.",
-          "type": "string"
-        },
-        "stakeApex": {
-          "description": "AP3X to stake (minimum 25)",
-          "type": "number",
-          "minimum": 25
-        },
-        "typeParams": {
-          "description": "Type-specific parameters (required for ParameterChange and TreasurySpend)",
-          "type": "object",
-          "properties": {
-            "paramName": {
-              "type": "string"
-            },
-            "currentValue": {
-              "type": "number"
-            },
-            "proposedValue": {
-              "type": "number"
-            },
-            "amount": {
-              "type": "number"
-            },
-            "recipientDescription": {
-              "type": "string"
-            },
-            "upgradeHash": {
-              "type": "string"
-            },
-            "gameId": {
-              "type": "number"
-            }
-          }
-        },
-        "priority": {
-          "description": "Priority level (Emergency requires higher stake and reputation)",
-          "default": "Standard",
-          "type": "string",
-          "enum": [
-            "Standard",
-            "Emergency"
-          ]
-        }
-      },
-      "required": [
-        "mnemonic",
-        "agentDid",
-        "proposalType",
-        "stakeApex"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }

@@ -13,9 +13,11 @@ import { resolve, join, relative } from 'node:path';
  */
 const SRC_ROOT = resolve(import.meta.dirname!, '../src');
 const SCRIPTS_ROOT = resolve(import.meta.dirname!, '../scripts');
-const CUSTODIAL_UNTIL_LATER_PR = new Set([
-  'vector/self-improvement.ts',  // family 3 (governance) — goes keyless in spec PR 8
-]);
+// Empty since spec PR 8: family 3 (self-improvement) went keyless, taking the
+// last custodial file (vector/self-improvement.ts) off the allowlist. Every
+// builder family is now keyless - this set may never grow again (see the
+// size-0 pin below).
+const CUSTODIAL_UNTIL_LATER_PR = new Set<string>([]);
 // No \b boundaries: this is deliberately a substring match, not a whole-word
 // one. Word-bounding let `seedPhrase`, `WALLET_SEED` or `bip39x` slip past
 // undetected — those are real key-material vocabulary wearing a different
@@ -70,11 +72,13 @@ describe('builder custody boundary', () => {
   });
 
   // The allowlist may only shrink (PR 7 dropped agent-network.ts to reach 1,
-  // PR 8 drops self-improvement.ts to reach 0 - see the "goes keyless in spec
-  // PR N" comment above). Pinning the size means any widening is a deliberate,
-  // reviewable number change instead of a silent `.add(...)` slipping through.
+  // PR 8 drops self-improvement.ts to reach 0 - see the comment above
+  // CUSTODIAL_UNTIL_LATER_PR). Pinning the size means any widening is a
+  // deliberate, reviewable number change instead of a silent `.add(...)`
+  // slipping through - and since the migration is complete, that number can
+  // now only ever be 0.
   test('the allowlist may only shrink', () => {
-    assert.equal(CUSTODIAL_UNTIL_LATER_PR.size, 1, 'the custodial allowlist may only shrink - spec PR 8 takes it to 0');
+    assert.equal(CUSTODIAL_UNTIL_LATER_PR.size, 0, 'the custodial allowlist is EMPTY - the migration is complete; it may never grow again');
   });
 
   // Pins every FORBIDDEN alternative individually against a fixture corpus, so

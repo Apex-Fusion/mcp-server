@@ -1,26 +1,5 @@
 // Vector-specific type definitions
 
-export interface SpendLimits {
-  perTransaction: number; // lovelace
-  daily: number; // lovelace
-}
-
-export interface SpendStatus {
-  perTransactionLimit: number;
-  dailyLimit: number;
-  dailySpent: number;
-  dailyRemaining: number;
-  resetTime: string;
-}
-
-export interface AuditEntry {
-  timestamp: string;
-  txHash: string;
-  amountLovelace: number;
-  recipient: string;
-  action: string;
-}
-
 // --- Build Transaction ---
 
 export interface TxOutput {
