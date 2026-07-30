@@ -1,37 +1,35 @@
-// packages/builder/test/sign-helper.test.ts
+// packages/signer/test/sign-script-tx.test.ts
 //
-// Hermetic pin for signWithMnemonic's witness-preservation fix
-// (test/integration/sign-helper.ts). Proves offline, with zero network
-// access and zero real secrets, that signing a script-bearing transaction
-// preserves its existing plutus_v3_scripts/redeemers/plutus_datums instead
-// of discarding them - the defect found live during Task 5's gated E2E run
-// (see task-5-report.md, "Bug #1").
+// Hermetic pin: proves the SIGNER's own signTransaction (src/sign.ts) signs a
+// script-bearing transaction without dropping its plutus_v3_scripts,
+// redeemers, or plutus_datums. Standing follow-up closed here: sign.test.ts's
+// FIXTURE_CBOR carries no script witnesses at all, so the signer suite never
+// exercised this path before this file - "the signer suite never signs a
+// script tx".
 //
-// Why this needs its own test: none of the existing gates catch this
-// mutant. sign-helper.ts lives under test/integration/, outside every unit
-// test glob (packages/*/test/*.test.ts is non-recursive). run.test.ts's
-// assertSuccessOrKnownError treats the resulting "Failed to submit
-// transaction" as a tolerated known error (indistinguishable from an
-// unfunded wallet) rather than a hard failure. And registry-e2e.test.ts's
-// hash-equality check (`assert.equal(submittedHash, txHash, ...)`) cannot
-// catch it either: dropping witnesses never changes the transaction BODY,
-// so the mutant computes the exact same body hash as the fix - only the
-// ledger, which this test never talks to, rejects the mutant's CBOR. This
-// file is the only gate that would fail if the fix regressed.
+// Mirrors packages/builder/test/sign-helper.test.ts's synthetic
+// script-bearing tx construction (same shape: one input, one output, one
+// PlutusV3 script, one redeemer, one datum in the witness set) so the two
+// "does signing preserve a script witness set" pins - builder's
+// signWithMnemonic path and the signer's own signTransaction(cbor, bech32Key)
+// path - stay directly comparable, even though the two packages sign through
+// different call surfaces (a mnemonic vs. a raw bech32 private key).
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CML, walletFromSeed } from '@lucid-evolution/lucid';
-import { signWithMnemonic } from './integration/sign-helper.ts';
+import * as CML from '@anastasia-labs/cardano-multiplatform-lib-nodejs';
+import { signTransaction } from '../src/sign.ts';
+import { MnemonicKeySource } from '../src/keysource.ts';
 
 // Public BIP39 test vector: 23x "abandon" + the checksum word "art" (the
 // 24-word encoding of all-zero, 256-bit entropy - verified directly against
 // the `bip39` package's own entropyToMnemonic(), not transcribed from
-// memory: `bip39.entropyToMnemonic('00'.repeat(32))`). This is the
-// canonical example mnemonic used throughout the crypto tooling ecosystem
-// specifically because it is universally known, was never funded, and
-// holds nothing on any network. TEST-ONLY - used here purely to exercise
-// signing logic offline; never use it, or any mnemonic like it, for
-// anything that touches real funds.
+// memory: `bip39.entropyToMnemonic('00'.repeat(32))`). Same constant
+// sign-helper.test.ts uses on the builder side. This is the canonical
+// example mnemonic used throughout the crypto tooling ecosystem specifically
+// because it is universally known, was never funded, and holds nothing on
+// any network. TEST-ONLY - used here purely to exercise signing logic
+// offline; never use it, or any mnemonic like it, for anything that touches
+// real funds.
 const TEST_ONLY_PUBLIC_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon ' +
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art';
@@ -40,13 +38,13 @@ const TEST_ONLY_PUBLIC_MNEMONIC =
  * Builds a synthetic, offline, script-bearing unsigned transaction: one
  * input, one output, and a witness set carrying one PlutusV3 script, one
  * redeemer, and one datum - enough to exercise every witness-set category
- * signWithMnemonic must preserve, without a live network, a real validator,
- * or Lucid's TransactionBuilder (whose min-UTxO/fee rules this probe has no
- * reason to satisfy: these are raw CML data containers, hashed and
- * re-serialized, never evaluated or submitted anywhere).
+ * signTransaction must preserve, without a live network, a real validator,
+ * or Lucid's TransactionBuilder. Identical shape to
+ * sign-helper.test.ts's buildSyntheticScriptBearingTx, parameterised on the
+ * output address so the caller can supply one derived via the signer's own
+ * MnemonicKeySource rather than a second, separate walletFromSeed call.
  */
-function buildSyntheticScriptBearingTx(): string {
-  const { address } = walletFromSeed(TEST_ONLY_PUBLIC_MNEMONIC, { network: 'Mainnet', accountIndex: 0 });
+function buildSyntheticScriptBearingTx(address: string): string {
   const addr = CML.Address.from_bech32(address);
 
   const inputs = CML.TransactionInputList.new();
@@ -77,15 +75,21 @@ function buildSyntheticScriptBearingTx(): string {
   return CML.Transaction.new(body, witnessSet, true).to_cbor_hex();
 }
 
-describe('signWithMnemonic preserves an existing script witness set (hermetic pin, task-5-report.md Bug #1)', () => {
+describe('signTransaction preserves an existing script witness set (hermetic pin, signer side)', () => {
   test('signing a script-bearing tx keeps the vkey witness AND the original scripts/redeemers/datums, and leaves the body hash unchanged', () => {
-    const unsignedCborHex = buildSyntheticScriptBearingTx();
+    // Same canonical derivation MnemonicKeySource.load() uses elsewhere in
+    // this package (walletFromSeed under Mainnet, account index 0) - reused
+    // here rather than a second, separate call, so this fixture's output
+    // address and its signing key come from one source of truth.
+    const { privateKeyBech32, address } = new MnemonicKeySource(TEST_ONLY_PUBLIC_MNEMONIC).load();
+
+    const unsignedCborHex = buildSyntheticScriptBearingTx(address);
     const unsignedBodyHashHex = CML.hash_transaction(CML.Transaction.from_cbor_hex(unsignedCborHex).body()).to_hex();
     const redeemersBefore = CML.Transaction.from_cbor_hex(unsignedCborHex).witness_set().redeemers()!.to_cbor_hex();
 
-    const { signedCborHex, txHash } = signWithMnemonic(unsignedCborHex, TEST_ONLY_PUBLIC_MNEMONIC);
+    const { signedCborHex, txHashHex } = signTransaction(unsignedCborHex, privateKeyBech32);
 
-    assert.equal(txHash, unsignedBodyHashHex, 'signing must not change the transaction body hash');
+    assert.equal(txHashHex, unsignedBodyHashHex, 'signing must not change the transaction body hash');
 
     const signed = CML.Transaction.from_cbor_hex(signedCborHex);
     assert.equal(

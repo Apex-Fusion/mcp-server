@@ -15,6 +15,7 @@ import {
   MIN_AP3X_DEPOSIT, getRegistryAddress, resolveAgentUtxo, parseAgentDatum,
   buildRegisterAgent, buildUpdateAgent, buildTransferAgent, buildDeregisterAgent, buildMessageAgent,
 } from './registry-build.js';
+import type { RegistryAgentProfile } from './registry-build.js';
 
 function newProvider() {
   return new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL });
@@ -102,7 +103,7 @@ ${capList}
       try {
         const provider = newProvider();
         const utxos = await provider.getUtxos(getRegistryAddress());
-        const profiles = [];
+        const profiles: RegistryAgentProfile[] = [];
         for (const utxo of utxos) {
           if (!utxo.datum) continue;
           const profile = parseAgentDatum(utxo.datum, `${utxo.txHash}#${utxo.outputIndex}`, utxo.assets);

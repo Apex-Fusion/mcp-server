@@ -346,6 +346,25 @@ describe('registry owner ops (real validator, offline)', () => {
     }
     assert.ok(tx.body().mint(), 'no mint (burn) field on the deregister tx');
   });
+
+  test('deregister picks the LARGEST pure-AP3X wallet UTxO as the extra input', async () => {
+    const small = { txHash: 'a1'.repeat(32), outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 3_000_000n } };
+    const large = { txHash: 'a2'.repeat(32), outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 900_000_000n } };
+    // small listed FIRST so first-match selection would pick it
+    const provider = new FixtureProvider([small, large, REGISTRY_UTXO]);
+    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
+    const r = await buildDeregisterAgent(lucid, provider, { changeAddress: OWN_ADDRESS, agentId: AGENT_DID });
+    const tx = CML.Transaction.from_cbor_hex(r.txCbor);
+    const ins = tx.body().inputs();
+    let sawLarge = false, sawSmall = false;
+    for (let i = 0; i < ins.len(); i++) {
+      const h = ins.get(i).transaction_id().to_hex();
+      if (h === 'a2'.repeat(32)) sawLarge = true;
+      if (h === 'a1'.repeat(32)) sawSmall = true;
+    }
+    assert.ok(sawLarge, 'largest pure-AP3X UTxO must be the chosen extra input');
+    assert.ok(!sawSmall, 'the smaller pure-AP3X UTxO must not be chosen over the larger');
+  });
 });
 
 // Correction round (see task-3-report.md): differential testing against the
@@ -423,6 +442,15 @@ describe('registry owner ops - value preservation & deregister floor (correction
       .complete();
     const tx = decodeTx(completed.toCBOR());
     assert.equal(tx.body().inputs().len(), 1, 'sole input - Lucid should not need to pull in any extra wallet UTxO here');
+
+    // Pin: buildDeregisterAgent's returned `detail` is the ACTUAL spent
+    // registry UTxO lovelace (25 AP3X here), not the MIN_AP3X_DEPOSIT
+    // constant. Goes through buildDeregisterAgent itself (unlike the direct
+    // build above), which is safe here because the provider also carries
+    // FIXTURE_UTXOS, so the extra fee UTxO that path unconditionally pulls in
+    // is available.
+    const r = await buildDeregisterAgent(lucid, provider, { changeAddress: OWN_ADDRESS, agentId: AGENT_DID });
+    assert.equal(r.detail, '25000000', 'detail must be the spent registry UTxO lovelace, not the constant');
   });
 
   test('deregister throws an actionable error (not a validator crash) when the wallet has no plain AP3X-only UTxO', async () => {

@@ -10,7 +10,9 @@ import type { RawServerHandle } from '../setup.ts';
 // unit-tests RateLimiter/limiterFor in isolation; test:smoke only ever calls
 // listTools(). Neither exercises a single tool handler, so neither would
 // notice checkRateLimit/rateLimiter falling out of scope in agent-network.ts
-// or self-improvement.ts (both @ts-nocheck - tsc can't catch it either). See
+// or self-improvement.ts. agent-network.ts is typed now, so tsc catches a
+// scoping regression there; self-improvement.ts (typed in the
+// self-improvement-keyless PR) is the remaining compiler-blind case. See
 // .superpowers/sdd/pr5-integration-tests-report.md for the mutation-testing
 // evidence.
 //
