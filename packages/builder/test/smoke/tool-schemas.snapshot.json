@@ -253,7 +253,7 @@
           "type": "string"
         },
         "agentDid": {
-          "description": "Agent DID (hex)",
+          "description": "Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)",
           "type": "string"
         },
         "proposalTxHash": {
@@ -312,7 +312,7 @@
           "type": "string"
         },
         "agentDid": {
-          "description": "Agent DID (hex)",
+          "description": "Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)",
           "type": "string"
         },
         "proposalTxHash": {
@@ -349,7 +349,7 @@
           "type": "string"
         },
         "agentDid": {
-          "description": "Agent DID (hex) - the asset name from Agent Registry NFT",
+          "description": "Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)",
           "type": "string"
         },
         "proposalType": {
@@ -436,7 +436,7 @@
           "type": "string"
         },
         "agentDid": {
-          "description": "Agent DID (hex) - must match the proposer DID in the locked proposal",
+          "description": "Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string) - must match the proposer DID in the locked proposal",
           "type": "string"
         },
         "lockTxHash": {

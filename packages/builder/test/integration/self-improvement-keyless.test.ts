@@ -177,7 +177,10 @@ describe('self-improvement keyless tier-1 (live testnet, no secrets)', () => {
     // One real UTxO lookup happens here (getUtxosByOutRef against Ogmios),
     // so this cannot be as fast as the fully-local changeAddress check below
     // - bounded generously to still catch a hang/retry-storm regression.
-    assert.ok(Date.now() - t0 < 30_000, 'a not-found outref lookup should not be slow');
+    // Bound kept strictly below the test's own 30_000ms timeout so this
+    // assertion's specific message can actually fire - at 30_000 it was
+    // unreachable (the test runner's own timeout would win first).
+    assert.ok(Date.now() - t0 < 15_000, 'a not-found outref lookup should not be slow');
     assert.match(text, /Locked proposal UTxO not found/);
     assert.match(text, /vector_await_transaction/, 'error should point the agent at the await-first recovery step');
   });

@@ -320,7 +320,7 @@ ${Number(treasuryTotal) < 2_500_000_000 ? '\n**WARNING:** Treasury below alert t
     "Build an UNSIGNED transaction that locks an improvement-proposal stake (step 1 of 2). Requires staking at least 25 AP3X. Provide proposalDocument for automatic IPFS upload, or proposalHash and storageUri manually. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. After this confirms, call this tool's counterpart, vector_build_self_improvement_proposal_spend, with the lock transaction hash to complete the submission.",
     {
       changeAddress: z.string().describe("Your wallet address (holds the stake AP3X; receives change). Get it from vector_signer_get_address."),
-      agentDid: z.string().describe("Agent DID (hex) - the asset name from Agent Registry NFT"),
+      agentDid: z.string().describe("Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)"),
       proposalType: z.enum(["ParameterChange", "TreasurySpend", "ProtocolUpgrade", "GameActivation", "GeneralSuggestion"]).describe("Category of the proposal"),
       stakeApex: z.number().min(MIN_PROPOSAL_STAKE_APEX).describe(`AP3X to stake (minimum ${MIN_PROPOSAL_STAKE_APEX})`),
       typeParams: z.object({
@@ -390,7 +390,7 @@ ${SIGN_AND_SUBMIT_COPY} After it confirms, call vector_build_self_improvement_pr
     "Build an UNSIGNED transaction that completes an improvement-proposal submission (step 2 of 2): spends the locked stake through the module validator and mints the proposal and activity tokens. Requires the confirmed lock transaction hash from vector_build_self_improvement_proposal_lock. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
     {
       changeAddress: z.string().describe("The SAME wallet address used to build the proposal lock. Get it from vector_signer_get_address."),
-      agentDid: z.string().describe("Agent DID (hex) - must match the proposer DID in the locked proposal"),
+      agentDid: z.string().describe("Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string) - must match the proposer DID in the locked proposal"),
       lockTxHash: z.string().describe("The CONFIRMED transaction hash from the proposal lock step"),
       lockOutputIndex: z.number().default(0).describe("Output index of the locked proposal UTxO (default: 0)"),
     },
@@ -442,7 +442,7 @@ This transaction is valid until ${new Date(r.validToMs).toISOString()} (about 6 
     "Build an UNSIGNED transaction that submits a critique on an improvement proposal (Supportive, Opposing, or Amendment). Requires staking at least 10 AP3X. Provide critiqueDocument for automatic IPFS upload, or critiqueHash and storageUri manually. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. Find a proposalTxHash to critique with vector_self_improvement_browse.",
     {
       changeAddress: z.string().describe("Your wallet address (holds the stake AP3X; receives change). Get it from vector_signer_get_address."),
-      agentDid: z.string().describe("Agent DID (hex)"),
+      agentDid: z.string().describe("Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)"),
       proposalTxHash: z.string().describe("TX hash of the proposal UTxO to critique"),
       // Note: a bare .default() without .optional() is reported as *required* by the
       // SDK's isSchemaOptional() under zod/v4 (it returned optional under v3). That
@@ -508,7 +508,7 @@ ${SIGN_AND_SUBMIT_COPY}`,
     "Build an UNSIGNED transaction that endorses an improvement proposal by staking at least 5 AP3X. Endorsements signal support to the Foundation Council and are weighted by stake amount. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. Find a proposalTxHash to endorse with vector_self_improvement_browse.",
     {
       changeAddress: z.string().describe("Your wallet address (holds the stake AP3X; receives change). Get it from vector_signer_get_address."),
-      agentDid: z.string().describe("Agent DID (hex)"),
+      agentDid: z.string().describe("Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)"),
       proposalTxHash: z.string().describe("TX hash of the proposal UTxO to endorse"),
       proposalOutputIndex: z.number().default(0).describe("Output index of the proposal UTxO"),
       stakeApex: z.number().min(MIN_ENDORSE_STAKE_APEX).describe(`AP3X to stake as endorsement (minimum ${MIN_ENDORSE_STAKE_APEX})`),

@@ -121,7 +121,9 @@ function extractTxHash(text: string): string {
       });
       const m = text.match(/[Vv]alid until (.*Z)/);
       assert.ok(m, `no signing deadline in spend build:\n${text.slice(0, 500)}`);
-      return { text, validTo: m[1] };
+      const validTo = m[1];
+      assert.ok(new Date(validTo).getTime() - Date.now() > 120_000, 'deadline must be meaningfully in the future');
+      return { text, validTo };
     }
 
     // Sign+submit IMMEDIATELY after build - the deployed module gives a
@@ -172,6 +174,7 @@ function extractTxHash(text: string): string {
     critiqueTxHash = await signSubmitAwait(buildText, 'critique');
     await wait(5);
     const browseText = await callTool(ctx.client, 'vector_self_improvement_browse', { entity: 'critiques', proposalTxHash });
+    assert.match(browseText, /# Critiques \([1-9]\d* found\)/, `expected a non-zero critique count in the browse header:\n${browseText.slice(0, 300)}`);
     assert.match(browseText, /Supportive Critique/, `expected our critique in the browse response:\n${browseText.slice(0, 800)}`);
     assert.match(browseText, new RegExp(`${critiqueTxHash}#\\d+`), `expected our critique's own UTxO in the browse response:\n${browseText.slice(0, 800)}`);
   });
@@ -185,6 +188,7 @@ function extractTxHash(text: string): string {
     endorseTxHash = await signSubmitAwait(buildText, 'endorse');
     await wait(5);
     const browseText = await callTool(ctx.client, 'vector_self_improvement_browse', { entity: 'endorsements', proposalTxHash });
+    assert.match(browseText, /# Endorsements \([1-9]\d* found\)/, `expected a non-zero endorsement count in the browse header:\n${browseText.slice(0, 300)}`);
     assert.match(browseText, /Endorsement/, `expected our endorsement in the browse response:\n${browseText.slice(0, 800)}`);
     assert.match(browseText, new RegExp(`${endorseTxHash}#\\d+`), `expected our endorsement's own UTxO in the browse response:\n${browseText.slice(0, 800)}`);
   });

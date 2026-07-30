@@ -426,7 +426,7 @@ describe('Agent Network Tools', () => {
 // proves that exact path live and rigorously (its "THE MONEY ASSERTION"
 // test), including the ~6-minute signing window and its documented
 // rebuild-once recovery. Re-running the identical ~29 AP3X one-way sequence
-// here would spend real testnet funds a second time for no new information
+// here would spend real testnet AP3X a second time for no new information
 // about the underlying build/sign/submit/await mechanism. Set LEGACY_FULL=1
 // to additionally exercise it through THIS file's own broader multi-family
 // run (useful as a regression check once other families ahead of it in this
