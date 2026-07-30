@@ -190,7 +190,7 @@ TDD throughout: failing test before implementation, every PR.
 | **5** | Builder hardening: auth (enforced when configured), per-identity rate limits, `submit_transaction`, `await_transaction` | no |
 | **6** | **Family 1 — wallet/tx keyless.** Mnemonics removed; `build_*` tools land ✅ **(landed — this PR)** | **yes** |
 | **7** | **Family 2 — agent registry keyless.** Drops `@ts-nocheck` from `agent-network.ts` ✅ **(landed — this PR)** | yes |
-| **8** | **Family 3 — self-improvement keyless.** Plus env-driven ref-UTxO config and a CBOR encoding fix ✅ **(landed — this PR)** | yes |
+| **8** | **Family 3 — self-improvement keyless.** Ref-UTxO env config carried over from the custodial code; the suspected CBOR encoding issue closed as no-bug (audit #10, golden-pinned against a live on-chain token) ✅ **(landed — this PR)** | yes |
 | **9** | Mainnet cutover: README, security-page correction, deliberate `workflow_dispatch` | — |
 
 **PR 4 is the review that matters.** It is additive, self-contained, and *is* the security boundary. It breaks nothing while it is reviewed.

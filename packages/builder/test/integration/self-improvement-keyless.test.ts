@@ -9,7 +9,7 @@ import {
 } from '../../src/vector/gov-build.ts';
 
 // Tier-1 self-improvement integration: LIVE testnet, ZERO secrets. Build-only -
-// nothing is signed, nothing is submitted, no funds move. critique, endorse,
+// nothing is signed, nothing is submitted, no value moves. critique, endorse,
 // and proposal_lock are all plain locks (a single unsigned payment to a
 // script address, no script spend), so this tier can fully exercise their
 // datum-construction path against real chain data (a live-discovered agent

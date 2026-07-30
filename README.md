@@ -23,10 +23,11 @@ Hosted instances run on both networks, exposing all 24 tools:
 > custodial: assume they may still accept a mnemonic as a tool-call parameter, and prefer
 > self-hosting this release or the testnet instance instead.
 
-Connect from Claude Code in one command:
+Connect from Claude Code in one command (testnet shown - swap in the mainnet URL once the
+cutover deploy described above ships):
 
 ```bash
-claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse
+claude mcp add --transport sse vector-mcp https://mcp.vector.testnet.apexfusion.org/sse
 ```
 
 > **Security notice: as of this release, the non-custodial migration is complete in this
