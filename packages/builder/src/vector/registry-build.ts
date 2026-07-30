@@ -157,12 +157,13 @@ export function verifyOwnership(profile: RegistryAgentProfile, walletVkeyHash: s
 }
 
 export async function buildRegisterAgent(lucid: LucidEvolution, p: {
-  changeAddress: string; name: string; description: string;
+  name: string; description: string;
   capabilities: string[]; framework: string; endpoint: string;
 }): Promise<VectorBuildRegisterResult> {
+  const changeAddress = await lucid.wallet().address();
   validateEndpoint(p.endpoint);
   validateCapabilities(p.capabilities);
-  const vkeyHash = paymentKeyHashOf(p.changeAddress);
+  const vkeyHash = paymentKeyHashOf(changeAddress);
   const utxos = await lucid.wallet().getUtxos();
   // Same selection heuristic as the old custodial tool (behavior parity):
   // prefer a pure-lovelace UTxO covering deposit + fee headroom, else the first.
@@ -180,7 +181,7 @@ export async function buildRegisterAgent(lucid: LucidEvolution, p: {
     .mintAssets({ [nftUnit]: 1n }, registerRedeemer)
     .attach.MintingPolicy(registryScript())
     .pay.ToAddressWithData(getRegistryAddress(), { kind: 'inline', value: datum }, { lovelace: MIN_AP3X_DEPOSIT, [nftUnit]: 1n })
-    .addSigner(p.changeAddress)
+    .addSigner(changeAddress)
     .complete();
   return {
     ...toBuildResult(completed),
@@ -195,17 +196,18 @@ export async function buildUpdateAgent(
   lucid: LucidEvolution,
   provider: Pick<OgmiosProvider, 'getUtxos' | 'getUtxoByUnit'>,
   p: {
-    changeAddress: string; agentId: string; name?: string; description?: string;
+    agentId: string; name?: string; description?: string;
     capabilities?: string[]; framework?: string; endpoint?: string;
   },
 ): Promise<VectorBuildAgentOpResult> {
+  const changeAddress = await lucid.wallet().address();
   if (p.name === undefined && p.description === undefined && p.capabilities === undefined
     && p.framework === undefined && p.endpoint === undefined) {
     throw new Error('At least one field must be provided to update (name, description, capabilities, framework, or endpoint).');
   }
   if (p.endpoint !== undefined) validateEndpoint(p.endpoint);
   if (p.capabilities !== undefined) validateCapabilities(p.capabilities);
-  const vkeyHash = paymentKeyHashOf(p.changeAddress);
+  const vkeyHash = paymentKeyHashOf(changeAddress);
   const { profile, utxo } = await resolveAgentUtxo(provider, p.agentId);
   verifyOwnership(profile, vkeyHash);
   // Owner is written from profile.ownerVkeyHash, not the caller's vkeyHash:
@@ -232,7 +234,7 @@ export async function buildUpdateAgent(
     .collectFrom([utxo], spendRedeemer)
     .attach.SpendingValidator(registryScript())
     .pay.ToAddressWithData(getRegistryAddress(), { kind: 'inline', value: newDatum }, utxo.assets)
-    .addSigner(p.changeAddress)
+    .addSigner(changeAddress)
     .complete();
   const updatedFields: string[] = [];
   if (p.name !== undefined) updatedFields.push('name');
@@ -249,9 +251,10 @@ export async function buildUpdateAgent(
 export async function buildTransferAgent(
   lucid: LucidEvolution,
   provider: Pick<OgmiosProvider, 'getUtxos' | 'getUtxoByUnit'>,
-  p: { changeAddress: string; agentId: string; newOwnerAddress: string },
+  p: { agentId: string; newOwnerAddress: string },
 ): Promise<VectorBuildAgentOpResult> {
-  const vkeyHash = paymentKeyHashOf(p.changeAddress);
+  const changeAddress = await lucid.wallet().address();
+  const vkeyHash = paymentKeyHashOf(changeAddress);
   let newOwnerHash: string;
   try {
     newOwnerHash = paymentKeyHashOf(p.newOwnerAddress);
@@ -272,7 +275,7 @@ export async function buildTransferAgent(
     .collectFrom([utxo], spendRedeemer)
     .attach.SpendingValidator(registryScript())
     .pay.ToAddressWithData(getRegistryAddress(), { kind: 'inline', value: newDatum }, utxo.assets)
-    .addSigner(p.changeAddress)
+    .addSigner(changeAddress)
     .complete();
   return {
     ...toBuildResult(completed),
@@ -283,9 +286,10 @@ export async function buildTransferAgent(
 export async function buildDeregisterAgent(
   lucid: LucidEvolution,
   provider: Pick<OgmiosProvider, 'getUtxos' | 'getUtxoByUnit'>,
-  p: { changeAddress: string; agentId: string },
+  p: { agentId: string },
 ): Promise<VectorBuildAgentOpResult> {
-  const vkeyHash = paymentKeyHashOf(p.changeAddress);
+  const changeAddress = await lucid.wallet().address();
+  const vkeyHash = paymentKeyHashOf(changeAddress);
   const { profile, utxo, nftUnit } = await resolveAgentUtxo(provider, p.agentId);
   verifyOwnership(profile, vkeyHash);
   const spendRedeemer = Data.to(new Constr(1, [])); // Deregister
@@ -321,7 +325,7 @@ export async function buildDeregisterAgent(
     .collectFrom([feeUtxo])
     .mintAssets({ [nftUnit]: -1n }, mintRedeemer)
     .attach.MintingPolicy(registryScript())
-    .addSigner(p.changeAddress)
+    .addSigner(changeAddress)
     .complete();
   return {
     ...toBuildResult(completed),
@@ -332,9 +336,10 @@ export async function buildDeregisterAgent(
 export async function buildMessageAgent(
   lucid: LucidEvolution,
   provider: Pick<OgmiosProvider, 'getUtxos' | 'getUtxoByUnit'>,
-  p: { changeAddress: string; agentId: string; messageType: string; payload: string },
+  p: { agentId: string; messageType: string; payload: string },
 ): Promise<VectorBuildMessageResult> {
-  paymentKeyHashOf(p.changeAddress); // validate before any resolution work
+  const changeAddress = await lucid.wallet().address();
+  paymentKeyHashOf(changeAddress); // validate before any resolution work
   const { profile } = await resolveAgentUtxo(provider, p.agentId);
   if (!profile.ownerVkeyHash) throw new Error('Could not parse agent owner from registry datum');
   const recipientAddress = credentialToAddress('Mainnet', { type: 'Key', hash: profile.ownerVkeyHash });
@@ -342,7 +347,7 @@ export async function buildMessageAgent(
     .pay.ToAddress(recipientAddress, { lovelace: 2_000_000n })
     .attachMetadata(AGENT_MESSAGE_LABEL, {
       msg: ['a2a'],
-      from: metadataStr(p.changeAddress),
+      from: metadataStr(changeAddress),
       to: metadataStr(p.agentId),
       type: p.messageType,
       payload: metadataStr(p.payload),
