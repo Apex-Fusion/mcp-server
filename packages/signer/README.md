@@ -144,10 +144,10 @@ over-counts, which refuses too much rather than too little.
 - **Prompt injection is bounded, not eliminated.** Policy refuses out-of-limit
   transactions, but an injected agent can still cause any transaction *within* policy.
   Recipient allowlisting is the next lever.
-- **Pairing this signer with the hosted builder now removes the custody exposure it was
-  designed to fix, for every family this server exposes.** The signer's own four tools are
+- **Pairing this signer with the builder in this codebase now removes the custody exposure it
+  was designed to fix, for every family the builder exposes.** The signer's own four tools are
   complete and independently verified end to end against live chain data
-  (`test/integration/roundtrip.test.ts`), and the hosted *builder's* tools are keyless across
+  (`test/integration/roundtrip.test.ts`), and this codebase's *builder* tools are keyless across
   the board: every `build_*` tool, across the wallet/transaction, smart-contract, agent-registry,
   and self-improvement families, takes a wallet *address* and never a mnemonic, and
   `vector_submit_transaction` / `vector_await_transaction` complete the round trip. The
@@ -162,10 +162,13 @@ over-counts, which refuses too much rather than too little.
   `vector_signer_sign` directly, not a call to this package's own code), then submit and confirm
   on real Vector testnet blocks. This signer's own tool surface, policy engine, and audit log
   are exercised separately, by this package's own suite (`test/integration/roundtrip.test.ts`
-  and the smoke tests above). **Nothing is left open: this was the last custodial family.** The
-  non-custodial migration described in
+  and the smoke tests above). **Nothing is left open in the code: this was the last custodial
+  family.** The non-custodial migration described in
   [`docs/architecture/non-custodial-split.md`](../../docs/architecture/non-custodial-split.md)
-  is complete.
+  is complete in this codebase. It is not yet complete on every deployment: the mainnet hosted
+  instance stays on its last custodial image until a deliberate cutover deploy ships (see that
+  document's rollout section). Until then, pair this signer with a self-hosted or testnet
+  builder if you want the guarantee above to actually hold - not the mainnet one.
 
 ## Running it
 
@@ -191,9 +194,11 @@ example):
 }
 ```
 
-Register it alongside the hosted builder so an agent has both sets of tools available. This
-pairing keeps your mnemonic off the hosted server for every family it exposes: wallet,
-transaction, smart-contract, agent-registry, and self-improvement alike. See the last bullet
+Register it alongside the builder so an agent has both sets of tools available. This pairing
+keeps your mnemonic off any server running this release, for every family it exposes: wallet,
+transaction, smart-contract, agent-registry, and self-improvement alike - as long as that
+server is actually running this release. The mainnet hosted instance is not, yet: see the
+deployment status note in the root README before assuming this covers it. See the last bullet
 under Known limitations above for the full evidence.
 
 ## Testing

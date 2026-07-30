@@ -15,22 +15,34 @@ Hosted instances run on both networks, exposing all 24 tools:
 | Mainnet | `https://mcp.vector.mainnet.apexfusion.org/sse` |
 | Testnet | `https://mcp.vector.testnet.apexfusion.org/sse` |
 
+> **Deployment status differs by network.** Testnet auto-deploys from `main` on every merge, so
+> it tracks this codebase closely. **Mainnet stays on its last custodial image until a
+> deliberate cutover deploy ships** - that deploy is a separate, future step, not automatic and
+> not implied by any merge (see [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md),
+> section 11, "Rollout"). Until it ships, treat the mainnet instance's signing tools as
+> custodial: assume they may still accept a mnemonic as a tool-call parameter, and prefer
+> self-hosting this release or the testnet instance instead.
+
 Connect from Claude Code in one command:
 
 ```bash
 claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse
 ```
 
-> **Security notice: the non-custodial migration is complete.** No tool on this hosted server
-> accepts a mnemonic, private key, or any other key material. Every `build_*` tool constructs an
-> unsigned transaction from a wallet *address* only, and every signing operation happens locally
-> on your own machine, through the local signer companion. Broadcast the signed result with
-> `vector_submit_transaction` - your seed phrase never leaves your machine, and this server never
-> holds one. This is enforced mechanically, not just by convention: the builder's custody
-> boundary test scans every source file for key-material vocabulary against an allowlist that is
-> now empty and pinned at size zero, so a future change cannot silently reintroduce a mnemonic
-> parameter without failing that test by name.
-> See [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md).
+> **Security notice: as of this release, the non-custodial migration is complete in this
+> codebase.** No tool in this repository accepts a mnemonic, private key, or any other key
+> material. Every `build_*` tool constructs an unsigned transaction from a wallet *address*
+> only, and every signing operation happens locally on your own machine, through the local
+> signer companion. Broadcast the signed result with `vector_submit_transaction` - your seed
+> phrase never leaves your machine, and no server running this release ever holds one. This is
+> enforced mechanically in the code, not just by convention: the builder's custody boundary test
+> scans every source file for key-material vocabulary against an allowlist that is now empty and
+> pinned at size zero, so a future change cannot silently reintroduce a mnemonic parameter
+> without failing that test by name.
+> **This is a claim about the code, not about every deployment of it** - see the deployment
+> status note above the connect command, and
+> [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md) for the
+> full rollout plan.
 
 Self-hosting instructions are below.
 
@@ -42,15 +54,17 @@ stdio transport, no Provider, no egress — so a key given to it never reaches a
 or your model provider. Four tools: `vector_signer_get_address`, `vector_signer_decode_transaction`,
 `vector_signer_sign`, `vector_signer_get_spend_limits`.
 
-**This signer is the single signing point for every family this server exposes.** The full
-non-custodial flow is live for all of them: `vector_signer_get_address` → `build_*` →
-`vector_signer_sign` → `vector_submit_transaction` → `vector_await_transaction`. No step in that
-chain puts a mnemonic in front of this server or your model provider, for any tool. The
-build → submit → await half is E2E-proven on Vector testnet across the wallet/tx, smart-contract,
-agent-registry, and self-improvement families, including the first keyless-built proposal
-submission the deployed self-improvement module validator has ever accepted; see
+**In this codebase, this signer is the single signing point for every family the builder
+exposes.** The full non-custodial flow is live in this release for all of them:
+`vector_signer_get_address` → `build_*` → `vector_signer_sign` → `vector_submit_transaction` →
+`vector_await_transaction`. No step in that chain puts a mnemonic in front of a server running
+this code, or your model provider, for any tool. The build → submit → await half is E2E-proven
+on Vector testnet across the wallet/tx, smart-contract, agent-registry, and self-improvement
+families, including the first keyless-built proposal submission the deployed self-improvement
+module validator has ever accepted; see
 [`packages/signer/README.md`](packages/signer/README.md#known-limitations) for exactly what that
-testing does and does not exercise on the signer's side.
+testing does and does not exercise on the signer's side. **This describes the code, not every
+deployment of it** - see the deployment status note above.
 
 See [`packages/signer/README.md`](packages/signer/README.md) for configuration, tools, and known
 limitations.
@@ -62,7 +76,7 @@ limitations.
 - **Smart contracts** - deploy Plutus/Aiken validators, lock and spend UTxOs at script addresses (keyless)
 - **Agent registry** - register, discover, update, transfer, and deregister on-chain AI agent identities via soulbound NFTs (keyless - build, sign locally, broadcast)
 - **Agent messaging** - send on-chain messages between agents via TX metadata (keyless)
-- **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals, all keyless (live on Vector mainnet)
+- **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals; the on-chain module is live on Vector mainnet, and every write tool is keyless in this codebase
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
 - **SSE transport** - HTTP server with Server-Sent Events for MCP client connectivity
 
