@@ -434,6 +434,61 @@ describe('buildProposalLock (offline, FixtureProvider)', () => {
     );
   });
 
+  // The three Constr indices below are the on-chain contract's own layout
+  // (0=ParameterChange, 1=TreasurySpend, 2=ProtocolUpgrade, 3=GameActivation,
+  // 4=GeneralSuggestion - see the custodial switch this was transcribed
+  // from) - an index swap between any two of these builds a datum the
+  // deployed validator would parse as the WRONG proposal type. Each test
+  // decodes the raw type-datum Constr directly (not through the parser,
+  // which only round-trips the type NAME back from the index) to pin the
+  // literal on-wire index.
+
+  test('TreasurySpend with typeParams builds with type datum index 1 (amount + recipientDescription)', async () => {
+    const r = await buildProposalLock(lucid, {
+      agentDid: AGENT_DID, proposalType: 'TreasurySpend', stakeApex: 25,
+      typeParams: { amount: 500, recipientDescription: 'research grant pool' },
+      proposalHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
+    });
+    const tx = decodeTx(r.txCbor);
+    const lockOut = findOutputTo(tx, r.scriptAddress)!;
+    const datumCbor = lockOut.datum()!.as_datum()!.to_cbor_hex();
+    const raw = Data.from(datumCbor) as Constr<Data>;
+    const typeField = raw.fields[3] as Constr<Data>;
+    assert.equal(typeField.index, 1, "TreasurySpend must encode as Constr index 1 - the on-chain contract's layout, not renumbered");
+    assert.equal(Number(typeField.fields[0]), 500);
+    assert.equal(toText(typeField.fields[1] as string), 'research grant pool');
+  });
+
+  test('ProtocolUpgrade builds with type datum index 2 (upgradeHash embedded)', async () => {
+    const r = await buildProposalLock(lucid, {
+      agentDid: AGENT_DID, proposalType: 'ProtocolUpgrade', stakeApex: 25,
+      typeParams: { upgradeHash: 'cc'.repeat(32) },
+      proposalHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
+    });
+    const tx = decodeTx(r.txCbor);
+    const lockOut = findOutputTo(tx, r.scriptAddress)!;
+    const datumCbor = lockOut.datum()!.as_datum()!.to_cbor_hex();
+    const raw = Data.from(datumCbor) as Constr<Data>;
+    const typeField = raw.fields[3] as Constr<Data>;
+    assert.equal(typeField.index, 2, "ProtocolUpgrade must encode as Constr index 2 - the on-chain contract's layout, not renumbered");
+    assert.equal(typeField.fields[0], 'cc'.repeat(32));
+  });
+
+  test('GameActivation builds with type datum index 3 (gameId embedded)', async () => {
+    const r = await buildProposalLock(lucid, {
+      agentDid: AGENT_DID, proposalType: 'GameActivation', stakeApex: 25,
+      typeParams: { gameId: 6 },
+      proposalHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
+    });
+    const tx = decodeTx(r.txCbor);
+    const lockOut = findOutputTo(tx, r.scriptAddress)!;
+    const datumCbor = lockOut.datum()!.as_datum()!.to_cbor_hex();
+    const raw = Data.from(datumCbor) as Constr<Data>;
+    const typeField = raw.fields[3] as Constr<Data>;
+    assert.equal(typeField.index, 3, "GameActivation must encode as Constr index 3 - the on-chain contract's layout, not renumbered");
+    assert.equal(Number(typeField.fields[0]), 6);
+  });
+
   test('manual proposalHash + storageUri path works without a document', async () => {
     const r = await buildProposalLock(lucid, {
       agentDid: AGENT_DID, proposalType: 'GeneralSuggestion', stakeApex: 25,
@@ -550,6 +605,17 @@ describe('buildProposalSpend (offline, FixtureProvider)', () => {
   // imply the deployed validator would accept the result - that question is
   // answered separately, honestly, by the native-eval-attempt test (which
   // never calls evaluateTx at all, so this stub is simply unused there).
+  //
+  // Two things this stub deliberately does NOT cover, each carried by a
+  // different test instead: (1) it fabricates canned ex-units, not real
+  // ones, so the structural tests' fees are fictitious - nothing here or
+  // elsewhere asserts on `fee`/`feeAda`; (2) it never inspects or
+  // constrains REDEEMER CONTENT (only the units Lucid attaches to whichever
+  // redeemers already exist in the draft tx) - the structural test's
+  // literal 'd87980' redeemer-data pin, the native-eval-attempt test, and
+  // the (manual, gated) E2E integration test are what actually exercise
+  // redeemer correctness; a corrupted redeemer would sail through this stub
+  // unnoticed.
   function stubEvalProvider(utxos: UTxO[]) {
     const provider = chainClockProvider(utxos);
     return Object.assign(provider, {
@@ -651,6 +717,25 @@ describe('buildProposalSpend (offline, FixtureProvider)', () => {
     assert.equal(findAssetQuantity(ma, GOV_PROPOSAL_MINT_HASH, expectedPropName), 1n, 'must mint exactly 1 prop_ token of the derived name');
     assert.equal(findAssetQuantity(ma, GOV_PROPOSAL_MINT_HASH, expectedActName), 1n, 'must mint exactly 1 pact_ token of the derived name');
 
+    // Redeemer content, not just mint/output shape - stubEvalProvider only
+    // fabricates execution UNITS, it never inspects or constrains redeemer
+    // DATA, so nothing above this point would catch a corrupted or
+    // mismatched redeemer. Both the Spend and Mint redeemers must be
+    // SubmitRedeemer = Data.to(new Constr(0, [])), which CBOR-encodes to the
+    // fixed 3-byte 'd87980' (tag 121 = alternative 0, empty field array) -
+    // pinned as a literal, not by re-deriving from Constr, so a redeemer
+    // corruption can't hide behind a mutated encoder agreeing with itself.
+    const legacyRedeemers = tx.witness_set().redeemers()?.as_arr_legacy_redeemer();
+    assert.ok(legacyRedeemers, 'no redeemers in the witness set');
+    assert.equal(legacyRedeemers!.len(), 2, 'must carry exactly 2 redeemers (Spend + Mint)');
+    for (let i = 0; i < legacyRedeemers!.len(); i++) {
+      const redeemer = legacyRedeemers!.get(i);
+      assert.equal(
+        redeemer.data().to_cbor_hex(), 'd87980',
+        `redeemer ${i} (tag ${redeemer.tag()}) must be the empty SubmitRedeemer Constr(0, [])`,
+      );
+    }
+
     // exactly two continuing outputs at the proposal address
     const outs = tx.body().outputs();
     const atSpendAddr: any[] = [];
@@ -659,6 +744,25 @@ describe('buildProposalSpend (offline, FixtureProvider)', () => {
       if (o.address().to_bech32() === proposalSpendAddress) atSpendAddr.push(o);
     }
     assert.equal(atSpendAddr.length, 2, 'must produce exactly 2 continuing outputs at the proposal address');
+
+    // Positional pin, matching the mainnet-proven custodial output order
+    // exactly (the proposal-continuing pay.ToAddressWithData call comes
+    // before the activity one in both the custodial module and this build):
+    // output 0 = the proposal-datum continuing output (prop token), output
+    // 1 = the activity output (act token). Verified empirically against a
+    // real decoded build before pinning this, not assumed - output 2 (not
+    // asserted here) is Lucid's own wallet-change output from fee coin
+    // selection, which is incidental to this build's own logic.
+    const output0Assets = outs.get(0).amount().multi_asset();
+    const output1Assets = outs.get(1).amount().multi_asset();
+    assert.equal(
+      output0Assets && findAssetQuantity(output0Assets, GOV_PROPOSAL_MINT_HASH, expectedPropName), 1n,
+      'output 0 must be the proposal-continuing output (carries the prop_ token)',
+    );
+    assert.equal(
+      output1Assets && findAssetQuantity(output1Assets, GOV_PROPOSAL_MINT_HASH, expectedActName), 1n,
+      'output 1 must be the activity output (carries the pact_ token)',
+    );
 
     const propOut = atSpendAddr.find((o) => findAssetQuantity(o.amount().multi_asset()!, GOV_PROPOSAL_MINT_HASH, expectedPropName) === 1n);
     assert.ok(propOut, 'no continuing output carries the prop_ token');
@@ -728,6 +832,26 @@ describe('buildProposalSpend (offline, FixtureProvider)', () => {
     );
   });
 
+  test('locked UTxO exists but is not at the proposal script address - fail-fast error', async () => {
+    // A UTxO that resolves fine by outref but sits at the WALLET's own
+    // address, not the proposal script address - simulates a caller passing
+    // an unrelated txHash. Must be rejected before any datum parsing is
+    // attempted (the datum content here is irrelevant to this check).
+    const WRONG_ADDR_TX_HASH = 'dd'.repeat(32);
+    const wrongAddressUtxo: UTxO = {
+      txHash: WRONG_ADDR_TX_HASH, outputIndex: 0, address: OWN_ADDRESS,
+      assets: { lovelace: 27_000_000n }, datum: lockDatumCbor,
+    };
+    const providerWrongAddr = chainClockProvider([...baseSpendUtxos(), wrongAddressUtxo]);
+    const lucidWrongAddr = await lucidForAddress(providerWrongAddr, OWN_ADDRESS);
+    await assert.rejects(
+      buildProposalSpend(lucidWrongAddr, providerWrongAddr, {
+        agentDid: AGENT_DID, lockTxHash: WRONG_ADDR_TX_HASH, lockOutputIndex: 0,
+      }),
+      /not at the proposal script address/,
+    );
+  });
+
   test('DID mismatch between the locked datum and the caller agentDid - clear error', async () => {
     await assert.rejects(
       buildProposalSpend(spendLucid, spendProvider, {
@@ -778,13 +902,29 @@ describe('buildProposalSpend (offline, FixtureProvider)', () => {
     //   validator crashed / exited prematurely Trace ENTER:proposal_spend
     //   Trace OK:read_params" }
     //
-    // "OK:read_params" is strong evidence the transaction's WIRING is
-    // correct (the validator found and parsed the PARAMS reference input in
-    // the position it expected) - the crash happens in a LATER check the
-    // plan explicitly named as chain-state-dependent (oracle freshness, or
-    // a DID/NFT cross-check needing exact real values this fixture's
-    // synthetic ORACLE/NFT data cannot satisfy offline). This is the
-    // expected fork, not a structural defect: production keeps
+    // What this trace DOES establish: the crash is a genuine chain-logic
+    // rejection inside the deployed validator, not a Lucid-side "couldn't
+    // even assemble this transaction" failure - the crash happens in a
+    // LATER check the plan explicitly named as chain-state-dependent
+    // (oracle freshness, or a DID/NFT cross-check needing exact real values
+    // this fixture's synthetic ORACLE/NFT data cannot satisfy offline).
+    //
+    // What it does NOT establish: that everything up to and including
+    // read_params is correct. "OK:read_params" is ONE-DIRECTIONAL evidence
+    // - an EARLIER failure (crashing before ENTER:proposal_spend, or before
+    // OK:read_params) WOULD imply a structural break, but reaching this
+    // point proves nothing about checks that come AFTER it. Confirmed
+    // directly, not assumed: deliberately dropping the NFT reference input
+    // from buildProposalSpend's readFrom calls (a real structural bug)
+    // reproduces this EXACT SAME trace, since the validator doesn't touch
+    // the NFT until a check that comes later. That specific defect class is
+    // instead caught by the structural test's reference_inputs-length pin
+    // (== 6) above, not by this trace - which is why that pin, the
+    // redeemer-content pin, and the output-order pin all live in the
+    // structural describe block rather than being inferred from this one
+    // eval attempt.
+    //
+    // This is the expected fork, not a structural defect: production keeps
     // `localUPLCEval: false` and lets the PROVIDER evaluate (tier-1/E2E
     // integration tests exercise that against the live network); this
     // describe block's sibling tests above cover the offline-testable half
@@ -799,9 +939,12 @@ describe('buildProposalSpend (offline, FixtureProvider)', () => {
         }, { localUPLCEval: true }),
         (err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
-          // Must be a genuine Plutus validator rejection that got PAST the
-          // first real check - proves the transaction's shape/wiring
-          // reached the validator, not a Lucid-side build failure.
+          // Must be a genuine Plutus validator rejection reached AFTER
+          // read_params, not a Lucid-side build failure and not a crash
+          // earlier than this. This is one-directional: it rules OUT an
+          // earlier-than-expected structural break, it does not rule IN
+          // that every later check is correct (see the describe-level
+          // comment above for why, and what does cover that).
           assert.match(message, /proposal_spend/, 'expected a proposal_spend validator trace, not a build-level error');
           assert.match(message, /OK:read_params/, 'expected the validator to have gotten PAST reading params before crashing - anything earlier would suggest a structural wiring defect, not a chain-state one');
           return true;

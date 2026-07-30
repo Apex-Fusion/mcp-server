@@ -138,6 +138,15 @@ export function parseUtxoRef(ref: string): { txHash: string; outputIndex: number
 // paymentKeyHashOf exactly, kept as an independent copy rather than a
 // cross-family import - each build-core file depends only on build.ts, not
 // on a sibling family file; see task-3-report.md for the reasoning).
+//
+// Deliberate exception to that rule (Task 4): buildProposalSpend below DOES
+// import getRegistryAddress from registry-build.ts - the self-improvement
+// family's NFT-resolution fallback needs the registry's own script address
+// to scan, and that address is derived from registry-build.ts's own
+// REGISTRY_SCRIPT_CBOR constant, not something this file could reasonably
+// duplicate without risking the two copies drifting apart. One-directional
+// (gov-build.ts -> registry-build.ts only, never the reverse), so it does
+// not introduce a cycle.
 export function paymentKeyHashOf(address: string): string {
   let details;
   try {
@@ -644,6 +653,7 @@ export async function buildProposalSpend(
 ): Promise<VectorBuildProposalSpendResult> {
   const changeAddress = await lucid.wallet().address();
   const lockOutputIndex = p.lockOutputIndex ?? 0;
+  const proposalSpendAddress = scriptHashToAddress(GOV_PROPOSAL_SPEND_HASH);
 
   // 1. Resolve the locked UTxO. Its datum is reused VERBATIM below as the
   // continuing datum - the chain's own bytes are the truth, not a
@@ -652,6 +662,19 @@ export async function buildProposalSpend(
   const lockedUtxo = lockedUtxos[0];
   if (!lockedUtxo) {
     throw new Error('Locked proposal UTxO not found - has the lock transaction confirmed? Run vector_await_transaction { txHash } first.');
+  }
+  // Fail fast on a caller passing an unrelated txHash that happens to
+  // resolve to a real UTxO elsewhere (same defensive pattern as
+  // build.ts's buildInteractContract spend-action address check) - a
+  // datum-parse failure two lines below would eventually catch most cases
+  // of this, but this gives a specific, actionable error instead of a
+  // generic "malformed data" one.
+  if (lockedUtxo.address !== proposalSpendAddress) {
+    throw new Error(
+      `Locked UTxO ${p.lockTxHash}#${lockOutputIndex} is not at the proposal script address ` +
+      `(found ${lockedUtxo.address}) - pass the lock transaction hash returned by ` +
+      `vector_build_self_improvement_proposal_lock.`,
+    );
   }
   if (!lockedUtxo.datum) {
     throw new Error('Locked proposal UTxO has no inline datum - the lock transaction may be malformed.');
@@ -748,7 +771,6 @@ export async function buildProposalSpend(
   ]));
 
   const submitRedeemer = Data.to(new Constr(0, []));
-  const proposalSpendAddress = scriptHashToAddress(GOV_PROPOSAL_SPEND_HASH);
 
   const completed = await lucid.newTx()
     .collectFrom([lockedUtxo], submitRedeemer)
