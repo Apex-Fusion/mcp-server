@@ -216,6 +216,19 @@ describe('buildCritique (offline, FixtureProvider)', () => {
     );
   });
 
+  test('succeeds at exactly the minimum stake (10 AP3X) - the boundary is inclusive', async () => {
+    const r = await buildCritique(lucid, {
+      agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 0,
+      critiqueType: 'Supportive', stakeApex: 10,
+      critiqueHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
+    });
+    assert.equal(r.stakeLovelace, '10000000');
+    const tx = decodeTx(r.txCbor);
+    const critiqueOut = findOutputTo(tx, r.scriptAddress);
+    assert.ok(critiqueOut, 'no output to the critique address');
+    assert.equal(critiqueOut!.amount().coin(), 12_000_000n, 'exactly-minimum stake (10 AP3X) must still build: 10 + 2 AP3X');
+  });
+
   test('rejects a stake below the minimum', async () => {
     await assert.rejects(
       buildCritique(lucid, {
@@ -277,6 +290,17 @@ describe('buildEndorse (offline, FixtureProvider)', () => {
     assert.equal(parsed!.stakeAmount, 7_000_000);
     assert.equal(parsed!.proposalRef.fields[0], PROPOSAL_TX);
     assert.equal(Number(parsed!.proposalRef.fields[1]), 1);
+  });
+
+  test('succeeds at exactly the minimum stake (5 AP3X) - the boundary is inclusive', async () => {
+    const r = await buildEndorse(lucid, {
+      agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 0, stakeApex: 5,
+    });
+    assert.equal(r.stakeLovelace, '5000000');
+    const tx = decodeTx(r.txCbor);
+    const endorseOut = findOutputTo(tx, r.scriptAddress);
+    assert.ok(endorseOut, 'no output to the endorsement address');
+    assert.equal(endorseOut!.amount().coin(), 7_000_000n, 'exactly-minimum stake (5 AP3X) must still build: 5 + 2 AP3X');
   });
 
   test('rejects a stake below the minimum', async () => {

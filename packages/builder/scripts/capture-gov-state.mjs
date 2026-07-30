@@ -206,6 +206,24 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
+// Deliberately dereference sampleProposal/goldenTokenPin's fields here,
+// BEFORE writeFileSync, rather than only embedding them in the fixture
+// object below: an object literal doesn't dereference its values, so if a
+// future success path ever left either variable null without also pushing a
+// fail() (the failures.length check above would then wrongly let a null
+// slip through), `const fixture = {...}` and JSON.stringify would happily
+// write "sampleProposal": null / "goldenTokenPin": null to disk with no
+// error at all. Real property access (.txHash, .lockTxHash, ...) throws a
+// TypeError on null, so doing it here makes the STOP-before-write guarantee
+// a structural crash-before-write instead of resting solely on every
+// success path remembering to keep the failures array in sync.
+console.log('\nCapture validated, about to write:');
+console.log(`  refScripts: ${refScripts.length}/2, infra: ${infra.length}/3`);
+console.log(`  sampleProposal: ${sampleProposal.txHash}#${sampleProposal.index}`);
+console.log(`  goldenTokenPin.lockTxHash:        ${goldenTokenPin.lockTxHash}`);
+console.log(`  goldenTokenPin.lockOutputIndex:   ${goldenTokenPin.lockOutputIndex}`);
+console.log(`  goldenTokenPin.expectedTokenName: ${goldenTokenPin.expectedTokenName}`);
+
 const fixture = {
   asOf: new Date().toISOString(),
   refScripts,
@@ -217,8 +235,3 @@ const fixture = {
 const outPath = resolve(import.meta.dirname, '../test/fixtures/gov-state.fixture.json');
 writeFileSync(outPath, JSON.stringify(fixture, null, 2) + '\n');
 console.log(`\nwrote ${outPath}`);
-console.log(`  refScripts: ${refScripts.length}/2, infra: ${infra.length}/3`);
-console.log(`  sampleProposal: ${sampleProposal.txHash}#${sampleProposal.index}`);
-console.log(`  goldenTokenPin.lockTxHash:        ${goldenTokenPin.lockTxHash}`);
-console.log(`  goldenTokenPin.lockOutputIndex:   ${goldenTokenPin.lockOutputIndex}`);
-console.log(`  goldenTokenPin.expectedTokenName: ${goldenTokenPin.expectedTokenName}`);
