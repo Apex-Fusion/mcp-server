@@ -10,11 +10,15 @@
 import {
   fromText, toText, Data, Constr, credentialToAddress, getAddressDetails, SLOT_CONFIG_NETWORK,
 } from '@lucid-evolution/lucid';
-import type { LucidEvolution } from '@lucid-evolution/lucid';
+import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
 import { blake2b } from '@noble/hashes/blake2b';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import type { VectorBuildStakeResult } from '@apexfusion/vector-mcp-shared/types';
+import type { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
+import type {
+  VectorBuildStakeResult, VectorBuildProposalLockResult, VectorBuildProposalSpendResult,
+} from '@apexfusion/vector-mcp-shared/types';
 import { toBuildResult } from './build.js';
+import { getRegistryAddress } from './registry-build.js';
 
 // ─── Module constants (env-overridable exactly as the custodial module) ────
 
@@ -492,5 +496,289 @@ export async function buildEndorse(lucid: LucidEvolution, p: {
     proposalRef: `${p.proposalTxHash}#${p.proposalOutputIndex}`,
     stakeLovelace: stakeLovelace.toString(),
     scriptAddress: endorsementSpendAddress,
+  };
+}
+
+// ─── Build: proposal lock (step 1 of 2) ─────────────────────────────────────
+
+export async function buildProposalLock(lucid: LucidEvolution, p: {
+  agentDid: string;
+  proposalType: 'ParameterChange' | 'TreasurySpend' | 'ProtocolUpgrade' | 'GameActivation' | 'GeneralSuggestion';
+  stakeApex: number;
+  typeParams?: {
+    paramName?: string; currentValue?: number; proposedValue?: number;
+    amount?: number; recipientDescription?: string; upgradeHash?: string; gameId?: number;
+  };
+  priority?: 'Standard' | 'Emergency';
+  proposalDocument?: string;
+  proposalHash?: string;
+  storageUri?: string;
+}): Promise<VectorBuildProposalLockResult> {
+  const changeAddress = await lucid.wallet().address();
+
+  // Validation order: stake minimum -> type-specific params (cheap,
+  // synchronous) -> document/hash/URI resolution (the one network side
+  // effect, a Filebase upload, is deliberately validated last).
+  if (!(p.stakeApex >= MIN_PROPOSAL_STAKE_APEX)) {
+    throw new Error(`Proposal stake must be at least ${MIN_PROPOSAL_STAKE_APEX} AP3X.`);
+  }
+  const stakeLovelace = BigInt(Math.floor(p.stakeApex * 1_000_000));
+
+  // Proposal-type datum. Same Constr indices as the custodial switch - the
+  // deployed module validator parses these exact bytes.
+  let typeDatum: Constr<Data>;
+  switch (p.proposalType) {
+    case 'ParameterChange':
+      if (!p.typeParams?.paramName || p.typeParams?.currentValue == null || p.typeParams?.proposedValue == null) {
+        throw new Error('ParameterChange requires paramName, currentValue, proposedValue');
+      }
+      typeDatum = new Constr(0, [fromText(p.typeParams.paramName), BigInt(p.typeParams.currentValue), BigInt(p.typeParams.proposedValue)]);
+      break;
+    case 'TreasurySpend':
+      if (!p.typeParams?.amount || !p.typeParams?.recipientDescription) {
+        throw new Error('TreasurySpend requires amount, recipientDescription');
+      }
+      typeDatum = new Constr(1, [BigInt(p.typeParams.amount), fromText(p.typeParams.recipientDescription)]);
+      break;
+    case 'ProtocolUpgrade':
+      typeDatum = new Constr(2, [p.typeParams?.upgradeHash || '']);
+      break;
+    case 'GameActivation':
+      typeDatum = new Constr(3, [BigInt(p.typeParams?.gameId || 0)]);
+      break;
+    case 'GeneralSuggestion':
+      typeDatum = new Constr(4, []);
+      break;
+    default: {
+      const exhaustive: never = p.proposalType;
+      throw new Error(`Unknown proposalType: ${String(exhaustive)}`);
+    }
+  }
+
+  // Document/hash/URI resolution: Filebase upload if a document was given,
+  // else the caller-supplied hash + URI must already be valid.
+  let finalHash = p.proposalHash;
+  let finalUri = p.storageUri;
+  let ipfsCid: string | undefined;
+
+  if (p.proposalDocument) {
+    const uploaded = await uploadToFilebase(p.proposalDocument, 'proposal');
+    finalHash = uploaded.hash;
+    finalUri = `ipfs://${uploaded.cid}`;
+    ipfsCid = uploaded.cid;
+  }
+
+  if (!finalHash || finalHash.length !== 64) {
+    throw new Error('proposalHash must be 64 hex characters (32 bytes). Provide proposalDocument for automatic hashing or proposalHash manually.');
+  }
+  if (!finalUri) {
+    throw new Error('storageUri is required. Provide proposalDocument for automatic upload or storageUri manually.');
+  }
+
+  const vkeyHash = paymentKeyHashOf(changeAddress);
+
+  const provider = slotClockOf(lucid);
+  const zeroTime = await ensureSlotConfig(provider);
+  const tip = (await provider.getNetworkTip?.()) ?? { slot: 0 };
+  const submittedAtMs = zeroTime + (tip.slot || 0) * 1000; // POSIX ms - the validity-range unit, not slots
+
+  const priorityDatum = p.priority === 'Emergency' ? new Constr(1, []) : new Constr(0, []);
+
+  const proposalDatum = Data.to(new Constr(0, [
+    p.agentDid,                          // proposer_did
+    new Constr(0, [vkeyHash]),           // proposer_credential
+    finalHash,                           // proposal_hash
+    typeDatum,                           // proposal_type
+    fromText(finalUri),                  // storage_uri
+    stakeLovelace,                       // stake_amount
+    BigInt(submittedAtMs),               // submitted_at
+    604_800_000n,                        // review_window (~7 days in ms)
+    priorityDatum,                       // priority
+    0n,                                  // amendment_count
+    [],                                  // incorporated_critiques
+    new Constr(0, []),                   // state = Open
+  ]));
+
+  const proposalSpendAddress = scriptHashToAddress(GOV_PROPOSAL_SPEND_HASH);
+
+  const completed = await lucid.newTx()
+    .pay.ToAddressWithData(
+      proposalSpendAddress,
+      { kind: 'inline', value: proposalDatum },
+      { lovelace: stakeLovelace + 2_000_000n },
+    )
+    .complete({ localUPLCEval: false });
+
+  return {
+    ...toBuildResult(completed),
+    scriptAddress: proposalSpendAddress,
+    stakeLovelace: stakeLovelace.toString(),
+    storageUri: finalUri,
+    proposalHash: finalHash,
+    ...(ipfsCid ? { ipfsCid } : {}),
+  };
+}
+
+// ─── Build: proposal spend (step 2 of 2 - validated spend + mint) ──────────
+
+export async function buildProposalSpend(
+  lucid: LucidEvolution,
+  // Assumed to be the same provider instance `lucid` was constructed with
+  // (lucidForAddress(provider, changeAddress)) - passed explicitly (unlike
+  // buildCritique/buildEndorse's slotClockOf recovery) because this build
+  // resolves UTxOs by outref/unit directly against it, not through lucid's
+  // own UTxO cache. SlotClockProvider (not OgmiosProvider's own stricter
+  // getNetworkTip) supplies the slot/tip surface, same as slotClockOf's
+  // callers elsewhere in this file - keeps the (optional) hash field out of
+  // this build's contract, since it never uses it.
+  provider: Pick<OgmiosProvider, 'getUtxos' | 'getUtxoByUnit' | 'getUtxosByOutRef'> & SlotClockProvider,
+  p: { agentDid: string; lockTxHash: string; lockOutputIndex?: number },
+  // Test-only escape hatch, not part of the documented call contract: every
+  // production caller (Task 5's tool handler included) omits this and gets
+  // parity with the custodial module (provider-side eval). Only
+  // gov-build.test.ts's dedicated native-eval-attempt test passes
+  // { localUPLCEval: true }, to ask the REAL deployed validators a question
+  // FixtureProvider's missing evaluateTx would otherwise make impossible to
+  // ask at all.
+  opts?: { localUPLCEval?: boolean },
+): Promise<VectorBuildProposalSpendResult> {
+  const changeAddress = await lucid.wallet().address();
+  const lockOutputIndex = p.lockOutputIndex ?? 0;
+
+  // 1. Resolve the locked UTxO. Its datum is reused VERBATIM below as the
+  // continuing datum - the chain's own bytes are the truth, not a
+  // reconstruction.
+  const lockedUtxos = await provider.getUtxosByOutRef([{ txHash: p.lockTxHash, outputIndex: lockOutputIndex }]);
+  const lockedUtxo = lockedUtxos[0];
+  if (!lockedUtxo) {
+    throw new Error('Locked proposal UTxO not found - has the lock transaction confirmed? Run vector_await_transaction { txHash } first.');
+  }
+  if (!lockedUtxo.datum) {
+    throw new Error('Locked proposal UTxO has no inline datum - the lock transaction may be malformed.');
+  }
+
+  // 2. Sanity-parse + cross-check the proposer DID before spending anything.
+  const proposal = parseProposalDatum(lockedUtxo.datum);
+  if (!proposal) {
+    throw new Error('Could not parse the locked proposal datum. The on-chain data may be malformed.');
+  }
+  if (proposal.proposerDid !== p.agentDid) {
+    throw new Error(`Proposer DID mismatch: the locked proposal belongs to ${proposal.proposerDid}, not ${p.agentDid}.`);
+  }
+
+  // 3. Reference-script UTxOs (CIP-33) - availability errors transcribed
+  // verbatim from the custodial module (these can be accidentally consumed
+  // by an unrelated transaction).
+  const refScriptUtxos = await provider.getUtxosByOutRef([
+    parseUtxoRef(GOV_PROPOSAL_SPEND_REF),
+    parseUtxoRef(GOV_PROPOSAL_MINT_REF),
+  ]);
+  if (refScriptUtxos.length < 2) {
+    throw new Error(
+      `Reference script UTxOs missing: found ${refScriptUtxos.length}/2. ` +
+      `spend_ref=${GOV_PROPOSAL_SPEND_REF}, mint_ref=${GOV_PROPOSAL_MINT_REF}. ` +
+      `These UTxOs may have been consumed - redeploy with scripts/redeploy_ref_scripts.py ` +
+      `and update GOV_PROPOSAL_SPEND_REF / GOV_PROPOSAL_MINT_REF env vars.`,
+    );
+  }
+  const missingScriptRef = refScriptUtxos.filter((u) => !u.scriptRef);
+  if (missingScriptRef.length > 0) {
+    throw new Error(
+      `Reference script UTxOs found but missing scriptRef field for ${missingScriptRef.length} UTxO(s). ` +
+      `The UTxOs at ${missingScriptRef.map((u) => u.txHash).join(', ')} exist but don't contain scripts. ` +
+      `Redeploy reference scripts and update env vars.`,
+    );
+  }
+
+  // Module infrastructure reference inputs - resolved the same way the
+  // custodial module did (not individually validated here; the deployed
+  // validator itself rejects the spend if one is missing from the tx).
+  const govRefUtxos = await provider.getUtxosByOutRef([
+    parseUtxoRef(GOV_PARAMS_UTXO),
+    parseUtxoRef(GOV_ORACLE_UTXO),
+    parseUtxoRef(GOV_CROSSREFS_UTXO),
+  ]);
+
+  // 4. The agent's registry NFT (CIP-31 reference input, proves the DID).
+  // Same try-getUtxoByUnit-catch-scan-getUtxos(registryAddress) fallback as
+  // registry-build.ts's resolveAgentUtxo: getUtxoByUnit needs a live indexer
+  // (FixtureProvider always throws), so offline building depends on the
+  // scan fallback actually running.
+  const nftUnit = AGENT_REGISTRY_POLICY + p.agentDid;
+  let nftUtxo: UTxO | undefined;
+  try {
+    nftUtxo = await provider.getUtxoByUnit(nftUnit);
+  } catch {
+    // Koios unavailable, asset not found, or an offline provider - fall through to the address scan.
+  }
+  if (!nftUtxo) {
+    const registryUtxos = await provider.getUtxos(getRegistryAddress());
+    nftUtxo = registryUtxos.find((u) => u.assets[nftUnit] && u.assets[nftUnit] > 0n);
+  }
+  if (!nftUtxo) {
+    throw new Error(
+      `Agent registry NFT not found on-chain. Expected token: ${AGENT_REGISTRY_POLICY.slice(0, 12)}...${p.agentDid.slice(0, 12)}... ` +
+      `The agent may need to re-register with vector_build_register_agent.`,
+    );
+  }
+
+  // 5. Token names, validity window, activity datum.
+  const propTokenName = deriveProposalTokenName(p.lockTxHash, lockOutputIndex);
+  const actTokenName = deriveActivityTokenName(p.agentDid);
+  const propTokenUnit = GOV_PROPOSAL_MINT_HASH + propTokenName;
+  const actTokenUnit = GOV_PROPOSAL_MINT_HASH + actTokenName;
+
+  const zeroTime = await ensureSlotConfig(provider);
+  const tip = (await provider.getNetworkTip?.()) ?? { slot: 0 };
+  // The validator checks activity.last_proposal_slot == tx validity lower bound.
+  const validFromMs = zeroTime + (tip.slot || 0) * 1000;
+  const validToMs = validFromMs + 360_000; // 6 minutes - the agent's signing deadline
+
+  const vkeyHash = paymentKeyHashOf(changeAddress);
+
+  // First proposal from this agent: activity count starts at 1.
+  // TODO: for a subsequent proposal, find the existing pact_ UTxO and
+  // increment count instead of always minting a fresh one - the custodial
+  // module carried the same simplification; not fixed here.
+  const activityDatum = Data.to(new Constr(0, [
+    p.agentDid,                          // agent_did
+    new Constr(0, [vkeyHash]),           // agent_credential
+    1n,                                  // active_proposal_count
+    BigInt(validFromMs),                 // last_proposal_slot (POSIX ms, matches tx validity lower bound)
+  ]));
+
+  const submitRedeemer = Data.to(new Constr(0, []));
+  const proposalSpendAddress = scriptHashToAddress(GOV_PROPOSAL_SPEND_HASH);
+
+  const completed = await lucid.newTx()
+    .collectFrom([lockedUtxo], submitRedeemer)
+    .readFrom(refScriptUtxos)
+    .readFrom(govRefUtxos)
+    .readFrom([nftUtxo])
+    .mintAssets({ [propTokenUnit]: 1n, [actTokenUnit]: 1n }, submitRedeemer)
+    .pay.ToAddressWithData(
+      proposalSpendAddress,
+      { kind: 'inline', value: lockedUtxo.datum },
+      // Value-preservation (registry-family lesson): carry the locked
+      // UTxO's OWN coin through rather than recomputing stake+2 AP3X - that
+      // constant only happens to equal it today.
+      { ...lockedUtxo.assets, [propTokenUnit]: 1n },
+    )
+    .pay.ToAddressWithData(
+      proposalSpendAddress,
+      { kind: 'inline', value: activityDatum },
+      { lovelace: 2_000_000n, [actTokenUnit]: 1n },
+    )
+    .addSigner(changeAddress)
+    .validFrom(validFromMs)
+    .validTo(validToMs)
+    .complete({ localUPLCEval: opts?.localUPLCEval ?? false });
+
+  return {
+    ...toBuildResult(completed),
+    proposalTokenName: propTokenName,
+    activityTokenName: actTokenName,
+    scriptAddress: proposalSpendAddress,
+    validToMs,
   };
 }
