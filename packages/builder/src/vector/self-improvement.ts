@@ -463,7 +463,6 @@ This transaction is valid until ${new Date(r.validToMs).toISOString()} (about 6 
         const r = await buildCritique(lucid, {
           agentDid, proposalTxHash, proposalOutputIndex, critiqueType, stakeApex, critiqueDocument, critiqueHash, storageUri,
         });
-        const storageDisplay = r.ipfsCid ? `ipfs://${r.ipfsCid}` : storageUri;
         return {
           content: [{
             type: "text" as const,
@@ -472,7 +471,7 @@ This transaction is valid until ${new Date(r.validToMs).toISOString()} (about 6 
 **Type:** ${critiqueType}
 **Stake:** ${stakeApex} AP3X
 **Proposal:** ${proposalTxHash}#${proposalOutputIndex}
-**Storage:** ${storageDisplay}
+**Storage:** ${r.storageUri}
 ${r.ipfsCid ? `**IPFS CID:** ${r.ipfsCid}\n**Hash (auto-computed):** ${r.documentHash}\n` : ''}
 **Script Address:** ${r.scriptAddress}
 **Estimated Fee:** ${r.feeAda} AP3X

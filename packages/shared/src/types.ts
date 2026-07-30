@@ -143,6 +143,7 @@ export interface VectorBuildStakeResult extends VectorUnsignedBuildResult {
   scriptAddress: string;
   ipfsCid?: string;
   documentHash?: string;
+  storageUri?: string;      // set by buildCritique only - buildEndorse has no document/URI concept
 }
 
 export interface VectorBuildProposalLockResult extends VectorUnsignedBuildResult {

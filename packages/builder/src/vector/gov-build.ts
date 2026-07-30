@@ -455,6 +455,7 @@ export async function buildCritique(lucid: LucidEvolution, p: {
     proposalRef: `${p.proposalTxHash}#${p.proposalOutputIndex}`,
     stakeLovelace: stakeLovelace.toString(),
     scriptAddress: critiqueSpendAddress,
+    storageUri: finalUri,
     ...(ipfsCid ? { ipfsCid, documentHash } : {}),
   };
 }

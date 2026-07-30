@@ -300,7 +300,7 @@ export async function buildDeregisterAgent(
   // REGISTRY_POLICY_ID above) does NOT match the in-workspace Aiken source
   // under agent-infrastructure/contracts/agent-registry/ - that source
   // compiles to policy 5dd51189..., a different script entirely (confirmed
-  // by hashing both; provenance worth resolving before the governance
+  // by hashing both; provenance worth resolving before the self-improvement
   // family trusts that source as ground truth). Differential-tested
   // directly against the deployed bytecode instead: deregister enforces a
   // floor on the owner's returned change - a sole-input deregister of a

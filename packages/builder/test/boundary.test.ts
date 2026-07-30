@@ -101,3 +101,32 @@ describe('builder custody boundary', () => {
     }
   });
 });
+
+// A second, narrower mechanical guard, same style as the custody boundary
+// above but for a different invariant: gov-build.ts's buildProposalSpend
+// exposes a 4th, TEST-ONLY `opts?: { localUPLCEval?: boolean }` parameter
+// (documented in-source as an escape hatch used only by gov-build.test.ts's
+// native-eval-attempt test - see gov-build.ts). Every production caller,
+// including self-improvement.ts's vector_build_self_improvement_proposal_spend
+// handler, must omit it and get gov-build.ts's own default
+// (`opts?.localUPLCEval ?? false` - provider-side eval, parity with the
+// deployed module). Nothing in the hermetic or smoke suites would notice a
+// handler mutation that passed `{ localUPLCEval: true }` as a 4th argument:
+// gov-build.test.ts tests buildProposalSpend directly (not through the tool
+// handler), and the smoke suite only inspects tool schemas/descriptions, not
+// handler bodies. This test closes that gap the same mechanical way the
+// custody boundary above closes the mnemonic gap: by asserting on the
+// compiled source text itself.
+describe('self-improvement.ts never touches the test-only eval escape hatch', () => {
+  test('the test-only eval escape hatch may never be passed from a tool handler', () => {
+    const content = readFileSync(join(SRC_ROOT, 'vector/self-improvement.ts'), 'utf-8');
+    assert.doesNotMatch(
+      content,
+      /localUPLCEval/,
+      'self-improvement.ts must never reference localUPLCEval - the test-only eval escape hatch may never be passed from a tool handler; ' +
+        'production callers always get gov-build.ts\'s own default (provider-side eval, parity with the deployed module). ' +
+        'If buildProposalSpend is now being called with a 4th argument from a tool handler, remove it - that argument exists only for ' +
+        'gov-build.test.ts\'s native-eval-attempt test.',
+    );
+  });
+});
