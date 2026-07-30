@@ -154,3 +154,29 @@ export interface UnsignedTxResult {
   fee: string;
   feeAda: string;
 }
+
+// --- Keyless self-improvement builds (spec PR 8) ---
+
+export interface VectorBuildStakeResult extends VectorUnsignedBuildResult {
+  op: 'critique' | 'endorse';
+  proposalRef: string;      // "txHash#index"
+  stakeLovelace: string;
+  scriptAddress: string;
+  ipfsCid?: string;
+  documentHash?: string;
+}
+
+export interface VectorBuildProposalLockResult extends VectorUnsignedBuildResult {
+  scriptAddress: string;
+  stakeLovelace: string;
+  storageUri: string;
+  proposalHash: string;
+  ipfsCid?: string;
+}
+
+export interface VectorBuildProposalSpendResult extends VectorUnsignedBuildResult {
+  proposalTokenName: string;
+  activityTokenName: string;
+  scriptAddress: string;
+  validToMs: number;        // the signing deadline the agent must beat
+}
