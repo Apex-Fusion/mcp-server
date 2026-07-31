@@ -299,13 +299,19 @@ it, lives in your local signer instead - see `VECTOR_SIGNER_SPEND_LIMIT_PER_TX` 
 > echoes a token value. Commas delimit entries and cannot be escaped, so generate
 > tokens from a comma-free charset (hex / base64url / alphanumeric).
 
-> **Error responses do not echo configured endpoints.** A failed Ogmios, Koios, or
-> submit-API request is reported to the caller by service name and status only -
-> for example "Ogmios request failed (queryLedgerState/utxo): 503 Service
-> Unavailable" - never the configured `VECTOR_OGMIOS_URL` / `VECTOR_KOIOS_URL` /
-> `VECTOR_SUBMIT_URL` value or the raw response body. Full detail goes to the
-> server's own `console.error` log for operators; a caller only ever sees the
-> service name and status.
+> **Error responses do not echo configured endpoints.** A failed Ogmios or Koios
+> query is this server's own infrastructure problem, not something the caller can
+> act on - it is reported by service name and status only, for example "Ogmios
+> request failed (queryLedgerState/utxo): 503 Service Unavailable". A rejected
+> transaction submission is different: the ledger's verdict on the CALLER'S OWN
+> transaction (a bad input, an unmet script condition, a fee too small) stays in
+> the response, since it is the feedback loop an agent needs to self-correct after
+> build → sign → submit - only URL-shaped content is scrubbed out of it first, for
+> example "Transaction submission rejected (400 Bad Request):
+> ValueNotConservedUTxO...". Neither case ever echoes the configured
+> `VECTOR_OGMIOS_URL` / `VECTOR_KOIOS_URL` / `VECTOR_SUBMIT_URL` value itself, and
+> full unscrubbed detail always goes to the server's own `console.error` log for
+> operators.
 
 ### Mainnet endpoints
 

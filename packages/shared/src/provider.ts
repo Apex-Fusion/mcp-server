@@ -104,6 +104,72 @@ export function formatServiceError(
   return `${service} request failed (${operation}): ${status}${statusText ? ` ${statusText}` : ''}`;
 }
 
+// Longest caller-visible submission-rejection body returned verbatim (after
+// scrubbing) - bounds how much of a large upstream error page (some
+// reverse proxies return full HTML) ends up in a tool response.
+const MAX_SCRUBBED_LENGTH = 2000;
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Scrub URL-shaped content out of caller-visible text: every http(s) URL,
+ * plus - given a caller-supplied list of known configured endpoints - any
+ * bare occurrence of one of their hostnames, with or without a scheme. Bare
+ * hostnames matter because the shape a raw reverse-proxy or gateway error
+ * page most often uses is not a URL at all ("could not connect to
+ * ogmios.vector.mainnet.apexfusion.org:1337"), which the generic
+ * https?:// pattern alone would miss. Caps the result length so a large
+ * upstream error page cannot flood a tool response.
+ *
+ * Exported and pure so it can be tested without a network round trip - same
+ * rationale as parseSubmitResponse above.
+ */
+export function scrubUrls(text: string, knownHosts: string[] = []): string {
+  let scrubbed = text.replace(/https?:\/\/\S+/gi, '[endpoint]');
+  for (const host of knownHosts) {
+    if (!host) continue;
+    let hostname = host;
+    try {
+      hostname = new URL(host).hostname || host;
+    } catch {
+      // Not a full URL - treat the value itself as the bare hostname.
+    }
+    if (!hostname) continue;
+    scrubbed = scrubbed.replace(new RegExp(escapeRegExp(hostname), 'gi'), '[endpoint]');
+  }
+  return scrubbed.length > MAX_SCRUBBED_LENGTH
+    ? `${scrubbed.slice(0, MAX_SCRUBBED_LENGTH)} [truncated]`
+    : scrubbed;
+}
+
+/**
+ * Format a transaction-submission rejection for the caller.
+ *
+ * Unlike formatServiceError (an Ogmios/Koios QUERY failure - our own
+ * infrastructure's problem, never the caller's), a submit-api rejection is
+ * the ledger's verdict on the CALLER'S OWN transaction: ValueNotConservedUTxO,
+ * BadInputsUTxO, ScriptWitnessNotValidating, a missing witness, a fee too
+ * small. That reason is caller information, not operator information - it is
+ * the entire feedback loop an agent uses to self-correct after
+ * build -> sign -> submit, and dropping it to a bare status code breaks the
+ * workflow this whole non-custodial migration exists to serve. So the body
+ * survives here, scrubbed of URL-shaped content (scrubUrls) rather than
+ * discarded outright: the body is still attacker-adjacent (an internal or
+ * misconfigured endpoint's own response), even though its content is
+ * otherwise legitimate to return.
+ */
+export function formatSubmitRejection(
+  status: number,
+  statusText: string,
+  body: string,
+  knownHosts: string[] = [],
+): string {
+  const suffix = statusText ? ` ${statusText}` : '';
+  return `Transaction submission rejected (${status}${suffix}): ${scrubUrls(body, knownHosts)}`;
+}
+
 export class OgmiosProvider implements Provider {
   private ogmiosUrl: string;
   private submitUrl: string;
@@ -543,7 +609,14 @@ export class OgmiosProvider implements Provider {
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`[OgmiosProvider] Transaction submission failed at ${this.submitUrl}: ${response.status} ${response.statusText} - ${errorText}`);
-      throw new Error(formatServiceError('Submit API', 'submitTx', response.status, response.statusText));
+      throw new Error(
+        formatSubmitRejection(
+          response.status,
+          response.statusText,
+          errorText,
+          [this.ogmiosUrl, this.submitUrl, this.koiosUrl].filter((u): u is string => Boolean(u)),
+        ),
+      );
     }
 
     const result = await response.text();
