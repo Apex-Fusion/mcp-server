@@ -191,7 +191,7 @@ TDD throughout: failing test before implementation, every PR.
 | **6** | **Family 1 — wallet/tx keyless.** Mnemonics removed; `build_*` tools land ✅ **(landed — this PR)** | **yes** |
 | **7** | **Family 2 — agent registry keyless.** Drops `@ts-nocheck` from `agent-network.ts` ✅ **(landed — this PR)** | yes |
 | **8** | **Family 3 — self-improvement keyless.** Ref-UTxO env config carried over from the custodial code; the suspected CBOR encoding issue closed as no-bug (audit #10, golden-pinned against a live on-chain token) ✅ **(landed — this PR)** | yes |
-| **9** | Mainnet cutover: README, security-page correction, deliberate `workflow_dispatch` | — |
+| **9** | Mainnet cutover: README, security-page correction, deliberate `workflow_dispatch` ✅ **(landed — deployed 2026-07-31)** | — |
 
 **PR 4 is the review that matters.** It is additive, self-contained, and *is* the security boundary. It breaks nothing while it is reviewed.
 
@@ -223,7 +223,7 @@ PR 4 and PR 5 both depend on the workspace split (PR 3) and can proceed in paral
 
 ## 11. Rollout
 
-Testnet auto-deploys on push to `main` (`deploy.yml`) and **is the proving ground** — breaking it from PR 6 onward is expected and useful signal. Mainnet deploys only by manual `workflow_dispatch` and **stays on the last custodial image until PR 9**. This uses the existing CI split as designed; no new infrastructure.
+Testnet auto-deploys on push to `main` (`deploy.yml`) and **is the proving ground** — breaking it from PR 6 onward is expected and useful signal. Mainnet deploys only by manual `workflow_dispatch` and **stayed on the last custodial image until PR 9** ✅ **(cutover deployed 2026-07-31, both networks now run the same image)**. This uses the existing CI split as designed; no new infrastructure.
 
 ## 12. Findings from local verification
 
