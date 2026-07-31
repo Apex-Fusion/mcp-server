@@ -10,7 +10,7 @@ import {
   validatorToScriptHash, getAddressDetails,
 } from '@lucid-evolution/lucid';
 import type { LucidEvolution, Provider, SpendingValidator, TxSignBuilder } from '@lucid-evolution/lucid';
-import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
+import { lovelaceToAda, apexToLovelace } from '@apexfusion/vector-mcp-shared/tx';
 import type {
   TxOutput, VectorUnsignedBuildResult, VectorBuildDeployResult, VectorBuildInteractResult,
 } from '@apexfusion/vector-mcp-shared/types';
@@ -63,7 +63,7 @@ export async function buildSendApex(
   if (typeof p.amountApex !== 'number' || !Number.isFinite(p.amountApex) || p.amountApex <= 0) {
     throw new Error('Amount must be a positive number');
   }
-  const lovelace = BigInt(Math.floor(p.amountApex * 1_000_000));
+  const lovelace = apexToLovelace(p.amountApex);
   let tx = lucid.newTx().pay.ToAddress(p.recipientAddress, { lovelace });
   if (p.metadataJson) {
     tx = tx.attachMetadata(674, JSON.parse(p.metadataJson));
@@ -87,7 +87,7 @@ export async function buildSendTokens(
     assetNameHex = fromText(p.assetName);
   }
   const unit = `${p.policyId}${assetNameHex}`;
-  const outputLovelace = p.apexAmount ? BigInt(Math.floor(p.apexAmount * 1_000_000)) : 2_000_000n;
+  const outputLovelace = p.apexAmount ? apexToLovelace(p.apexAmount) : 2_000_000n;
   const tx = lucid.newTx().pay.ToAddress(p.recipientAddress, {
     lovelace: outputLovelace,
     [unit]: BigInt(p.amount),
