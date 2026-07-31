@@ -12,9 +12,21 @@ import type { RawServerHandle } from '../setup.ts';
 // auth-gating.test.ts covers. Same two things at stake, same reason no unit
 // test can see them: the exact status-code/header wiring against a real
 // spawned server (401 checked before session lookup, 404 on an unknown
-// session, 403 on cross-identity), and whether streamableTransports /
-// streamableIdentities actually drain on both cleanup paths
-// (onsessionclosed - the DELETE path - and transport.onclose).
+// session, 403 on cross-identity - on both POST and GET), and whether
+// streamableTransports/streamableIdentities/streamableLastSeen actually
+// drain on every teardown path: DELETE (onsessionclosed, then
+// transport.onclose - redundant with each other on that one path), the idle
+// reaper, and the per-identity session cap's eviction (the latter two only
+// ever go through transport.onclose - see index.ts's own comment on that
+// callback for why onsessionclosed does not cover them). The reaper and the
+// cap exist because the SSE pair self-limits on an abrupt disconnect
+// (res.on('close') drains its maps with no help from us) and /mcp does not:
+// nothing tells the server a caller dropped its socket without DELETE, so an
+// un-reaped session - transport, McpServer, and its 24 tools - would
+// otherwise sit in memory until process exit. Both bounds are exercised
+// below with env-shrunk thresholds (VECTOR_MCP_SESSION_IDLE_MS /
+// VECTOR_MCP_SESSION_SWEEP_MS / VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY), never
+// the real multi-minute defaults.
 //
 // Mixed transport strategy, deliberately:
 // - Case 1 uses the real SDK Client + StreamableHTTPClientTransport, to prove
@@ -213,6 +225,23 @@ describe('streamable HTTP gating - MCP_AUTH_TOKENS set', () => {
     assert.ok(!r.body.includes(TOKEN_ALICE) && !r.body.includes(TOKEN_BOB), 'no token value echoed in the 401 body');
   });
 
+  test('a real, valid session id with no Authorization header is still rejected with 401, not 403 or 404 (auth checked before session lookup)', async () => {
+    // Ordering pin, same class as auth-gating.test.ts's "POST /messages with
+    // no Authorization header is rejected with 401, not 400 or 404": uses a
+    // session id that genuinely exists (not a bogus one), so a passing result
+    // cannot be explained away as "it 404'd because the session doesn't
+    // exist" - it specifically proves the auth check runs, and short-circuits,
+    // before the session map is ever consulted.
+    const init = record(await postMcp(ctx.port, { Authorization: `Bearer ${TOKEN_ALICE}` }, initializeRequest()));
+    assert.equal(init.status, 200);
+    const sessionId = init.headers['mcp-session-id'] as string | undefined;
+    assert.ok(sessionId);
+
+    const r = record(await postMcp(ctx.port, { 'mcp-session-id': sessionId! }, toolsListRequest()));
+    assert.equal(r.status, 401);
+    assert.equal(r.headers['www-authenticate'], 'Bearer');
+  });
+
   test('cross-identity: a valid token for a different identity than the session owner is rejected with 403; the owner is accepted', async () => {
     const init = record(await postMcp(ctx.port, { Authorization: `Bearer ${TOKEN_ALICE}` }, initializeRequest()));
     assert.equal(init.status, 200);
@@ -257,6 +286,27 @@ describe('streamable HTTP gating - MCP_AUTH_TOKENS set', () => {
     noSession.destroy();
   });
 
+  test('GET with a valid session but a different identity token is rejected with 403, independent of the POST cross-identity path', async () => {
+    // The cross-identity test above only ever exercises POST. The route's
+    // identity check runs before transport.handleRequest() regardless of
+    // method, so this pins that it is not accidentally POST-only wiring.
+    const init = record(await postMcp(ctx.port, { Authorization: `Bearer ${TOKEN_ALICE}` }, initializeRequest()));
+    assert.equal(init.status, 200);
+    const sessionId = init.headers['mcp-session-id'] as string | undefined;
+    assert.ok(sessionId);
+
+    // GET's error responses (unlike its 200 open-stream response) are short,
+    // res.end()-terminated bodies - safe to read to completion with
+    // rawRequest, same as the POST cross-identity case.
+    const crossed = record(await rawRequest(ctx.port, 'GET', '/mcp', {
+      Authorization: `Bearer ${TOKEN_BOB}`,
+      'mcp-session-id': sessionId!,
+      Accept: 'text/event-stream',
+    }));
+    assert.equal(crossed.status, 403);
+    assert.equal(crossed.body, 'This session belongs to a different identity.');
+  });
+
   test('DELETE terminates the session; a follow-up request with that session id 404s (the maps drain via onsessionclosed)', async () => {
     const init = record(await postMcp(ctx.port, { Authorization: `Bearer ${TOKEN_ALICE}` }, initializeRequest()));
     assert.equal(init.status, 200);
@@ -275,6 +325,12 @@ describe('streamable HTTP gating - MCP_AUTH_TOKENS set', () => {
       toolsListRequest(),
     ));
     assert.equal(followUp.status, 404);
+  });
+
+  test('DELETE with no session id is rejected with 400', async () => {
+    const r = record(await rawRequest(ctx.port, 'DELETE', '/mcp', { Authorization: `Bearer ${TOKEN_ALICE}` }));
+    assert.equal(r.status, 400);
+    assert.equal(r.body, 'Missing mcp-session-id header');
   });
 
   test('no token value leaked into any captured response body, response header, or stderr', () => {
@@ -376,5 +432,96 @@ describe('streamable HTTP gating - per-IP separation for anonymous callers', () 
       toolsListRequest(),
     );
     assert.equal(crossedIdentity.status, 403, 'a session opened under one anonymous identity must reject a request whose recomputed identity differs');
+  });
+});
+
+describe('streamable HTTP gating - idle session reaper', () => {
+  let ctx: RawServerHandle;
+
+  before(async () => {
+    // Idle bound and sweep cadence both shrunk far below their real defaults
+    // (10 minutes / 60 seconds) so this test proves the reaper in under a
+    // second instead of sleeping anywhere near the production window. The
+    // worst case for when a sweep can first observe this session as idle is
+    // roughly idleMs + sweepMs after creation (a sweep tick can land just
+    // before the session is created); the wait below is 2x that worst case.
+    ctx = await spawnServer({ ...AUTH_ENV, VECTOR_MCP_SESSION_IDLE_MS: '400', VECTOR_MCP_SESSION_SWEEP_MS: '100' });
+  });
+
+  after(async () => {
+    await stopRawServer(ctx);
+  });
+
+  test('a session idle past the threshold is reaped on the next sweep; the maps drain the same way DELETE does', async () => {
+    const init = await postMcp(ctx.port, { Authorization: `Bearer ${TOKEN_ALICE}` }, initializeRequest());
+    assert.equal(init.status, 200);
+    const sessionId = init.headers['mcp-session-id'] as string | undefined;
+    assert.ok(sessionId);
+
+    // No request of any kind against this session in between - lastSeen never
+    // bumps, so it goes idle starting from the moment initialize returned.
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1000));
+
+    const followUp = await postMcp(
+      ctx.port,
+      { Authorization: `Bearer ${TOKEN_ALICE}`, 'mcp-session-id': sessionId! },
+      toolsListRequest(),
+    );
+    assert.equal(followUp.status, 404, 'an idle-reaped session must 404 - streamableTransports/streamableIdentities drained, same observable proof as the DELETE case');
+  });
+});
+
+describe('streamable HTTP gating - per-identity session cap', () => {
+  let ctx: RawServerHandle;
+
+  before(async () => {
+    // Cap shrunk to 2 so the third session for the same identity is enough to
+    // force an eviction, well within a hermetic test's budget.
+    ctx = await spawnServer({ ...AUTH_ENV, VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY: '2' });
+  });
+
+  after(async () => {
+    await stopRawServer(ctx);
+  });
+
+  test('opening a session beyond the per-identity cap evicts the oldest; the newest sessions survive', async () => {
+    const first = await postMcp(ctx.port, { Authorization: `Bearer ${TOKEN_ALICE}` }, initializeRequest());
+    assert.equal(first.status, 200);
+    const firstId = first.headers['mcp-session-id'] as string | undefined;
+    assert.ok(firstId);
+
+    const second = await postMcp(ctx.port, { Authorization: `Bearer ${TOKEN_ALICE}` }, initializeRequest());
+    assert.equal(second.status, 200);
+    const secondId = second.headers['mcp-session-id'] as string | undefined;
+    assert.ok(secondId);
+    assert.notEqual(secondId, firstId);
+
+    // alice is now at the cap (2 live sessions). A third session for the SAME
+    // identity must evict the oldest (first) before it is created.
+    const third = await postMcp(ctx.port, { Authorization: `Bearer ${TOKEN_ALICE}` }, initializeRequest());
+    assert.equal(third.status, 200);
+    const thirdId = third.headers['mcp-session-id'] as string | undefined;
+    assert.ok(thirdId);
+
+    const firstFollowUp = await postMcp(
+      ctx.port,
+      { Authorization: `Bearer ${TOKEN_ALICE}`, 'mcp-session-id': firstId! },
+      toolsListRequest(),
+    );
+    assert.equal(firstFollowUp.status, 404, 'the oldest session must have been evicted once the identity hit its session cap');
+
+    const secondFollowUp = await postMcp(
+      ctx.port,
+      { Authorization: `Bearer ${TOKEN_ALICE}`, 'mcp-session-id': secondId! },
+      toolsListRequest(),
+    );
+    assert.equal(secondFollowUp.status, 200, 'the second-oldest session must still be alive');
+
+    const thirdFollowUp = await postMcp(
+      ctx.port,
+      { Authorization: `Bearer ${TOKEN_ALICE}`, 'mcp-session-id': thirdId! },
+      toolsListRequest(),
+    );
+    assert.equal(thirdFollowUp.status, 200, 'the newest session must still be alive');
   });
 });

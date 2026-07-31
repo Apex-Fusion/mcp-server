@@ -54,6 +54,79 @@ const transports = new Map<string, SSEServerTransport>();
 const sessionIdentities = new Map<string, string>();
 const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
 const streamableIdentities = new Map<string, string>();
+// Last activity per /mcp session, bumped on every request that resolves to a
+// session (initialize, and every subsequent handleRequest). The SSE pair
+// self-limits - a dropped socket fires res.on('close') and drains its maps
+// with no help from us. /mcp has no such signal: a caller can POST
+// initialize, take the session id, and drop the connection without ever
+// sending DELETE. Nothing in the SDK notices - the transport, its McpServer,
+// and its 24 registered tools sit in memory until process exit. This map
+// plus the reaper below is what bounds that.
+const streamableLastSeen = new Map<string, number>();
+
+// Upper bound on concurrent /mcp sessions per identity. A caller that forgets
+// to DELETE self-bounds instead of leaking sessions forever, and a flood of
+// anon:<ip> sessions from one source cannot grow past this many concurrent
+// ones. A GLOBAL cap is the reverse-proxy/network tier's job (clientIpOf's
+// trust-model docstring in auth.ts is explicit about that split - this
+// server trusts exactly one upstream proxy hop); this is the app-layer
+// bound, same philosophy as the per-identity rate limiter in
+// vector/rate-limiter.ts. Exported for visibility/tests; production tuning
+// is via the env var, since index.ts is an executable entrypoint (importing
+// it boots a real server as a side effect) rather than something a test can
+// import and reconfigure in-process.
+export const MAX_SESSIONS_PER_IDENTITY = parseInt(process.env.VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY || '32');
+
+// Idle bound: a session with no request for this long is reaped on the next
+// sweep, regardless of whether DELETE ever arrives. Default 10 minutes -
+// generous for a real client mid-conversation, short enough that an
+// abandoned session does not outlive the process.
+const STREAMABLE_SESSION_IDLE_MS = parseInt(process.env.VECTOR_MCP_SESSION_IDLE_MS || String(10 * 60 * 1000));
+// Sweep cadence, kept separate from the idle bound so a hermetic test can
+// shrink both independently without waiting anywhere near the real idle
+// window.
+const STREAMABLE_SESSION_SWEEP_MS = parseInt(process.env.VECTOR_MCP_SESSION_SWEEP_MS || '60000');
+
+/**
+ * Closes a /mcp session and drains it from every map, from any trigger other
+ * than the SDK's own DELETE handling (the idle reaper, and the per-identity
+ * cap's eviction of the oldest session). transport.close() drives our own
+ * transport.onclose callback below (which already deletes the same three
+ * keys) - the explicit deletes here are belt-and-suspenders so a caller of
+ * this function can rely on the maps being drained even if that callback
+ * were ever missing or delayed.
+ */
+async function closeStreamableSession(sessionId: string): Promise<void> {
+  const transport = streamableTransports.get(sessionId);
+  if (transport) {
+    try {
+      await transport.close();
+    } catch (err) {
+      console.error(`Error closing Streamable HTTP session ${sessionId}:`, (err as Error).message);
+    }
+  }
+  streamableTransports.delete(sessionId);
+  streamableIdentities.delete(sessionId);
+  streamableLastSeen.delete(sessionId);
+}
+
+// The idle reaper. unref()'d so it never holds the process open on its own
+// (matches every other background timer in this process - there are none
+// today, but the convention is set here for the next one), and cleared on
+// the http server's own 'close' event so a test that spawns and kills many
+// server processes never leaks a live interval into a process that outlives
+// the test itself.
+const streamableReapInterval = setInterval(() => {
+  const now = Date.now();
+  const idleSessionIds: string[] = [];
+  for (const [sessionId, lastSeen] of streamableLastSeen) {
+    if (now - lastSeen > STREAMABLE_SESSION_IDLE_MS) idleSessionIds.push(sessionId);
+  }
+  for (const sessionId of idleSessionIds) {
+    void closeStreamableSession(sessionId);
+  }
+}, STREAMABLE_SESSION_SWEEP_MS);
+streamableReapInterval.unref();
 
 const httpServer = createServer(async (req, res) => {
   const url = new URL(req.url!, `http://localhost:${PORT}`);
@@ -123,6 +196,7 @@ const httpServer = createServer(async (req, res) => {
         res.end('This session belongs to a different identity.');
         return;
       }
+      streamableLastSeen.set(sessionId, Date.now());
       await transport.handleRequest(req, res);
       return;
     }
@@ -130,6 +204,25 @@ const httpServer = createServer(async (req, res) => {
       res.writeHead(400, { 'Content-Type': 'text/plain' });
       res.end('Missing mcp-session-id header');
       return;
+    }
+    // Per-identity session cap: evict the identity's oldest session before
+    // creating one more, so a caller that keeps calling initialize without
+    // ever sending DELETE cannot grow this identity's session count past
+    // MAX_SESSIONS_PER_IDENTITY.
+    const identitySessionIds = [...streamableIdentities.entries()]
+      .filter(([, identity]) => identity === auth.identity)
+      .map(([sid]) => sid);
+    if (identitySessionIds.length > 0 && identitySessionIds.length >= MAX_SESSIONS_PER_IDENTITY) {
+      let oldestSessionId = identitySessionIds[0];
+      let oldestLastSeen = streamableLastSeen.get(oldestSessionId) ?? 0;
+      for (const sid of identitySessionIds) {
+        const lastSeen = streamableLastSeen.get(sid) ?? 0;
+        if (lastSeen < oldestLastSeen) {
+          oldestLastSeen = lastSeen;
+          oldestSessionId = sid;
+        }
+      }
+      await closeStreamableSession(oldestSessionId);
     }
     // No session header on a POST: treat as an initialization request. The SDK
     // enforces the rest (a non-initialize body without a session is rejected by
@@ -139,17 +232,32 @@ const httpServer = createServer(async (req, res) => {
       onsessioninitialized: (sid) => {
         streamableTransports.set(sid, transport);
         streamableIdentities.set(sid, auth.identity);
+        streamableLastSeen.set(sid, Date.now());
       },
       onsessionclosed: (sid) => {
         streamableTransports.delete(sid);
         streamableIdentities.delete(sid);
+        streamableLastSeen.delete(sid);
       },
     });
     transport.onclose = () => {
+      // Fires on every close, not just DELETE. handleDeleteRequest (the
+      // SDK's own webStandardStreamableHttp.js) calls onsessionclosed above
+      // AND this callback in the same request, so on that path the two are
+      // redundant with each other. But onsessionclosed is wired into the SDK
+      // exclusively from that DELETE handler - it is never invoked for an
+      // abrupt disconnect, and never invoked by a direct transport.close()
+      // call. The idle reaper and the per-identity cap eviction above both
+      // call transport.close() directly (via closeStreamableSession), which
+      // drives only this callback. This is therefore the one drain path
+      // every teardown route - DELETE, idle reaper, and cap eviction alike -
+      // actually shares; onsessionclosed only ever adds coverage for DELETE,
+      // which this callback already has.
       const sid = transport.sessionId;
       if (sid) {
         streamableTransports.delete(sid);
         streamableIdentities.delete(sid);
+        streamableLastSeen.delete(sid);
       }
     };
     const session = createMcpServer(auth.identity);
@@ -168,4 +276,8 @@ httpServer.listen(PORT, () => {
 httpServer.on('error', (err: Error) => {
   console.error('Fatal error in HTTP server:', err.message);
   process.exit(1);
+});
+
+httpServer.on('close', () => {
+  clearInterval(streamableReapInterval);
 });
