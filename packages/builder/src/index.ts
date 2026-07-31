@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 import { existsSync } from 'fs';
 import { createServer } from 'http';
+import { randomUUID } from 'node:crypto';
 
 // Get directory name for ES module
 const __filename = fileURLToPath(import.meta.url);
@@ -25,6 +26,7 @@ if (existsSync(envPath)) {
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { registerVectorTools } from "./vector/index.js";
 import { loadAuthConfig, resolveIdentity, clientIpOf } from "./auth.js";
 
@@ -50,6 +52,8 @@ if (authConfig.enabled) {
 const PORT = parseInt(process.env.PORT || '3000');
 const transports = new Map<string, SSEServerTransport>();
 const sessionIdentities = new Map<string, string>();
+const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
+const streamableIdentities = new Map<string, string>();
 
 const httpServer = createServer(async (req, res) => {
   const url = new URL(req.url!, `http://localhost:${PORT}`);
@@ -96,6 +100,61 @@ const httpServer = createServer(async (req, res) => {
       return;
     }
     await transport.handlePostMessage(req, res);
+  } else if (url.pathname === '/mcp') {
+    // Modern Streamable HTTP transport (MCP spec: SSE is deprecated). Same auth
+    // gate and the same invariant as the SSE pair: a valid token for identity A
+    // must not be able to drive identity B's session.
+    const auth = resolveIdentity(req.headers.authorization, authConfig, clientIpOf(req));
+    if (!auth.ok) {
+      res.writeHead(401, { 'Content-Type': 'text/plain', 'WWW-Authenticate': 'Bearer' });
+      res.end(auth.reason);
+      return;
+    }
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    if (sessionId) {
+      const transport = streamableTransports.get(sessionId);
+      if (!transport) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Session not found');
+        return;
+      }
+      if (streamableIdentities.get(sessionId) !== auth.identity) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('This session belongs to a different identity.');
+        return;
+      }
+      await transport.handleRequest(req, res);
+      return;
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      res.end('Missing mcp-session-id header');
+      return;
+    }
+    // No session header on a POST: treat as an initialization request. The SDK
+    // enforces the rest (a non-initialize body without a session is rejected by
+    // the transport itself; the unstored transport is then garbage).
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (sid) => {
+        streamableTransports.set(sid, transport);
+        streamableIdentities.set(sid, auth.identity);
+      },
+      onsessionclosed: (sid) => {
+        streamableTransports.delete(sid);
+        streamableIdentities.delete(sid);
+      },
+    });
+    transport.onclose = () => {
+      const sid = transport.sessionId;
+      if (sid) {
+        streamableTransports.delete(sid);
+        streamableIdentities.delete(sid);
+      }
+    };
+    const session = createMcpServer(auth.identity);
+    await session.connect(transport);
+    await transport.handleRequest(req, res);
   } else {
     res.writeHead(404);
     res.end('Not found');
