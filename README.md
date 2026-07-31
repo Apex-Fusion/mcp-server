@@ -15,35 +15,41 @@ Hosted instances run on both networks, exposing all 24 tools:
 | Mainnet | `https://mcp.vector.mainnet.apexfusion.org/sse` |
 | Testnet | `https://mcp.vector.testnet.apexfusion.org/sse` |
 
-> **Deployment status differs by network.** Testnet auto-deploys from `main` on every merge, so
-> it tracks this codebase closely. **Mainnet stays on its last custodial image until a
-> deliberate cutover deploy ships** - that deploy is a separate, future step, not automatic and
-> not implied by any merge (see [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md),
-> section 11, "Rollout"). Until it ships, treat the mainnet instance's signing tools as
-> custodial: assume they may still accept a mnemonic as a tool-call parameter, and prefer
-> self-hosting this release or the testnet instance instead.
+> **Deployment status: both networks are current.** Both hosted instances run today's
+> completed migration: testnet since the 2026-07-31 morning merges (auto-deployed from
+> `main`), mainnet since a deliberate cutover deploy the same day (see
+> [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md), section
+> 11, "Rollout", for the full history). **Both hosted instances currently require a bearer
+> token from the operators to connect** - that is an access control, not a custody one:
+> neither instance accepts a mnemonic from any caller, token or not. Open public access
+> (per-IP rate limiting, no token required) is a planned follow-up, not yet shipped. Self-host
+> this release for tokenless access today.
 
-Connect from Claude Code in one command (testnet shown - swap in the mainnet URL once the
-cutover deploy described above ships):
+Connect from Claude Code in one command. Both hosted instances require a bearer token from the
+operators (contact the Apex Fusion team for one):
 
 ```bash
-claude mcp add --transport sse vector-mcp https://mcp.vector.testnet.apexfusion.org/sse
+claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse \
+  --header "Authorization: Bearer <your-token>"
 ```
 
-> **Security notice: as of this release, the non-custodial migration is complete in this
-> codebase.** No tool in this repository accepts a mnemonic, private key, or any other key
-> material. Every `build_*` tool constructs an unsigned transaction from a wallet *address*
-> only, and every signing operation happens locally on your own machine, through the local
-> signer companion. Broadcast the signed result with `vector_submit_transaction` - your seed
-> phrase never leaves your machine, and no server running this release ever holds one. This is
-> enforced mechanically in the code, not just by convention: the builder's custody boundary test
-> scans every source file for key-material vocabulary against an allowlist that is now empty and
-> pinned at size zero, so a future change cannot silently reintroduce a mnemonic parameter
-> without failing that test by name.
-> **This is a claim about the code, not about every deployment of it** - see the deployment
-> status note above the connect command, and
+Self-hosting (below) needs no token and gives every caller open access to your own instance.
+
+> **Security notice: the non-custodial migration is complete, in this codebase and on both
+> hosted instances, as of the 2026-07-31 cutover deploy.** No tool in this repository accepts a
+> mnemonic, private key, or any other key material. Every `build_*` tool constructs an unsigned
+> transaction from a wallet *address* only, and every signing operation happens locally on your
+> own machine, through the local signer companion. Broadcast the signed result with
+> `vector_submit_transaction` - your seed phrase never leaves your machine, and no server
+> running this release ever holds one. This is enforced mechanically in the code, not just by
+> convention: the builder's custody boundary test scans every source file for key-material
+> vocabulary against an allowlist that is now empty and pinned at size zero, so a future change
+> cannot silently reintroduce a mnemonic parameter without failing that test by name.
+> **This describes this release and the 2026-07-31 deploy specifically** - a later deploy is a
+> separate operational action, not automatically covered by this notice; see the deployment
+> status note above and
 > [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md) for the
-> full rollout plan.
+> full rollout history.
 
 Self-hosting instructions are below.
 

@@ -165,10 +165,11 @@ over-counts, which refuses too much rather than too little.
   and the smoke tests above). **Nothing is left open in the code: this was the last custodial
   family.** The non-custodial migration described in
   [`docs/architecture/non-custodial-split.md`](../../docs/architecture/non-custodial-split.md)
-  is complete in this codebase. It is not yet complete on every deployment: the mainnet hosted
-  instance stays on its last custodial image until a deliberate cutover deploy ships (see that
-  document's rollout section). Until then, pair this signer with a self-hosted or testnet
-  builder if you want the guarantee above to actually hold - not the mainnet one.
+  is complete in this codebase, and as of the 2026-07-31 cutover deploy, on both hosted
+  instances too: pair this signer with a self-hosted builder, the testnet instance, or the
+  mainnet instance now, since any of them running the 2026-07-31 deploy or later carries the
+  guarantee above. Both hosted instances currently require a bearer token from the operators
+  to connect - that is an access control, separate from the custody guarantee above.
 
 ## Running it
 
@@ -195,11 +196,10 @@ example):
 ```
 
 Register it alongside the builder so an agent has both sets of tools available. This pairing
-keeps your mnemonic off any server running this release, for every family it exposes: wallet,
-transaction, smart-contract, agent-registry, and self-improvement alike - as long as that
-server is actually running this release. The mainnet hosted instance is not, yet: see the
-deployment status note in the root README before assuming this covers it. See the last bullet
-under Known limitations above for the full evidence.
+keeps your mnemonic off any server running the 2026-07-31 deploy or later, for every family it
+exposes: wallet, transaction, smart-contract, agent-registry, and self-improvement alike. Both
+hosted instances qualify now, and so does any self-hosted deployment of this release. See the
+last bullet under Known limitations above for the full evidence.
 
 ## Testing
 
