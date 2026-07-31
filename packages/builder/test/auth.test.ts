@@ -341,6 +341,18 @@ describe('clientIpOf', () => {
   test('an empty rightmost entry falls back rather than yielding an empty identity', () => {
     assert.equal(clientIpOf(mk('203.0.113.50,', '10.0.0.1')), '10.0.0.1');
   });
+
+  test('strips a trailing port suffix from IPv4 and bracketed IPv6; unbracketed IPv6 is left intact', () => {
+    // The trusted proxy SHOULD emit a bare address, but a port suffix is stripped
+    // defensively so a proxy that includes the ephemeral source port doesn't
+    // fragment one client across many rate-limit buckets.
+    assert.equal(clientIpOf(mk('203.0.113.50:8080')), '203.0.113.50');
+    assert.equal(clientIpOf(mk('[2001:db8::1]:8080')), '2001:db8::1');
+    assert.equal(clientIpOf(mk('[2001:db8::1]')), '2001:db8::1');
+    // Unbracketed IPv6 has no unambiguous port delimiter - its own colons must
+    // never be mistaken for one.
+    assert.equal(clientIpOf(mk('2001:db8::1')), '2001:db8::1');
+  });
 });
 
 describe('resolveIdentity with auth disabled (per-IP anonymous buckets)', () => {

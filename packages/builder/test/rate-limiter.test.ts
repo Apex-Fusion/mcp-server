@@ -121,15 +121,29 @@ describe('limiter registry cap', () => {
   test('evicts the least-recently-used identity at the cap, and refresh-on-access protects active callers', () => {
     resetLimiters();
     const first = limiterFor('keeper');
-    for (let i = 0; i < MAX_TRACKED_IDENTITIES - 1; i++) limiterFor(`filler-${i}`);
+    // Captured at the moment filler-0 is created, so it can be compared against
+    // (not just type-checked against) whatever limiterFor('filler-0') returns
+    // after the overflow below - see the comment on that assertion for why a
+    // same-object check is the load-bearing part of this test.
+    const originalFillerZero = limiterFor('filler-0');
+    for (let i = 1; i < MAX_TRACKED_IDENTITIES - 1; i++) limiterFor(`filler-${i}`);
     // registry is now exactly at the cap; 'keeper' is the oldest by insertion.
     assert.equal(limiterFor('keeper'), first, 'accessing keeper must refresh its recency, not evict it');
     limiterFor('overflow-1'); // evicts filler-0 (now the oldest), NOT keeper
     assert.equal(limiterFor('keeper'), first, 'keeper must survive the overflow eviction');
-    // filler-0 was evicted: asking for it again yields a FRESH instance (budget reset - the
-    // documented memory-bound trade).
-    const refilled = limiterFor('filler-0');
-    assert.ok(refilled instanceof RateLimiter);
+    // filler-0 was evicted: asking for it again must yield a FRESH instance (budget
+    // reset - the documented memory-bound trade), not the object captured above.
+    // An `instanceof RateLimiter` check alone cannot tell "evicted, this is a new
+    // one" apart from "never evicted, this is still the same one" - limiterFor's
+    // return type already guarantees instanceof, so that check passes whether or
+    // not eviction actually ran. Proven by mutation test: deleting the cap-eviction
+    // block in limiterFor left the old assertion green (see task-1-report.md for
+    // the recorded failure output of THIS assertion against that mutation).
+    assert.notEqual(
+      limiterFor('filler-0'),
+      originalFillerZero,
+      'filler-0 must be a FRESH instance - eviction really happened and its budget reset'
+    );
     resetLimiters();
   });
 });
