@@ -133,6 +133,24 @@ describe('buildSendApex', () => {
     await assert.rejects(() => buildSendApex(lucid, { recipientAddress: FOREIGN_ADDRESS, amountApex: 0 }), /positive/);
     await assert.rejects(() => buildSendApex(lucid, { recipientAddress: FOREIGN_ADDRESS, amountApex: -5 }), /positive/);
   });
+
+  test('pins exact lovelace at the call site for a fractional amount float math gets wrong', async () => {
+    // 1.005 * 1_000_000 === 1004999.9999999999 in IEEE-754 (node -e
+    // "console.log(Math.floor(1.005*1e6))" -> 1004999, one lovelace short of
+    // the correct 1005000; see packages/shared/test/tx.test.ts for the full
+    // empirical proof). apexToLovelace itself is already proven exact there -
+    // this test instead pins that buildSendApex's call site actually invokes
+    // it, so a future edit reverting to Math.floor(amountApex * 1_000_000)
+    // fails HERE, not just in an untouched helper's own unit tests.
+    const r = await buildSendApex(lucid, { recipientAddress: FOREIGN_ADDRESS, amountApex: 1.005 });
+    const outs = decodeOutputs(r.txCbor);
+    const toRecipient = outs.filter((o) => o.address === FOREIGN_ADDRESS);
+    assert.equal(toRecipient.length, 1);
+    assert.equal(
+      toRecipient[0].lovelace, 1_005_000n,
+      'lost a lovelace - buildSendApex must call apexToLovelace, not Math.floor(amountApex * 1_000_000)',
+    );
+  });
 });
 
 describe('buildSendTokens', () => {
@@ -179,6 +197,39 @@ describe('buildSendTokens', () => {
         recipientAddress: FOREIGN_ADDRESS, policyId: FIXTURE_TOKEN_UNIT.slice(0, 56), assetName: '', amount: '0',
       }),
       /positive/,
+    );
+  });
+
+  test('pins exact lovelace at the call site on the apexAmount path for a fractional amount float math gets wrong', async () => {
+    // Same defect class as buildSendApex's pin above, but 1.005 AP3X
+    // (1,005,000 lovelace) turned out to be BELOW this output's actual
+    // min-UTxO once it carries a native asset - Lucid silently bumped it to
+    // 1,043,020 during .complete(), which would have made this test measure
+    // ledger dust-floor behavior instead of the float-conversion bug it
+    // exists to pin (confirmed empirically: that bump reproduces regardless
+    // of amountApex's exactness, so it is not this defect). Reused the
+    // endorse test's already-verified defect value instead - comfortably
+    // above min-UTxO here too, since the existing 2,000,000n default (see
+    // 'moves the token...' above) is already sufficient for this same
+    // single-token output shape:
+    // 8.03 * 1_000_000 === 8029999.999999999 in IEEE-754 (node -e
+    // "console.log(Math.floor(8.03*1e6))" -> 8029999, one lovelace short of
+    // the correct 8030000). This is the apexAmount branch's OWN call site
+    // (build.ts's buildSendTokens, not buildSendApex), so it needs its own
+    // pin; a shared helper test cannot prove either caller wires it up.
+    const r = await buildSendTokens(lucid, {
+      recipientAddress: FOREIGN_ADDRESS,
+      policyId: FIXTURE_TOKEN_UNIT.slice(0, 56),
+      assetName: FIXTURE_TOKEN_UNIT.slice(56),
+      amount: '50',
+      apexAmount: 8.03,
+    });
+    const outs = decodeOutputs(r.txCbor);
+    const toRecipient = outs.find((o) => o.address === FOREIGN_ADDRESS);
+    assert.ok(toRecipient, 'no output to recipient');
+    assert.equal(
+      toRecipient.lovelace, 8_030_000n,
+      'lost a lovelace - buildSendTokens apexAmount path must call apexToLovelace, not Math.floor(apexAmount * 1_000_000)',
     );
   });
 });
