@@ -121,7 +121,7 @@ describe('buildRegisterAgent (real validator, offline)', () => {
 
   test('builds an evaluable register tx: mint +1, deposit output, inline datum, owner signer', async () => {
     const r = await buildRegisterAgent(lucid, {
-      changeAddress: OWN_ADDRESS, name: 'UnitAgent', description: 'unit test agent',
+      name: 'UnitAgent', description: 'unit test agent',
       capabilities: ['testing', 'ci'], framework: 'custom', endpoint: '',
     });
     const tx = decodeTx(r.txCbor);
@@ -172,16 +172,23 @@ describe('buildRegisterAgent (real validator, offline)', () => {
 
   test('rejects invalid endpoint and empty capability before building', async () => {
     await assert.rejects(buildRegisterAgent(lucid, {
-      changeAddress: OWN_ADDRESS, name: 'X', description: '', capabilities: [], framework: 'c', endpoint: 'not a url',
+      name: 'X', description: '', capabilities: [], framework: 'c', endpoint: 'not a url',
     }), /Invalid endpoint URL/);
     await assert.rejects(buildRegisterAgent(lucid, {
-      changeAddress: OWN_ADDRESS, name: 'X', description: '', capabilities: ['ok', ' '], framework: 'c', endpoint: '',
+      name: 'X', description: '', capabilities: ['ok', ' '], framework: 'c', endpoint: '',
     }), /capability/i);
   });
 
   test('rejects a script-credential changeAddress with a clear error', async () => {
-    await assert.rejects(buildRegisterAgent(lucid, {
-      changeAddress: getRegistryAddress(), name: 'X', description: '', capabilities: [], framework: 'c', endpoint: '',
+    // Pre-refactor this test passed a script-address changeAddress param that
+    // disagreed with `lucid`'s own wallet (OWN_ADDRESS) - exactly the
+    // mismatch class this refactor makes unrepresentable. Now it must
+    // construct a lucid instance FOR the script address itself, so the
+    // derived changeAddress (== lucid.wallet().address()) is the one that
+    // paymentKeyHashOf rejects.
+    const scriptLucid = await lucidForAddress(new FixtureProvider([REGISTRY_UTXO]), getRegistryAddress());
+    await assert.rejects(buildRegisterAgent(scriptLucid, {
+      name: 'X', description: '', capabilities: [], framework: 'c', endpoint: '',
     }), /verification key|payment key/i);
   });
 });
@@ -191,7 +198,7 @@ describe('buildMessageAgent (resolves via fixture registry UTxO)', () => {
     const provider = new FixtureProvider([...FIXTURE_UTXOS, REGISTRY_UTXO]);
     const lucid = await lucidForAddress(provider, OWN_ADDRESS);
     const r = await buildMessageAgent(lucid, provider, {
-      changeAddress: OWN_ADDRESS, agentId: AGENT_DID, messageType: 'inquiry', payload: 'unit ping',
+      agentId: AGENT_DID, messageType: 'inquiry', payload: 'unit ping',
     });
     assert.equal(r.agentName, 'FixtureAgent');
     const tx = decodeTx(r.txCbor);
@@ -219,7 +226,7 @@ describe('buildMessageAgent (resolves via fixture registry UTxO)', () => {
     const provider = new FixtureProvider(FIXTURE_UTXOS); // no registry UTxO
     const lucid = await lucidForAddress(provider, OWN_ADDRESS);
     await assert.rejects(buildMessageAgent(lucid, provider, {
-      changeAddress: OWN_ADDRESS, agentId: AGENT_DID, messageType: 'inquiry', payload: 'x',
+      agentId: AGENT_DID, messageType: 'inquiry', payload: 'x',
     }), /Agent not found/);
   });
 });
@@ -254,7 +261,7 @@ describe('registry owner ops (real validator, offline)', () => {
     const provider = ownedProvider();
     const lucid = await lucidForAddress(provider, OWN_ADDRESS);
     const r = await buildUpdateAgent(lucid, provider, {
-      changeAddress: OWN_ADDRESS, agentId: AGENT_DID, description: 'updated by unit test',
+      agentId: AGENT_DID, description: 'updated by unit test',
     });
     assert.equal(r.op, 'update');
     assert.equal(r.detail, 'description');
@@ -281,7 +288,7 @@ describe('registry owner ops (real validator, offline)', () => {
     const provider = ownedProvider();
     const lucid = await lucidForAddress(provider, OWN_ADDRESS);
     await assert.rejects(buildUpdateAgent(lucid, provider, {
-      changeAddress: OWN_ADDRESS, agentId: AGENT_DID,
+      agentId: AGENT_DID,
     }), /At least one field/);
   });
 
@@ -299,7 +306,7 @@ describe('registry owner ops (real validator, offline)', () => {
     ]);
     const strangerLucid = await lucidForAddress(strangerProvider, stranger);
     await assert.rejects(buildUpdateAgent(strangerLucid, strangerProvider, {
-      changeAddress: stranger, agentId: AGENT_DID, description: 'hijack attempt',
+      agentId: AGENT_DID, description: 'hijack attempt',
     }), /Ownership check failed/);
   });
 
@@ -309,7 +316,7 @@ describe('registry owner ops (real validator, offline)', () => {
     const newOwnerHash = '11'.repeat(28);
     const newOwner = credentialToAddress('Mainnet', { type: 'Key', hash: newOwnerHash });
     const r = await buildTransferAgent(lucid, provider, {
-      changeAddress: OWN_ADDRESS, agentId: AGENT_DID, newOwnerAddress: newOwner,
+      agentId: AGENT_DID, newOwnerAddress: newOwner,
     });
     assert.equal(r.op, 'transfer');
     const tx = decodeTx(r.txCbor);
@@ -324,7 +331,7 @@ describe('registry owner ops (real validator, offline)', () => {
     assert.equal(p.name, 'FixtureAgent'); // everything else preserved
     // script-credential new owner refused
     await assert.rejects(buildTransferAgent(lucid, provider, {
-      changeAddress: OWN_ADDRESS, agentId: AGENT_DID, newOwnerAddress: getRegistryAddress(),
+      agentId: AGENT_DID, newOwnerAddress: getRegistryAddress(),
     }), /verification key/i);
   });
 
@@ -332,7 +339,7 @@ describe('registry owner ops (real validator, offline)', () => {
     const provider = ownedProvider();
     const lucid = await lucidForAddress(provider, OWN_ADDRESS);
     const r = await buildDeregisterAgent(lucid, provider, {
-      changeAddress: OWN_ADDRESS, agentId: AGENT_DID,
+      agentId: AGENT_DID,
     });
     assert.equal(r.op, 'deregister');
     assert.equal(r.agentName, 'FixtureAgent');
@@ -345,6 +352,25 @@ describe('registry owner ops (real validator, offline)', () => {
       assert.equal(outs.get(i).address().to_bech32(), OWN_ADDRESS);
     }
     assert.ok(tx.body().mint(), 'no mint (burn) field on the deregister tx');
+  });
+
+  test('deregister picks the LARGEST pure-AP3X wallet UTxO as the extra input', async () => {
+    const small = { txHash: 'a1'.repeat(32), outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 3_000_000n } };
+    const large = { txHash: 'a2'.repeat(32), outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 900_000_000n } };
+    // small listed FIRST so first-match selection would pick it
+    const provider = new FixtureProvider([small, large, REGISTRY_UTXO]);
+    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
+    const r = await buildDeregisterAgent(lucid, provider, { agentId: AGENT_DID });
+    const tx = CML.Transaction.from_cbor_hex(r.txCbor);
+    const ins = tx.body().inputs();
+    let sawLarge = false, sawSmall = false;
+    for (let i = 0; i < ins.len(); i++) {
+      const h = ins.get(i).transaction_id().to_hex();
+      if (h === 'a2'.repeat(32)) sawLarge = true;
+      if (h === 'a1'.repeat(32)) sawSmall = true;
+    }
+    assert.ok(sawLarge, 'largest pure-AP3X UTxO must be the chosen extra input');
+    assert.ok(!sawSmall, 'the smaller pure-AP3X UTxO must not be chosen over the larger');
   });
 });
 
@@ -368,7 +394,7 @@ describe('registry owner ops - value preservation & deregister floor (correction
     const provider = new FixtureProvider([...FIXTURE_UTXOS, overfunded]);
     const lucid = await lucidForAddress(provider, OWN_ADDRESS);
     const r = await buildUpdateAgent(lucid, provider, {
-      changeAddress: OWN_ADDRESS, agentId: AGENT_DID, description: 'overfunded update',
+      agentId: AGENT_DID, description: 'overfunded update',
     });
     assert.equal(r.op, 'update');
     const tx = decodeTx(r.txCbor);
@@ -388,7 +414,7 @@ describe('registry owner ops - value preservation & deregister floor (correction
     const newOwnerHash = '22'.repeat(28);
     const newOwner = credentialToAddress('Mainnet', { type: 'Key', hash: newOwnerHash });
     const r = await buildTransferAgent(lucid, provider, {
-      changeAddress: OWN_ADDRESS, agentId: AGENT_DID, newOwnerAddress: newOwner,
+      agentId: AGENT_DID, newOwnerAddress: newOwner,
     });
     assert.equal(r.op, 'transfer');
     const tx = decodeTx(r.txCbor);
@@ -423,6 +449,15 @@ describe('registry owner ops - value preservation & deregister floor (correction
       .complete();
     const tx = decodeTx(completed.toCBOR());
     assert.equal(tx.body().inputs().len(), 1, 'sole input - Lucid should not need to pull in any extra wallet UTxO here');
+
+    // Pin: buildDeregisterAgent's returned `detail` is the ACTUAL spent
+    // registry UTxO lovelace (25 AP3X here), not the MIN_AP3X_DEPOSIT
+    // constant. Goes through buildDeregisterAgent itself (unlike the direct
+    // build above), which is safe here because the provider also carries
+    // FIXTURE_UTXOS, so the extra fee UTxO that path unconditionally pulls in
+    // is available.
+    const r = await buildDeregisterAgent(lucid, provider, { agentId: AGENT_DID });
+    assert.equal(r.detail, '25000000', 'detail must be the spent registry UTxO lovelace, not the constant');
   });
 
   test('deregister throws an actionable error (not a validator crash) when the wallet has no plain AP3X-only UTxO', async () => {
@@ -433,7 +468,7 @@ describe('registry owner ops - value preservation & deregister floor (correction
     const provider = new FixtureProvider([tokenOnlyUtxo, REGISTRY_UTXO]);
     const lucid = await lucidForAddress(provider, OWN_ADDRESS);
     await assert.rejects(buildDeregisterAgent(lucid, provider, {
-      changeAddress: OWN_ADDRESS, agentId: AGENT_DID,
+      agentId: AGENT_DID,
     }), /AP3X-only UTxO/);
   });
 });

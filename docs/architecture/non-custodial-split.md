@@ -121,7 +121,7 @@ interface Policy {
 
 **Accepted trade-off of the 4-call shape:** the signer records **intent to spend** at signing time, not confirmed submission. If a submit later fails, the audit log over-counts. Conservative, therefore acceptable — and it is the price of the signer having no network access. Documented, not hidden.
 
-### Two-step governance flow
+### Two-step self-improvement flow
 
 `submit_proposal` is a lock-then-spend pair with a confirmation wait between. Keyless, that orchestration becomes explicit:
 
@@ -130,7 +130,7 @@ build_self_improvement_proposal_lock → sign → submit → await_transaction
   → build_self_improvement_proposal_spend(lockTxHash) → sign → submit
 ```
 
-This is why governance is the last family: the LLM must drive a stateful, multi-transaction sequence.
+This is why self-improvement is the last family: the LLM must drive a stateful, multi-transaction sequence.
 
 ## 7. Tool inventory
 
@@ -142,7 +142,7 @@ This is why governance is the last family: the LLM must drive a stateful, multi-
 | Build — tx (3) | `build_send_apex`, `build_send_tokens`, `build_transaction` |
 | Build — contracts (2) | `build_deploy_contract`, `build_interact_contract` |
 | Build — registry (5) | `build_register_agent`, `build_update_agent`, `build_transfer_agent`, `build_deregister_agent`, `build_message_agent` |
-| Build — governance (4) | `build_self_improvement_proposal_lock`, `build_self_improvement_proposal_spend`, `build_self_improvement_critique`, `build_self_improvement_endorse` |
+| Build — self-improvement (4) | `build_self_improvement_proposal_lock`, `build_self_improvement_proposal_spend`, `build_self_improvement_critique`, `build_self_improvement_endorse` |
 | Chain ops (2, new) | `submit_transaction`, `await_transaction` |
 
 **Signer — 4 tools, holds the key.**
@@ -190,7 +190,7 @@ TDD throughout: failing test before implementation, every PR.
 | **5** | Builder hardening: auth (enforced when configured), per-identity rate limits, `submit_transaction`, `await_transaction` | no |
 | **6** | **Family 1 — wallet/tx keyless.** Mnemonics removed; `build_*` tools land ✅ **(landed — this PR)** | **yes** |
 | **7** | **Family 2 — agent registry keyless.** Drops `@ts-nocheck` from `agent-network.ts` ✅ **(landed — this PR)** | yes |
-| **8** | **Family 3 — governance keyless.** Plus env-driven ref-UTxO config and a CBOR encoding fix | yes |
+| **8** | **Family 3 — self-improvement keyless.** Ref-UTxO env config carried over from the custodial code; the suspected CBOR encoding issue closed as no-bug (audit #10, golden-pinned against a live on-chain token) ✅ **(landed — this PR)** | yes |
 | **9** | Mainnet cutover: README, security-page correction, deliberate `workflow_dispatch` | — |
 
 **PR 4 is the review that matters.** It is additive, self-contained, and *is* the security boundary. It breaks nothing while it is reviewed.
@@ -207,7 +207,7 @@ TDD throughout: failing test before implementation, every PR.
 | D | `min(1)` APEX floor → real dust floor |
 | E | Endpoint URLs in error text |
 | F | SSE → Streamable HTTP |
-| G | Float → bigint money math |
+| G | Float → bigint amount math |
 | H | Dependency updates |
 
 ### Dependency graph

@@ -10,7 +10,14 @@ import type { RawServerHandle } from '../setup.ts';
 // unit-tests RateLimiter/limiterFor in isolation; test:smoke only ever calls
 // listTools(). Neither exercises a single tool handler, so neither would
 // notice checkRateLimit/rateLimiter falling out of scope in agent-network.ts
-// or self-improvement.ts (both @ts-nocheck - tsc can't catch it either). See
+// or self-improvement.ts. Both files are typed now (self-improvement.ts as of
+// the self-improvement-keyless PR) - no compiler-blind tool-registration file
+// remains in the builder - but tsc alone still can't catch this class of bug:
+// a handler that silently drops the `if (rateLimited) return rateLimited;`
+// early-return typechecks fine (the function still returns the right shape),
+// it just never gets called at runtime unless a real request exercises it.
+// This test's timing-based hermeticity rationale stands on its own for that
+// reason, independent of which files happen to be typed. See
 // .superpowers/sdd/pr5-integration-tests-report.md for the mutation-testing
 // evidence.
 //

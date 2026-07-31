@@ -15,6 +15,7 @@ import {
   MIN_AP3X_DEPOSIT, getRegistryAddress, resolveAgentUtxo, parseAgentDatum,
   buildRegisterAgent, buildUpdateAgent, buildTransferAgent, buildDeregisterAgent, buildMessageAgent,
 } from './registry-build.js';
+import type { RegistryAgentProfile } from './registry-build.js';
 
 function newProvider() {
   return new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL });
@@ -102,7 +103,7 @@ ${capList}
       try {
         const provider = newProvider();
         const utxos = await provider.getUtxos(getRegistryAddress());
-        const profiles = [];
+        const profiles: RegistryAgentProfile[] = [];
         for (const utxo of utxos) {
           if (!utxo.datum) continue;
           const profile = parseAgentDatum(utxo.datum, `${utxo.txHash}#${utxo.outputIndex}`, utxo.assets);
@@ -158,7 +159,7 @@ ${capList}
       if (rateLimited) return rateLimited;
       try {
         const lucid = await lucidForAddress(newProvider(), changeAddress);
-        const r = await buildRegisterAgent(lucid, { changeAddress, name, description, capabilities, framework, endpoint });
+        const r = await buildRegisterAgent(lucid, { name, description, capabilities, framework, endpoint });
         return {
           content: [{
             type: "text" as const,
@@ -214,7 +215,7 @@ The DID above is bound to the exact wallet UTxO this build consumed - if that UT
       try {
         const provider = newProvider();
         const lucid = await lucidForAddress(provider, changeAddress);
-        const r = await buildUpdateAgent(lucid, provider, { changeAddress, agentId: agent_id, name, description, capabilities, framework, endpoint });
+        const r = await buildUpdateAgent(lucid, provider, { agentId: agent_id, name, description, capabilities, framework, endpoint });
         return {
           content: [{
             type: "text" as const,
@@ -263,7 +264,7 @@ The identity NFT and deposit are unchanged by this update. ${SIGN_AND_SUBMIT_COP
       try {
         const provider = newProvider();
         const lucid = await lucidForAddress(provider, changeAddress);
-        const r = await buildTransferAgent(lucid, provider, { changeAddress, agentId: agent_id, newOwnerAddress: new_owner_address });
+        const r = await buildTransferAgent(lucid, provider, { agentId: agent_id, newOwnerAddress: new_owner_address });
         return {
           content: [{
             type: "text" as const,
@@ -313,7 +314,7 @@ After this transaction confirms, only the new owner can update, transfer, or der
       try {
         const provider = newProvider();
         const lucid = await lucidForAddress(provider, changeAddress);
-        const r = await buildDeregisterAgent(lucid, provider, { changeAddress, agentId: agent_id });
+        const r = await buildDeregisterAgent(lucid, provider, { agentId: agent_id });
         return {
           content: [{
             type: "text" as const,
@@ -365,7 +366,7 @@ The identity NFT is burned by this transaction; the deposit returns to the chang
       try {
         const provider = newProvider();
         const lucid = await lucidForAddress(provider, changeAddress);
-        const r = await buildMessageAgent(lucid, provider, { changeAddress, agentId: agent_id, messageType: message_type, payload });
+        const r = await buildMessageAgent(lucid, provider, { agentId: agent_id, messageType: message_type, payload });
         return {
           content: [{
             type: "text" as const,

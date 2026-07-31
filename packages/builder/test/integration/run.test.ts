@@ -1,5 +1,6 @@
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { walletFromSeed } from '@lucid-evolution/lucid';
 import { startServer, stopServer, callTool, getMnemonic, wait, ServerContext } from '../setup.ts';
 import { signWithMnemonic } from './sign-helper.ts';
@@ -384,6 +385,243 @@ describe('Agent Network Tools', () => {
     await buildSignSubmit('vector_build_deregister_agent', {
       changeAddress: walletAddress,
       agent_id: agentDid,
+    }, /Deposit returned on confirmation/);
+  });
+});
+
+// ─── Self-Improvement Tools ─────────────────────────────────────────────────
+// This section has never existed in run.test.ts before this change (checked
+// the file's full git history: zero "proposal"/"critique"/"endorse" hits and
+// zero hits for the old family name this PR retired, at any point) - added
+// fresh here, following this file's
+// established conventions (buildSignSubmit, assertSuccessOrKnownError,
+// walletHasAda gating, settle waits), rather than "rewritten" from a prior
+// custodial version that turns out not to exist in this file.
+//
+// Runs its OWN dedicated agent lifecycle (registers here, deregisters at the
+// end of this section) instead of reusing Agent Network Tools' `agentDid`
+// above: that section deregisters its agent as ITS OWN last test, which runs
+// before this section in file order, so by the time this section starts,
+// that DID's registry NFT is already burned. proposal_spend below needs a
+// LIVE agent NFT as a reference input, so reusing a dead DID would fail for
+// a reason unrelated to what this section tests.
+//
+// The self-improvement family's "agentDid" wire param is the trailing hex
+// asset-name segment only, NOT the full did:vector:agent:{policyId}:
+// {nftAssetName} string the registry family's agent_id means (found running
+// self-improvement-keyless.test.ts live - see that file's discovery-test
+// comment for the full finding). Both forms are captured below.
+//
+// COST-CONSCIOUS BY DEFAULT: critique and endorse target a LIVE, already-
+// existing proposal discovered via browse - any proposal reference works for
+// these (gov-build.ts's buildCritique/buildEndorse build a plain lock paid
+// to a NEW UTxO; they never spend or validate the target proposal's state),
+// at MINIMUM stakes (10 -> 12 AP3X output; 5 -> 7 AP3X output). That is real,
+// on-chain coverage of the critique and endorse build_* tools plus register/
+// deregister, for about 15 AP3X one-way (register's 10 AP3X deposit round-
+// trips) - this is the path actually run live for this task.
+//
+// The two-step proposal SUBMISSION (lock -> await -> spend -> await) is
+// deliberately NOT run by default here: self-improvement-e2e.test.ts already
+// proves that exact path live and rigorously (its "THE MONEY ASSERTION"
+// test), including the ~6-minute signing window and its documented
+// rebuild-once recovery. Re-running the identical ~29 AP3X one-way sequence
+// here would spend real testnet AP3X a second time for no new information
+// about the underlying build/sign/submit/await mechanism. Set LEGACY_FULL=1
+// to additionally exercise it through THIS file's own broader multi-family
+// run (useful as a regression check once other families ahead of it in this
+// file have already reshaped the wallet's UTxO set) - that branch reuses the
+// exact proven build -> sign -> submit -> await sequence from the E2E, typed
+// and typechecked, but was NOT executed as part of this task (only the
+// default, cheaper path below was run live against the funded wallet) -
+// stated plainly here rather than silently claiming coverage that wasn't
+// exercised.
+describe('Self-Improvement Tools', () => {
+  let siAgentFullDid: string | null = null;
+  let siAgentAssetName: string | null = null;
+  let siProposalTxHash: string | null = null;
+  let siProposalOutputIndex = 0;
+
+  test('vector_build_register_agent (dedicated self-improvement agent) -> sign -> submit', { timeout: 120_000 }, async () => {
+    if (walletHasAda) {
+      console.log('Waiting 10s for UTxOs to settle before register...');
+      await wait(10);
+    }
+    const { buildText, submitted } = await buildSignSubmit('vector_build_register_agent', {
+      changeAddress: walletAddress,
+      name: `SelfImprovementLegacy-${Date.now()}`,
+      description: 'run.test.ts self-improvement section agent',
+      capabilities: ['research'],
+      framework: 'custom',
+      endpoint: '',
+    }, /Agent DID:/);
+
+    const didMatch = buildText.match(/did:vector:agent:([a-f0-9]+):([a-f0-9]+)/);
+    if (submitted && didMatch) {
+      siAgentFullDid = didMatch[0];
+      siAgentAssetName = didMatch[2];
+      console.log(`Registered self-improvement agent DID: ${siAgentFullDid}`);
+    }
+  });
+
+  test('vector_self_improvement_browse (proposals) - also discovers a live proposal for critique/endorse below', { timeout: 120_000 }, async () => {
+    if (walletHasAda && siAgentFullDid) {
+      console.log('Waiting 10s for agent registration to confirm...');
+      await wait(10);
+    }
+    const text = await callTool(ctx.client, 'vector_self_improvement_browse', { entity: 'proposals' });
+    console.log(text.slice(0, 500));
+    assertSuccessOrKnownError(text, /Improvement Proposals/, 'vector_self_improvement_browse (proposals)');
+    const refMatch = text.match(/\*\*UTxO:\*\*\s*([0-9a-f]{64})#(\d+)/);
+    if (refMatch) {
+      siProposalTxHash = refMatch[1];
+      siProposalOutputIndex = parseInt(refMatch[2], 10);
+      console.log(`Discovered live proposal ref: ${siProposalTxHash}#${siProposalOutputIndex}`);
+    }
+  });
+
+  test('vector_self_improvement_analyze_metrics', { timeout: 120_000 }, async () => {
+    const text = await callTool(ctx.client, 'vector_self_improvement_analyze_metrics', {});
+    console.log(text.slice(0, 500));
+    assertSuccessOrKnownError(text, /Proposal Metrics/, 'vector_self_improvement_analyze_metrics');
+  });
+
+  test('vector_build_self_improvement_critique (min stake 10) -> sign -> submit', { timeout: 120_000 }, async () => {
+    if (!siAgentAssetName || !siProposalTxHash) {
+      console.log('Skipping critique - no agent registered or no live proposal discovered');
+      return;
+    }
+    if (walletHasAda) {
+      console.log('Waiting 10s for UTxOs to settle before critique...');
+      await wait(10);
+    }
+    await buildSignSubmit('vector_build_self_improvement_critique', {
+      changeAddress: walletAddress,
+      agentDid: siAgentAssetName,
+      proposalTxHash: siProposalTxHash,
+      proposalOutputIndex: siProposalOutputIndex,
+      critiqueType: 'Supportive',
+      stakeApex: 10,
+      critiqueHash: randomBytes(32).toString('hex'),
+      storageUri: 'ipfs://legacy-critique-doc',
+    }, /Unsigned Critique Built/);
+  });
+
+  test('vector_build_self_improvement_endorse (min stake 5) -> sign -> submit', { timeout: 120_000 }, async () => {
+    if (!siAgentAssetName || !siProposalTxHash) {
+      console.log('Skipping endorse - no agent registered or no live proposal discovered');
+      return;
+    }
+    if (walletHasAda) {
+      console.log('Waiting 10s for UTxOs to settle before endorse...');
+      await wait(10);
+    }
+    await buildSignSubmit('vector_build_self_improvement_endorse', {
+      changeAddress: walletAddress,
+      agentDid: siAgentAssetName,
+      proposalTxHash: siProposalTxHash,
+      proposalOutputIndex: siProposalOutputIndex,
+      stakeApex: 5,
+    }, /Unsigned Endorsement Built/);
+  });
+
+  // LEGACY_FULL=1 only - see the section banner comment above for why this
+  // is gated off by default. Mirrors self-improvement-e2e.test.ts's proven
+  // lock -> await -> spend -> await sequence exactly (including the
+  // rebuild-once-on-window-expiry recovery), adapted to this file's
+  // walletHasAda-tolerant helpers instead of E2E's hard asserts, since this
+  // section (unlike the dedicated E2E) may run against an unfunded wallet.
+  test('vector_build_self_improvement_proposal_lock -> await -> vector_build_self_improvement_proposal_spend -> sign -> submit [LEGACY_FULL=1 only]', { timeout: 600_000, skip: process.env.LEGACY_FULL !== '1' }, async () => {
+    if (!siAgentAssetName) {
+      console.log('Skipping full proposal submission - no agent registered');
+      return;
+    }
+    if (walletHasAda) {
+      console.log('Waiting 10s for UTxOs to settle before proposal lock...');
+      await wait(10);
+    }
+
+    // Inlined rather than buildSignSubmit: this step needs the lock's own
+    // submitted tx hash directly (to await it, then feed it to
+    // proposal_spend) - buildSignSubmit only reports whether a submit
+    // succeeded, not the hash it produced.
+    const lockBuildText = await callTool(ctx.client, 'vector_build_self_improvement_proposal_lock', {
+      changeAddress: walletAddress,
+      agentDid: siAgentAssetName,
+      proposalType: 'GeneralSuggestion',
+      stakeApex: 25,
+      proposalHash: randomBytes(32).toString('hex'),
+      storageUri: 'ipfs://legacy-proposal-doc',
+    });
+    console.log(lockBuildText.slice(0, 500));
+    assertSuccessOrKnownError(lockBuildText, /step 1 of 2/, 'vector_build_self_improvement_proposal_lock');
+    const lockCbor = extractCborOrNull(lockBuildText);
+    if (!/step 1 of 2/.test(lockBuildText) || !lockCbor) {
+      console.log('Skipping proposal spend - lock did not build (wallet likely unfunded)');
+      return;
+    }
+    const lockSigned = signWithMnemonic(lockCbor, mnemonic);
+    const lockSubmitText = await callTool(ctx.client, 'vector_submit_transaction', { signedTxCbor: lockSigned.signedCborHex });
+    if (walletHasAda) {
+      assert.match(lockSubmitText, /Transaction Submitted/, `proposal lock: expected success on a funded wallet, got: ${lockSubmitText.slice(0, 300)}`);
+    } else {
+      assertSuccessOrKnownError(lockSubmitText, /Transaction Submitted/, 'vector_build_self_improvement_proposal_lock (submit)');
+    }
+    if (!/Transaction Submitted/.test(lockSubmitText)) {
+      console.log('Skipping proposal spend - lock did not submit (wallet likely unfunded)');
+      return;
+    }
+    const lockTxHash = lockSigned.txHash;
+    const awaitLockText = await callTool(ctx.client, 'vector_await_transaction', { txHash: lockTxHash, timeoutSeconds: 240 });
+    assert.match(awaitLockText, /Transaction Confirmed/, `proposal lock did not confirm: ${awaitLockText.slice(0, 300)}`);
+
+    async function buildSpend(): Promise<{ text: string; validTo: string }> {
+      const text = await callTool(ctx.client, 'vector_build_self_improvement_proposal_spend', {
+        changeAddress: walletAddress, agentDid: siAgentAssetName!, lockTxHash,
+      });
+      const m = text.match(/[Vv]alid until (.*Z)/);
+      assert.ok(m, `no signing deadline in spend build:\n${text.slice(0, 500)}`);
+      return { text, validTo: m[1] };
+    }
+
+    let { text: spendBuildText, validTo } = await buildSpend();
+    console.log(`Proposal spend built, valid until ${validTo}`);
+    let signed = signWithMnemonic(extractCborOrNull(spendBuildText)!, mnemonic);
+    let submitText = await callTool(ctx.client, 'vector_submit_transaction', { signedTxCbor: signed.signedCborHex });
+
+    if (!/Transaction Submitted/.test(submitText)) {
+      console.log(`First proposal-spend submit did not report success - rebuilding ONCE (the documented recovery path for a possible signing-window expiry):\n${submitText.slice(0, 500)}`);
+      ({ text: spendBuildText, validTo } = await buildSpend());
+      console.log(`Proposal spend rebuilt, valid until ${validTo}`);
+      signed = signWithMnemonic(extractCborOrNull(spendBuildText)!, mnemonic);
+      submitText = await callTool(ctx.client, 'vector_submit_transaction', { signedTxCbor: signed.signedCborHex });
+    }
+    if (walletHasAda) {
+      assert.match(submitText, /Transaction Submitted/, `proposal spend: expected success on a funded wallet, got: ${submitText.slice(0, 300)}`);
+    } else {
+      assertSuccessOrKnownError(submitText, /Transaction Submitted/, 'vector_build_self_improvement_proposal_spend (submit)');
+    }
+    if (/Transaction Submitted/.test(submitText)) {
+      const hashMatch = submitText.match(/Transaction Hash:\s*([0-9a-f]{64})/);
+      assert.ok(hashMatch, `no tx hash in submit response:\n${submitText.slice(0, 300)}`);
+      const awaitSpendText = await callTool(ctx.client, 'vector_await_transaction', { txHash: hashMatch[1], timeoutSeconds: 240 });
+      assert.match(awaitSpendText, /Transaction Confirmed/, `proposal spend did not confirm: ${awaitSpendText.slice(0, 300)}`);
+      console.log(`Proposal submission complete via the legacy suite (tx ${hashMatch[1]})`);
+    }
+  });
+
+  test('vector_build_deregister_agent (dedicated self-improvement agent) -> sign -> submit', { timeout: 120_000 }, async () => {
+    if (!siAgentFullDid) {
+      console.log('Skipping deregister - no self-improvement agent registered');
+      return;
+    }
+    if (walletHasAda) {
+      console.log('Waiting 10s for UTxOs to settle before deregister...');
+      await wait(10);
+    }
+    await buildSignSubmit('vector_build_deregister_agent', {
+      changeAddress: walletAddress,
+      agent_id: siAgentFullDid,
     }, /Deposit returned on confirmation/);
   });
 });

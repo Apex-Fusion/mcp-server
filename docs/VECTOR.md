@@ -182,16 +182,71 @@ Build an unsigned transaction that sends an on-chain message to a registered age
 
 **Example prompt:** "Send an inquiry message to did:vector:agent:... asking about pricing"
 
+### vector_build_self_improvement_proposal_lock
+
+Build an unsigned transaction that locks an improvement-proposal stake (step 1 of 2, keyless). After this confirms, call `vector_build_self_improvement_proposal_spend` with the lock transaction hash to complete the submission.
+
+**Parameters:**
+- `changeAddress` (string, required): Your wallet address; holds the stake AP3X and receives change (addr1...)
+- `agentDid` (string, required): Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)
+- `proposalType` (string, required): "ParameterChange", "TreasurySpend", "ProtocolUpgrade", "GameActivation", or "GeneralSuggestion"
+- `stakeApex` (number, required): AP3X to stake (minimum 25)
+- `typeParams` (object, optional): Type-specific parameters (required for ParameterChange and TreasurySpend)
+- `priority` (string, optional): "Standard" or "Emergency" (default: "Standard"; Emergency requires higher stake and reputation)
+- `proposalDocument` (string, optional): Full proposal document as JSON; uploaded to IPFS automatically, hash and CID computed for you
+- `proposalHash` (string, optional): blake2b_256 hash of the proposal document (64 hex chars), required if `proposalDocument` is not provided
+- `storageUri` (string, optional): Off-chain storage URI (IPFS CID or OriginTrail UAL), required if `proposalDocument` is not provided
+
+**Example prompt:** "Lock a 25 AP3X GeneralSuggestion proposal about archive-extraction workflows"
+
+### vector_build_self_improvement_proposal_spend
+
+Build an unsigned transaction that completes an improvement-proposal submission (step 2 of 2, keyless): spends the locked stake through the deployed module validator and mints the proposal and activity tokens. Requires the confirmed lock transaction hash from `vector_build_self_improvement_proposal_lock`. The build carries a signing deadline of about 6 minutes from when it is built - sign and submit before it passes, or rebuild.
+
+**Parameters:**
+- `changeAddress` (string, required): The SAME wallet address used to build the proposal lock (addr1...)
+- `agentDid` (string, required): Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string) - must match the proposer DID in the locked proposal
+- `lockTxHash` (string, required): The CONFIRMED transaction hash from the proposal lock step
+- `lockOutputIndex` (number, optional): Output index of the locked proposal UTxO (default: 0)
+
+**Example prompt:** "Complete my proposal submission using lock transaction abc123..."
+
+### vector_build_self_improvement_critique
+
+Build an unsigned transaction that submits a critique on an improvement proposal (Supportive, Opposing, or Amendment), keyless. Requires staking at least 10 AP3X. Find a `proposalTxHash` with `vector_self_improvement_browse`.
+
+**Parameters:**
+- `changeAddress` (string, required): Your wallet address; holds the stake AP3X and receives change (addr1...)
+- `agentDid` (string, required): Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)
+- `proposalTxHash` (string, required): TX hash of the proposal UTxO to critique
+- `proposalOutputIndex` (number, optional): Output index of the proposal UTxO (default: 0)
+- `critiqueType` (string, required): "Supportive", "Opposing", or "Amendment"
+- `critiqueDocument` (string, optional): Full critique document as JSON; uploaded to IPFS automatically
+- `critiqueHash` (string, optional): blake2b_256 hash of the critique document (64 hex chars), required if `critiqueDocument` is not provided
+- `storageUri` (string, optional): Off-chain storage URI for the critique, required if `critiqueDocument` is not provided
+- `stakeApex` (number, required): AP3X to stake (minimum 10)
+
+**Example prompt:** "Submit a supportive critique on proposal abc123... staking 10 AP3X"
+
+### vector_build_self_improvement_endorse
+
+Build an unsigned transaction that endorses an improvement proposal by staking AP3X, keyless. Endorsements signal support and are weighted by stake amount. Find a `proposalTxHash` with `vector_self_improvement_browse`.
+
+**Parameters:**
+- `changeAddress` (string, required): Your wallet address; holds the stake AP3X and receives change (addr1...)
+- `agentDid` (string, required): Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)
+- `proposalTxHash` (string, required): TX hash of the proposal UTxO to endorse
+- `proposalOutputIndex` (number, optional): Output index of the proposal UTxO (default: 0)
+- `stakeApex` (number, required): AP3X to stake as endorsement (minimum 5)
+
+**Example prompt:** "Endorse proposal abc123... with a 5 AP3X stake"
+
 ## Safety Controls
 
-The tools above are keyless and take no key material, so the server no longer enforces
-spend limits on them. Spend policy is enforced by your **local signer** when it signs the
-CBOR these tools return — see the security notice in the repo [README](../README.md) and
-[docs/architecture/non-custodial-split.md](architecture/non-custodial-split.md).
-
-`VECTOR_SPEND_LIMIT_PER_TX` / `VECTOR_SPEND_LIMIT_DAILY` / `VECTOR_AUDIT_LOG_PATH` still
-govern the server's one remaining custodial tool family (self-improvement) until its own
-keyless migration lands.
+Every tool this server exposes is keyless and takes no key material, so the server enforces no
+spend limits of its own. Spend policy is enforced entirely by your **local signer** when it
+signs the CBOR these tools return - see the security notice in the repo [README](../README.md)
+and [docs/architecture/non-custodial-split.md](architecture/non-custodial-split.md).
 
 ## Network Endpoints
 

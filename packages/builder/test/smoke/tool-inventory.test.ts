@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { startServer, stopServer, ServerContext } from '../setup.ts';
 
 /**
- * Snapshot of the current tool surface (23 tools) for the non-custodial split
+ * Snapshot of the current tool surface (24 tools) for the non-custodial split
  * series (see docs/architecture/non-custodial-split.md). PR 6 (Task 5) is the
  * PR that took this list from 25 to 23: it deleted `vector_get_address`
  * outright, along with the tool that reported per-transaction/daily
@@ -13,7 +13,14 @@ import { startServer, stopServer, ServerContext } from '../setup.ts';
  * keyless equivalent — spend status is gone because the builder no longer
  * holds keys to limit) as part of making the remaining query tools
  * (`vector_get_utxos`, `vector_get_transaction_history`, `vector_dry_run`)
- * keyless. PRs 2, 6, 7 and 8 each deliberately restructure and rename tool
+ * keyless. Spec PR 8 (Task 5) took it from 23 to 24: the self-improvement
+ * family went keyless, removing `vector_self_improvement_submit_proposal`
+ * and renaming `_critique`/`_endorse` to `vector_build_self_improvement_*`,
+ * and splitting the old single-shot submit into two build_* tools
+ * (`_proposal_lock` + `_proposal_spend`) since the deployed module validator
+ * requires a confirmed lock before the spend+mint step can reference it.
+ * This was the last custodial family - the builder now holds no key material
+ * anywhere. PRs 2, 6, 7 and 8 each deliberately restructure and rename tool
  * families, and each of those PRs is expected to update this list
  * deliberately, not accidentally. No wallet, no network beyond localhost —
  * this never needs a mnemonic.
@@ -25,6 +32,10 @@ const EXPECTED_TOOLS = [
   'vector_build_interact_contract',
   'vector_build_message_agent',
   'vector_build_register_agent',
+  'vector_build_self_improvement_critique',
+  'vector_build_self_improvement_endorse',
+  'vector_build_self_improvement_proposal_lock',
+  'vector_build_self_improvement_proposal_spend',
   'vector_build_send_apex',
   'vector_build_send_tokens',
   'vector_build_transaction',
@@ -38,9 +49,6 @@ const EXPECTED_TOOLS = [
   'vector_get_utxos',
   'vector_self_improvement_analyze_metrics',
   'vector_self_improvement_browse',
-  'vector_self_improvement_critique',
-  'vector_self_improvement_endorse',
-  'vector_self_improvement_submit_proposal',
   'vector_submit_transaction',
 ];
 
@@ -92,11 +100,11 @@ after(async () => {
 });
 
 describe('tool inventory smoke test', () => {
-  test('exposes exactly 23 tools', () => {
+  test('exposes exactly 24 tools', () => {
     assert.equal(
       actualNames.length,
-      23,
-      `expected 23 tools, got ${actualNames.length}: ${JSON.stringify(actualNames)}`
+      24,
+      `expected 24 tools, got ${actualNames.length}: ${JSON.stringify(actualNames)}`
     );
   });
 
@@ -132,7 +140,7 @@ describe('tool schema snapshot', () => {
   });
 
   // One assertion per tool (rather than a single deepStrictEqual over the whole
-  // 23-tool map) so a failure names the specific tool and shows a readable
+  // 24-tool map) so a failure names the specific tool and shows a readable
   // diff of just that tool's schema, instead of "objects differ" over an
   // unreadable combined structure.
   for (const toolName of Object.keys(schemaSnapshot).sort()) {
