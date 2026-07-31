@@ -590,7 +590,7 @@ ${txList}
             text: `Failed to get transaction history: ${error.message}
 
 **Troubleshooting Tips:**
-1. Ensure Koios is configured and reachable: ${VECTOR_KOIOS_URL}
+1. Ensure the configured Koios endpoint is reachable
 2. Verify the address is valid
 3. Check the block explorer for this address`,
           }],

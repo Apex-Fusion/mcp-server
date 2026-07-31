@@ -197,7 +197,7 @@ Each batch UTxO holds ~30 AP3X for adoption rewards.`,
 
 **Troubleshooting Tips:**
 1. Verify the module contracts are deployed on this network
-2. Check that Ogmios is reachable at ${VECTOR_OGMIOS_URL}
+2. Verify the configured Ogmios endpoint is reachable
 3. The script addresses may not have any UTxOs yet`,
           }],
         };

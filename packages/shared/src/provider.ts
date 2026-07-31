@@ -78,6 +78,32 @@ export function koiosIndicatesConfirmed(data: unknown): boolean {
   return typeof entry?.num_confirmations === 'number' && entry.num_confirmations > 0;
 }
 
+/**
+ * Format a downstream HTTP or JSON-RPC failure into a message safe to return
+ * to an untrusted caller: names the service, the operation, and the status -
+ * never the endpoint URL, and never the raw response body.
+ *
+ * On a hosted, multi-tenant deployment the configured Ogmios/Koios/submit-api
+ * endpoint is operator infrastructure, not caller information - and a raw
+ * response body from a misconfigured or unreachable endpoint (a reverse-proxy
+ * error page, for instance) can itself echo back hostnames or other detail
+ * that has no business reaching a caller. Call sites console.error the full
+ * detail (status, body, and which endpoint) themselves before throwing this -
+ * full detail to the operator's log, a clean summary to the caller. That
+ * split is the sanitisation.
+ *
+ * Exported and pure so it can be tested without a network round trip - same
+ * rationale as parseSubmitResponse above.
+ */
+export function formatServiceError(
+  service: string,
+  operation: string,
+  status: number | string,
+  statusText?: string,
+): string {
+  return `${service} request failed (${operation}): ${status}${statusText ? ` ${statusText}` : ''}`;
+}
+
 export class OgmiosProvider implements Provider {
   private ogmiosUrl: string;
   private submitUrl: string;
@@ -107,12 +133,14 @@ export class OgmiosProvider implements Provider {
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`Ogmios RPC error (${response.status}): ${text}`);
+      console.error(`[OgmiosProvider] Ogmios RPC error (${method}) at ${this.ogmiosUrl}: ${response.status} ${response.statusText} - ${text}`);
+      throw new Error(formatServiceError('Ogmios', method, response.status, response.statusText));
     }
 
     const json = await response.json();
     if (json.error) {
-      throw new Error(`Ogmios RPC error: ${JSON.stringify(json.error)}`);
+      console.error(`[OgmiosProvider] Ogmios RPC error (${method}) at ${this.ogmiosUrl}:`, json.error);
+      throw new Error(formatServiceError('Ogmios', method, json.error?.code ?? 'error', json.error?.message ?? 'RPC error'));
     }
 
     return json.result;
@@ -333,7 +361,8 @@ export class OgmiosProvider implements Provider {
     });
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`Koios tx_status query failed (${response.status}): ${text}`);
+      console.error(`[OgmiosProvider] Koios tx_status query failed at ${this.koiosUrl}: ${response.status} ${response.statusText} - ${text}`);
+      throw new Error(formatServiceError('Koios', 'tx_status', response.status, response.statusText));
     }
     return response.json();
   }
@@ -445,7 +474,8 @@ export class OgmiosProvider implements Provider {
 
     if (!txListResponse.ok) {
       const text = await txListResponse.text();
-      throw new Error(`Koios address_txs query failed (${txListResponse.status}): ${text}`);
+      console.error(`[OgmiosProvider] Koios address_txs query failed at ${this.koiosUrl}: ${txListResponse.status} ${txListResponse.statusText} - ${text}`);
+      throw new Error(formatServiceError('Koios', 'address_txs', txListResponse.status, txListResponse.statusText));
     }
 
     const txList: any[] = await txListResponse.json();
@@ -512,7 +542,8 @@ export class OgmiosProvider implements Provider {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Transaction submission failed (${response.status}): ${errorText}`);
+      console.error(`[OgmiosProvider] Transaction submission failed at ${this.submitUrl}: ${response.status} ${response.statusText} - ${errorText}`);
+      throw new Error(formatServiceError('Submit API', 'submitTx', response.status, response.statusText));
     }
 
     const result = await response.text();

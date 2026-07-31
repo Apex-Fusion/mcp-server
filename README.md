@@ -299,6 +299,14 @@ it, lives in your local signer instead - see `VECTOR_SIGNER_SPEND_LIMIT_PER_TX` 
 > echoes a token value. Commas delimit entries and cannot be escaped, so generate
 > tokens from a comma-free charset (hex / base64url / alphanumeric).
 
+> **Error responses do not echo configured endpoints.** A failed Ogmios, Koios, or
+> submit-API request is reported to the caller by service name and status only -
+> for example "Ogmios request failed (queryLedgerState/utxo): 503 Service
+> Unavailable" - never the configured `VECTOR_OGMIOS_URL` / `VECTOR_KOIOS_URL` /
+> `VECTOR_SUBMIT_URL` value or the raw response body. Full detail goes to the
+> server's own `console.error` log for operators; a caller only ever sees the
+> service name and status.
+
 ### Mainnet endpoints
 
 | Variable | Mainnet value |
