@@ -471,6 +471,68 @@ describe('streamable HTTP gating - idle session reaper', () => {
   });
 });
 
+describe('streamable HTTP gating - active sessions survive idle-window sweeps', () => {
+  let ctx: RawServerHandle;
+
+  before(async () => {
+    // Same env mechanism and the same thresholds as the idle-reaper block
+    // above, deliberately: this test is that one's mirror image. That test
+    // proves an INACTIVE session dies; this one proves an ACTIVE session -
+    // kept alive by real requests, each one bumping streamableLastSeen -
+    // does not, even once the TOTAL elapsed time comfortably exceeds the
+    // idle window. Nothing in the idle-reaper test (or anywhere else in this
+    // file) exercises the per-request lastSeen bump itself: dropping it
+    // would not fail that test, since it never issues a mid-session request
+    // at all. This is the test that closes that gap.
+    ctx = await spawnServer({ ...AUTH_ENV, VECTOR_MCP_SESSION_IDLE_MS: '400', VECTOR_MCP_SESSION_SWEEP_MS: '100' });
+  });
+
+  after(async () => {
+    await stopRawServer(ctx);
+  });
+
+  test('a session kept active by periodic requests survives past what would otherwise be its idle deadline', async () => {
+    const init = await postMcp(ctx.port, { Authorization: `Bearer ${TOKEN_ALICE}` }, initializeRequest());
+    assert.equal(init.status, 200);
+    const sessionId = init.headers['mcp-session-id'] as string | undefined;
+    assert.ok(sessionId);
+
+    // Six polls, 150ms apart: each individual gap (150ms) stays well under
+    // the 400ms idle window - even accounting for the 100ms sweep cadence,
+    // the worst-case time since the last bump a sweep can observe is
+    // roughly pollIntervalMs + sweepMs = 250ms, still comfortably under
+    // 400ms (see the idle-reaper test above for the same worst-case
+    // argument applied to sweep phase alignment). But the TOTAL span across
+    // all six polls (900ms) is more than twice the 400ms idle window - so a
+    // server that only stamped lastSeen once, at session creation, would
+    // have let this session go idle and reaped it well before this loop
+    // finishes. Each poll is asserted individually so a regression fails at
+    // the specific iteration where the session stopped responding, not just
+    // at the end.
+    const POLL_INTERVAL_MS = 150;
+    const POLL_COUNT = 6;
+    for (let i = 0; i < POLL_COUNT; i++) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, POLL_INTERVAL_MS));
+      const poll = await postMcp(
+        ctx.port,
+        { Authorization: `Bearer ${TOKEN_ALICE}`, 'mcp-session-id': sessionId! },
+        toolsListRequest(),
+      );
+      assert.equal(poll.status, 200, `poll ${i + 1}/${POLL_COUNT} (t~${(i + 1) * POLL_INTERVAL_MS}ms) must still find the session alive`);
+    }
+
+    // Headline assertion: after a total span well past the idle window,
+    // reached entirely in small, sub-threshold bumps, the session is still
+    // there - not reaped, not evicted.
+    const stillAlive = await postMcp(
+      ctx.port,
+      { Authorization: `Bearer ${TOKEN_ALICE}`, 'mcp-session-id': sessionId! },
+      toolsListRequest(),
+    );
+    assert.equal(stillAlive.status, 200, 'an actively-used session must still be alive after spanning more than one idle window in small, sub-threshold bumps');
+  });
+});
+
 describe('streamable HTTP gating - per-identity session cap', () => {
   let ctx: RawServerHandle;
 
