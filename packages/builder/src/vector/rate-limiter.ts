@@ -1,5 +1,7 @@
 // Sliding-window rate limiter for Vector MCP tools
 
+import { intEnv } from '../env.js';
+
 export class RateLimiter {
   private calls: number[] = [];
   private readonly windowMs: number;
@@ -23,7 +25,14 @@ export class RateLimiter {
   }
 }
 
-const RATE_LIMIT_PER_MINUTE = parseInt(process.env.VECTOR_RATE_LIMIT_PER_MINUTE || '60');
+// Parsed with intEnv (env.ts), not a bare parseInt: a malformed value must
+// fail loud at startup, not silently disable rate limiting. parseInt('sixty')
+// is NaN, and RateLimiter.check() above compares `calls.length >= maxCalls` -
+// any comparison against NaN is false, so a typo here would have let every
+// caller through with no limit at all, silently. Exported so index.ts's
+// startup log can report the effective value operators are actually running
+// under, alongside the /mcp session knobs.
+export const RATE_LIMIT_PER_MINUTE = intEnv('VECTOR_RATE_LIMIT_PER_MINUTE', 60, 1);
 
 // One bucket per identity. A process-global limiter meant one busy caller
 // throttled everyone on the box; keying by identity fixes that. The registry

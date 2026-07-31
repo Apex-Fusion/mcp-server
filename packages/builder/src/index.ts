@@ -29,6 +29,8 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { registerVectorTools } from "./vector/index.js";
 import { loadAuthConfig, resolveIdentity, clientIpOf } from "./auth.js";
+import { intEnv } from "./env.js";
+import { RATE_LIMIT_PER_MINUTE } from "./vector/rate-limiter.js";
 
 function createMcpServer(identity: string) {
   const server = new McpServer({
@@ -74,18 +76,39 @@ const streamableLastSeen = new Map<string, number>();
 // vector/rate-limiter.ts. Exported for visibility/tests; production tuning
 // is via the env var, since index.ts is an executable entrypoint (importing
 // it boots a real server as a side effect) rather than something a test can
-// import and reconfigure in-process.
-export const MAX_SESSIONS_PER_IDENTITY = parseInt(process.env.VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY || '32');
+// import and reconfigure in-process. Parsed with intEnv (env.ts), not a bare
+// parseInt: a malformed value must fail loud at startup, not silently
+// disable the cap - parseInt('thirty-two') is NaN, and every
+// `length >= MAX_SESSIONS_PER_IDENTITY` comparison in the eviction check
+// below is false whenever the right side is NaN, so the cap would silently
+// stop evicting anything, forever.
+export const MAX_SESSIONS_PER_IDENTITY = intEnv('VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY', 32, 1);
 
 // Idle bound: a session with no request for this long is reaped on the next
 // sweep, regardless of whether DELETE ever arrives. Default 10 minutes -
 // generous for a real client mid-conversation, short enough that an
-// abandoned session does not outlive the process.
-const STREAMABLE_SESSION_IDLE_MS = parseInt(process.env.VECTOR_MCP_SESSION_IDLE_MS || String(10 * 60 * 1000));
+// abandoned session does not outlive the process. intEnv, not parseInt, for
+// the same fail-loud reason as above - and the failure mode here is worse in
+// both directions: a fully non-numeric value is NaN, and `now - lastSeen >
+// NaN` is always false, so the reaper would run on schedule forever while
+// reaping nothing; a value with a numeric prefix and trailing garbage
+// (e.g. a typo like '10m' meaning "10 minutes") would have parseInt-truncated
+// to 10, reaping every session within 10ms of creation instead.
+const STREAMABLE_SESSION_IDLE_MS = intEnv('VECTOR_MCP_SESSION_IDLE_MS', 10 * 60 * 1000, 100);
 // Sweep cadence, kept separate from the idle bound so a hermetic test can
 // shrink both independently without waiting anywhere near the real idle
-// window.
-const STREAMABLE_SESSION_SWEEP_MS = parseInt(process.env.VECTOR_MCP_SESSION_SWEEP_MS || '60000');
+// window. Same truncation risk as the idle bound: a typo like '60s' would
+// have parseInt-truncated to 60, running the sweep every 60ms instead of
+// every 60 seconds.
+const STREAMABLE_SESSION_SWEEP_MS = intEnv('VECTOR_MCP_SESSION_SWEEP_MS', 60_000, 100);
+
+// Operators verify what's actually active from this one line - every DoS
+// bound this file and rate-limiter.ts enforce, with the effective value each
+// resolved to (default or override), not just the fact that they exist.
+console.error(
+  `Config: rate limit ${RATE_LIMIT_PER_MINUTE}/min per identity, /mcp session idle ${STREAMABLE_SESSION_IDLE_MS}ms, ` +
+  `sweep every ${STREAMABLE_SESSION_SWEEP_MS}ms, cap ${MAX_SESSIONS_PER_IDENTITY} sessions/identity.`
+);
 
 /**
  * Closes a /mcp session and drains it from every map, from any trigger other

@@ -22,7 +22,9 @@ Hosted instances run on both networks, exposing all 24 tools:
 > 11, "Rollout", for the full history). **Both hosted instances currently require a bearer
 > token from the operators to connect** - that is an access control, not a custody one:
 > neither instance accepts a mnemonic from any caller, token or not. Open public access
-> (per-IP rate limiting, no token required) is a planned follow-up, not yet shipped. Self-host
+> (per-IP rate limiting, no token required) is a planned follow-up, not yet enabled on the
+> hosted instances - the per-IP rate-limiting code ships in this release; only the ops action
+> of unsetting `MCP_AUTH_TOKENS` remains, coordinated separately after this deploys. Self-host
 > this release for tokenless access today.
 
 > **Transport: the hosted URLs above still answer on `/sse` only.** This codebase now serves
@@ -245,8 +247,16 @@ If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` firs
 | `VECTOR_KOIOS_URL` | Koios REST API endpoint | `https://v2.koios.vector.testnet.apexfusion.org/` |
 | `VECTOR_SUBMIT_URL` | Transaction submit API | `https://submit.vector.testnet.apexfusion.org/api/submit/tx` |
 | `VECTOR_EXPLORER_URL` | Block explorer base URL | `https://vector.testnet.apexscan.org` |
-| `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute | `60` |
+| `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute, per identity (min `1`) | `60` |
+| `VECTOR_MCP_SESSION_IDLE_MS` | `/mcp` session idle timeout before the reaper closes it, in ms (min `100`) | `600000` (10 min) |
+| `VECTOR_MCP_SESSION_SWEEP_MS` | How often the `/mcp` idle reaper sweeps, in ms (min `100`) | `60000` (1 min) |
+| `VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY` | Max concurrent `/mcp` sessions per identity before the oldest is evicted (min `1`) | `32` |
 | `MCP_AUTH_TOKENS` | Bearer tokens that may call this server. Comma-separated; each entry is `label:token` or a bare token. **When unset, the server is open to anyone who can reach it.** | _(unset — auth disabled)_ |
+
+The four numeric knobs above fail loudly at startup on a malformed value: anything that is not
+a plain integer, or is below its listed minimum, raises a startup error naming the variable and
+the value it got, rather than silently falling back to some other behavior (an unparseable rate
+limit silently disabling rate limiting, for example).
 
 This server has no spend-limit or audit-log configuration of its own: it holds no key material
 for any family, so it has nothing left to limit. Every spend limit, and the audit log recording
@@ -261,9 +271,10 @@ it, lives in your local signer instead - see `VECTOR_SIGNER_SPEND_LIMIT_PER_TX` 
 > eviction resets a bucket's budget - a memory bound, not a security boundary, since an
 > attacker rotating enough source IPs can still defeat per-IP limiting at a tier only the
 > reverse proxy or network layer can police. `/mcp` sessions get the same per-identity
-> treatment: idle sessions are reaped after `VECTOR_MCP_SESSION_IDLE_MS` (default 10 minutes),
-> and concurrent sessions per identity are capped at `VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY`
-> (default 32).
+> treatment: idle sessions are reaped (`VECTOR_MCP_SESSION_IDLE_MS`, swept every
+> `VECTOR_MCP_SESSION_SWEEP_MS`), and concurrent sessions per identity are capped
+> (`VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY`) - see the Configuration table above for defaults and
+> minimums.
 
 > **Malformed values fail loudly, not silently.** The server refuses to start if
 > `MCP_AUTH_TOKENS` contains an empty token, a token with embedded whitespace, a
@@ -323,24 +334,24 @@ against live chain data. **Never submits.** Never runs in CI. See
 ## Architecture
 
 ```
-┌──────────────────────┐      ┌──────────────────────────┐
-│  Claude / GPT / etc. │◄────►│  vector-mcp-server       │
-│  (any MCP client)    │ SSE  │                          │
-└──────────────────────┘      │  ┌────────────────────┐  │
-                              │  │ Rate Limiter        │  │
-                              │  │ (60 calls/min)      │  │
-                              │  └────────┬───────────┘  │
-                              │           │               │
-                              │  ┌────────▼───────────┐  │
-                              │  │ Lucid + Ogmios     │  │
-                              │  │ Provider            │  │
-                              │  └────────┬───────────┘  │
-                              │           │               │
-                              │  ┌────────▼───────────┐  │
-                              │  │ Ogmios / Koios /   │  │
-                              │  │ Submit API          │  │
-                              │  └────────────────────┘  │
-                              └──────────────────────────┘
+┌──────────────────────┐             ┌──────────────────────────┐
+│  Claude / GPT / etc. │◄───────────►│  vector-mcp-server       │
+│  (any MCP client)    │ /sse + /mcp │                          │
+└──────────────────────┘             │  ┌────────────────────┐  │
+                                     │  │ Rate Limiter        │  │
+                                     │  │ (60 calls/min)      │  │
+                                     │  └────────┬───────────┘  │
+                                     │           │               │
+                                     │  ┌────────▼───────────┐  │
+                                     │  │ Lucid + Ogmios     │  │
+                                     │  │ Provider            │  │
+                                     │  └────────┬───────────┘  │
+                                     │           │               │
+                                     │  ┌────────▼───────────┐  │
+                                     │  │ Ogmios / Koios /   │  │
+                                     │  │ Submit API          │  │
+                                     │  └────────────────────┘  │
+                                     └──────────────────────────┘
 ```
 
 No safety layer sits between the rate limiter and the provider: this server holds no key
