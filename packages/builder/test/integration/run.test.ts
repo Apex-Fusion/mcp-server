@@ -1,5 +1,6 @@
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { walletFromSeed } from '@lucid-evolution/lucid';
 import { startServer, stopServer, callTool, getMnemonic, wait, ServerContext } from '../setup.ts';
 
 // Always-succeeds PlutusV2 validator (accepts any datum/redeemer/context, returns True)
@@ -9,11 +10,14 @@ let ctx: ServerContext;
 let mnemonic: string;
 let walletAddress: string;
 let walletHasAda = false;
-let walletBalanceAda = 0;
 let agentDid: string | null = null;
 
 before(async () => {
   mnemonic = getMnemonic();
+  // The keyless build tools take an address, not a mnemonic - derive it once
+  // up front instead of scraping it out of a vector_get_address response
+  // (that tool is gone; the signer owns address derivation from PR 7 on).
+  walletAddress = walletFromSeed(mnemonic, { network: 'Mainnet', accountIndex: 0 }).address;
   console.log('Starting MCP server...');
   ctx = await startServer();
   console.log(`MCP server running on port ${ctx.port}`);
@@ -48,38 +52,27 @@ function assertSuccessOrKnownError(text: string, successPattern: RegExp, toolNam
 // ─── Wallet Tools ───────────────────────────────────────────────────────────
 
 describe('Wallet Tools', () => {
-  test('vector_get_address', { timeout: 120_000 }, async () => {
-    const text = await callTool(ctx.client, 'vector_get_address', { mnemonic });
+  // vector_get_address is gone (the signer owns address derivation from PR 7
+  // on) - walletAddress now comes from walletFromSeed in before(). This test
+  // takes over its funded/unfunded bookkeeping via the keyless balance tool.
+  test('vector_get_balance', { timeout: 120_000 }, async () => {
+    const text = await callTool(ctx.client, 'vector_get_balance', { address: walletAddress });
     console.log(text);
-    assert.match(text, /addr1/, 'Should contain a Vector address');
-    assert.match(text, /ADA Balance:/, 'Should show ADA balance');
-    assert.match(text, /UTXO Count:/, 'Should show UTXO count');
-
-    const addrMatch = text.match(/(addr1[a-z0-9]+)/);
-    assert.ok(addrMatch, 'Should be able to extract address');
-    walletAddress = addrMatch![1];
+    assert.match(text, /AP3X Balance:/, 'Should show AP3X balance');
+    assert.ok(text.includes(walletAddress), 'Should contain the queried address');
 
     // Check if wallet is funded
-    const balanceMatch = text.match(/ADA Balance:\s*([\d.]+)/);
+    const balanceMatch = text.match(/AP3X Balance:\s*([\d.]+)/);
     if (balanceMatch && parseFloat(balanceMatch[1]) > 0) {
       walletHasAda = true;
-      walletBalanceAda = parseFloat(balanceMatch[1]);
-      console.log(`Wallet funded: ${balanceMatch[1]} ADA`);
+      console.log(`Wallet funded: ${balanceMatch[1]} AP3X`);
     } else {
-      console.log('Wallet has 0 ADA - transaction tests will verify error handling');
+      console.log('Wallet has 0 AP3X - transaction tests will verify error handling');
     }
   });
 
-  test('vector_get_balance', { timeout: 120_000 }, async () => {
-    assert.ok(walletAddress, 'Wallet address should be set from previous test');
-    const text = await callTool(ctx.client, 'vector_get_balance', { address: walletAddress });
-    console.log(text);
-    assert.match(text, /ADA Balance:/, 'Should show ADA balance');
-    assert.ok(text.includes(walletAddress), 'Should contain the queried address');
-  });
-
   test('vector_get_utxos', { timeout: 120_000 }, async () => {
-    const text = await callTool(ctx.client, 'vector_get_utxos', { mnemonic });
+    const text = await callTool(ctx.client, 'vector_get_utxos', { address: walletAddress });
     console.log(text);
     assert.ok(
       text.includes('Total:') || text.includes('No UTxOs found'),
@@ -91,16 +84,10 @@ describe('Wallet Tools', () => {
 // ─── History & Limits ───────────────────────────────────────────────────────
 
 describe('History & Limits', () => {
-  test('vector_get_spend_limits', { timeout: 120_000 }, async () => {
-    const text = await callTool(ctx.client, 'vector_get_spend_limits', {});
-    console.log(text);
-    assert.match(text, /Per-Transaction Limit:/, 'Should show per-tx limit');
-    assert.match(text, /Daily Limit:/, 'Should show daily limit');
-    assert.match(text, /Daily Remaining:/, 'Should show daily remaining');
-  });
+  // vector_get_spend_limits is gone (the signer owns spend limits from PR 7 on).
 
   test('vector_get_transaction_history', { timeout: 120_000 }, async () => {
-    const text = await callTool(ctx.client, 'vector_get_transaction_history', { mnemonic, limit: 5 });
+    const text = await callTool(ctx.client, 'vector_get_transaction_history', { address: walletAddress, limit: 5 });
     console.log(text);
     assert.ok(
       text.includes('Transaction History') || text.includes('No transactions found')
@@ -111,39 +98,15 @@ describe('History & Limits', () => {
 });
 
 // ─── UTxO Consolidation ─────────────────────────────────────────────────────
-// Repeated test runs fragment the wallet into many small UTxOs. Plutus script
-// transactions need collateral (≥5 ADA in ≤3 inputs). Consolidate up-front so
-// later tests don't fail from fragmentation.
-
-describe('UTxO Consolidation', () => {
-  test('consolidate wallet UTxOs', { timeout: 120_000 }, async () => {
-    if (!walletHasAda) return;
-    const utxoText = await callTool(ctx.client, 'vector_get_utxos', { mnemonic });
-    const countMatch = utxoText.match(/Total:\s*(\d+)/);
-    const utxoCount = countMatch ? parseInt(countMatch[1], 10) : 0;
-    if (utxoCount <= 3) {
-      console.log(`Only ${utxoCount} UTxO(s) — no consolidation needed`);
-      return;
-    }
-    // Send most of the balance to self, forcing Lucid to consume many inputs.
-    // This reduces the UTxO set to ~2 (output + change).
-    const consolidateAmount = Math.floor(walletBalanceAda) - 2; // leave buffer for fees
-    if (consolidateAmount < 2) {
-      console.log(`Balance too low (${walletBalanceAda} ADA) to consolidate`);
-      return;
-    }
-    console.log(`${utxoCount} UTxOs detected — consolidating ${consolidateAmount} ADA to self...`);
-    const text = await callTool(ctx.client, 'vector_send_apex', {
-      recipientAddress: walletAddress,
-      amount: consolidateAmount,
-      mnemonic,
-    });
-    console.log(text);
-    assertSuccessOrKnownError(text, /Transaction Hash:/, 'consolidate UTxOs');
-    console.log('Waiting 10s for consolidation tx to confirm...');
-    await wait(10);
-  });
-});
+// Removed: consolidation only had a reason to exist because vector_send_apex
+// could submit. The keyless build_* tools never submit (vector_send_apex and
+// vector_send_tokens are gone outright), so there is no longer a way for this
+// package to land a real consolidating transaction on its own - that becomes
+// the local signer's concern once it drives the four-call non-custodial flow.
+// Fragmentation-tolerance for the build/dry-run tests below is covered the
+// same way every other wallet-state-dependent assertion in this file is:
+// assertSuccessOrKnownError treats "Failed to build ..." as an acceptable
+// known outcome, not a hard failure.
 
 // ─── Transaction Tools ──────────────────────────────────────────────────────
 
@@ -152,117 +115,109 @@ describe('Transaction Tools', () => {
     assert.ok(walletAddress, 'Wallet address required');
     const text = await callTool(ctx.client, 'vector_dry_run', {
       outputs: [{ address: walletAddress, lovelace: 2_000_000 }],
-      mnemonic,
+      changeAddress: walletAddress,
     });
     console.log(text);
     assertSuccessOrKnownError(text, /Valid:.*\nEstimated Fee:/, 'vector_dry_run');
   });
 
-  test('vector_build_transaction (unsigned)', { timeout: 120_000 }, async () => {
+  test('vector_build_transaction', { timeout: 120_000 }, async () => {
     assert.ok(walletAddress, 'Wallet address required');
     const text = await callTool(ctx.client, 'vector_build_transaction', {
       outputs: [{ address: walletAddress, lovelace: 2_000_000 }],
-      mnemonic,
-      submit: false,
+      changeAddress: walletAddress,
     });
     console.log(text);
-    assertSuccessOrKnownError(text, /CBOR/, 'vector_build_transaction (unsigned)');
+    assertSuccessOrKnownError(text, /CBOR/, 'vector_build_transaction');
   });
 
-  test('vector_build_transaction (submit)', { timeout: 120_000 }, async () => {
-    assert.ok(walletAddress, 'Wallet address required');
-    const text = await callTool(ctx.client, 'vector_build_transaction', {
-      outputs: [{ address: walletAddress, lovelace: 2_000_000 }],
-      mnemonic,
-      submit: true,
-    });
-    console.log(text);
-    assertSuccessOrKnownError(text, /Transaction Hash:/, 'vector_build_transaction (submit)');
-  });
+  // vector_build_transaction (submit) is gone: the tool no longer submits at
+  // all (no submit param exists on it anymore) - keyless-e2e.test.ts is the
+  // suite that now covers the build -> sign -> submit -> await pipeline.
 
-  test('vector_send_apex', { timeout: 120_000 }, async () => {
+  test('vector_build_send_apex', { timeout: 120_000 }, async () => {
     assert.ok(walletAddress, 'Wallet address required');
     // Wait for previous tx UTxOs to settle
     if (walletHasAda) {
       console.log('Waiting 10s for UTxOs to settle...');
       await wait(10);
     }
-    const text = await callTool(ctx.client, 'vector_send_apex', {
+    const text = await callTool(ctx.client, 'vector_build_send_apex', {
+      changeAddress: walletAddress,
       recipientAddress: walletAddress,
       amount: 2,
-      mnemonic,
     });
     console.log(text);
-    assertSuccessOrKnownError(text, /Transaction Hash:/, 'vector_send_apex');
+    assertSuccessOrKnownError(text, /Unsigned TX CBOR:/, 'vector_build_send_apex');
   });
 
-  test('vector_send_tokens', { timeout: 120_000 }, async () => {
+  test('vector_build_send_tokens', { timeout: 120_000 }, async () => {
     assert.ok(walletAddress, 'Wallet address required');
     // Wait for send_apex UTxOs to settle
     if (walletHasAda) {
       console.log('Waiting 10s for UTxOs to settle...');
       await wait(10);
     }
-    const text = await callTool(ctx.client, 'vector_send_tokens', {
+    const text = await callTool(ctx.client, 'vector_build_send_tokens', {
+      changeAddress: walletAddress,
       recipientAddress: walletAddress,
       policyId: 'a'.repeat(56),
       assetName: 'test',
       amount: '1',
-      mnemonic,
     });
     console.log(text);
-    assertSuccessOrKnownError(text, /Transaction Hash:/, 'vector_send_tokens');
+    assertSuccessOrKnownError(text, /Unsigned TX CBOR:/, 'vector_build_send_tokens');
   });
 });
 
 // ─── Smart Contract Tools ───────────────────────────────────────────────────
 
 describe('Smart Contract Tools', () => {
-  test('vector_deploy_contract', { timeout: 120_000 }, async () => {
+  test('vector_build_deploy_contract', { timeout: 120_000 }, async () => {
     if (walletHasAda) {
       console.log('Waiting 10s for UTxOs to settle before deploy...');
       await wait(10);
     }
-    const text = await callTool(ctx.client, 'vector_deploy_contract', {
+    const text = await callTool(ctx.client, 'vector_build_deploy_contract', {
       scriptCbor: ALWAYS_SUCCEEDS_V2,
       scriptType: 'PlutusV2',
-      mnemonic,
+      changeAddress: walletAddress,
     });
     console.log(text);
-    assertSuccessOrKnownError(text, /Script Address:/, 'vector_deploy_contract');
+    assertSuccessOrKnownError(text, /Unsigned TX CBOR:/, 'vector_build_deploy_contract');
   });
 
-  test('vector_interact_contract (lock)', { timeout: 120_000 }, async () => {
+  test('vector_build_interact_contract (lock)', { timeout: 120_000 }, async () => {
     if (walletHasAda) {
       console.log('Waiting 10s for deploy tx to confirm...');
       await wait(10);
     }
-    const text = await callTool(ctx.client, 'vector_interact_contract', {
+    const text = await callTool(ctx.client, 'vector_build_interact_contract', {
       scriptCbor: ALWAYS_SUCCEEDS_V2,
       scriptType: 'PlutusV2',
       action: 'lock',
-      mnemonic,
+      changeAddress: walletAddress,
       datum: 'd87980',
       lovelaceAmount: 2_000_000,
     });
     console.log(text);
-    assertSuccessOrKnownError(text, /Transaction Hash:/, 'vector_interact_contract (lock)');
+    assertSuccessOrKnownError(text, /Unsigned TX CBOR:/, 'vector_build_interact_contract (lock)');
   });
 
-  test('vector_interact_contract (spend)', { timeout: 120_000 }, async () => {
+  test('vector_build_interact_contract (spend)', { timeout: 120_000 }, async () => {
     if (walletHasAda) {
       console.log('Waiting 10s for lock tx to confirm...');
       await wait(10);
     }
-    const text = await callTool(ctx.client, 'vector_interact_contract', {
+    const text = await callTool(ctx.client, 'vector_build_interact_contract', {
       scriptCbor: ALWAYS_SUCCEEDS_V2,
       scriptType: 'PlutusV2',
       action: 'spend',
-      mnemonic,
+      changeAddress: walletAddress,
       redeemer: 'd87980',
     });
     console.log(text);
-    assertSuccessOrKnownError(text, /Transaction Hash:/, 'vector_interact_contract (spend)');
+    assertSuccessOrKnownError(text, /Unsigned TX CBOR:/, 'vector_build_interact_contract (spend)');
   });
 });
 

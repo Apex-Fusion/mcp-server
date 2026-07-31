@@ -1,7 +1,5 @@
 import { z } from "zod/v4";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Lucid, fromText, Data, applyDoubleCborEncoding, validatorToAddress, validatorToScriptHash, getAddressDetails } from '@lucid-evolution/lucid';
-import type { SpendingValidator } from '@lucid-evolution/lucid';
 
 import * as dotenv from 'dotenv';
 import { resolve } from 'path';
@@ -12,16 +10,15 @@ import { lovelaceToAda, formatAssetName } from '@apexfusion/vector-mcp-shared/tx
 import {
   VECTOR_OGMIOS_URL, VECTOR_SUBMIT_URL, VECTOR_KOIOS_URL, VECTOR_EXPLORER_URL, explorerTxLink,
 } from '@apexfusion/vector-mcp-shared/config';
-import { safetyLayer } from './safety.js';
 import { limiterFor } from './rate-limiter.js';
 import { pollUntilConfirmed, buildConfirmationCheck } from './poll.js';
 import { registerAgentNetworkTools } from './agent-network.js';
 import { registerSelfImprovementTools } from './self-improvement.js';
-import type {
-  VectorToken, VectorWalletInfo, VectorAdaTransactionResult, VectorTokenTransactionResult,
-  TxOutput, VectorBuildTransactionResult, VectorDryRunResult, VectorDeployContractResult,
-  VectorInteractContractResult,
-} from '@apexfusion/vector-mcp-shared/types';
+import type { VectorDryRunResult } from '@apexfusion/vector-mcp-shared/types';
+import {
+  lucidForAddress, buildSendApex, buildSendTokens, buildMultiOutput,
+  buildDeployContract, buildInteractContract,
+} from './build.js';
 
 // Direct .env loading
 const __filename = fileURLToPath(import.meta.url);
@@ -37,440 +34,13 @@ if (existsSync(envPath)) {
   }
 }
 
-// Initialize Lucid instance with Ogmios provider
-async function initLucid(mnemonic: string, accountIndex: number = 0) {
-  const provider = new OgmiosProvider({
+// Shared provider for the keyless build_* tools (Task 5 reuses this).
+function makeProvider(): OgmiosProvider {
+  return new OgmiosProvider({
     ogmiosUrl: VECTOR_OGMIOS_URL,
     submitUrl: VECTOR_SUBMIT_URL,
     koiosUrl: VECTOR_KOIOS_URL,
   });
-
-  // Vector uses --mainnet flag, so addresses are addr1... format
-  const lucid = await Lucid(provider, 'Mainnet');
-
-  if (!mnemonic) {
-    throw new Error('mnemonic is required');
-  }
-
-  const trimmedMnemonic = mnemonic.trim();
-  const words = trimmedMnemonic.split(/\s+/);
-
-  const validLengths = [12, 15, 18, 21, 24];
-  if (!validLengths.includes(words.length)) {
-    throw new Error(`Invalid mnemonic: Expected 12, 15, 18, 21 or 24 words, got ${words.length}`);
-  }
-
-  lucid.selectWallet.fromSeed(trimmedMnemonic, { accountIndex });
-
-  const address = await lucid.wallet().address();
-  if (!address) {
-    throw new Error('Failed to derive address from mnemonic');
-  }
-
-  return lucid;
-}
-
-// Get wallet info
-export async function getWalletInfo(mnemonic: string, accountIndex: number = 0): Promise<VectorWalletInfo> {
-  console.error('[getWalletInfo] Initializing Lucid...');
-  const lucid = await initLucid(mnemonic, accountIndex);
-  console.error('[getWalletInfo] Getting address...');
-  const address = await lucid.wallet().address();
-  console.error('[getWalletInfo] Querying UTxOs...');
-  const utxos = await lucid.utxosAt(address);
-  console.error(`[getWalletInfo] Found ${utxos.length} UTxOs`);
-
-  let adaBalance = '0';
-  let tokenBalances: VectorToken[] = [];
-
-  if (utxos.length > 0) {
-    // Aggregate all UTxO assets
-    const aggregated: Record<string, bigint> = {};
-    for (const utxo of utxos) {
-      for (const [unit, qty] of Object.entries(utxo.assets)) {
-        aggregated[unit] = (aggregated[unit] || 0n) + BigInt(qty);
-      }
-    }
-
-    adaBalance = aggregated['lovelace'] ? lovelaceToAda(aggregated['lovelace']) : '0';
-
-    for (const [unit, quantity] of Object.entries(aggregated)) {
-      if (unit === 'lovelace') continue;
-
-      try {
-        const policyId = unit.slice(0, 56);
-        const assetNameHex = unit.slice(56);
-        const displayName = assetNameHex
-          ? formatAssetName(assetNameHex)
-          : `${policyId.substring(0, 8)}...`;
-
-        tokenBalances.push({
-          unit,
-          name: displayName,
-          quantity: quantity.toString(),
-        });
-      } catch {
-        tokenBalances.push({
-          unit,
-          name: unit,
-          quantity: quantity.toString(),
-        });
-      }
-    }
-  }
-
-  return {
-    address,
-    utxoCount: utxos.length,
-    ada: adaBalance,
-    tokens: tokenBalances,
-  };
-}
-
-// Send AP3X transaction
-export async function sendAda(
-  recipientAddress: string,
-  amountAda: number,
-  mnemonic: string,
-  metadata: any = null
-): Promise<VectorAdaTransactionResult> {
-  if (!recipientAddress) {
-    throw new Error('Recipient address is required');
-  }
-
-  if (typeof amountAda !== 'number' || amountAda <= 0) {
-    throw new Error('Amount must be a positive number');
-  }
-
-  const lovelaceAmount = Math.floor(amountAda * 1_000_000);
-
-  // Safety check
-  const safetyCheck = safetyLayer.checkTransaction(lovelaceAmount);
-  if (!safetyCheck.allowed) {
-    throw new Error(`Safety limit exceeded: ${safetyCheck.reason}`);
-  }
-
-  const lucid = await initLucid(mnemonic);
-  const senderAddress = await lucid.wallet().address();
-
-  // Validate recipient address
-  try {
-    getAddressDetails(recipientAddress);
-  } catch (error) {
-    throw new Error(`Invalid recipient address: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  // Build transaction
-  let tx = lucid.newTx()
-    .pay.ToAddress(recipientAddress, { lovelace: BigInt(lovelaceAmount) });
-
-  if (metadata) {
-    const parsedMetadata = typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
-    tx = tx.attachMetadata(674, parsedMetadata);
-  }
-
-  const signBuilder = await tx.complete();
-  const signedTx = await signBuilder.sign.withWallet().complete();
-  const txHash = await signedTx.submit();
-
-  // Record in safety layer
-  safetyLayer.recordTransaction(txHash, lovelaceAmount, recipientAddress);
-
-  return {
-    txHash,
-    senderAddress,
-    recipientAddress,
-    amount: amountAda,
-    links: {
-      explorer: explorerTxLink(txHash),
-    },
-  };
-}
-
-// Send tokens transaction
-export async function sendTokens(
-  recipientAddress: string,
-  policyId: string,
-  assetName: string,
-  amount: string,
-  mnemonic: string,
-  adaAmount: number | null = null
-): Promise<VectorTokenTransactionResult> {
-  if (!recipientAddress) throw new Error('Recipient address is required');
-  if (!policyId) throw new Error('Policy ID is required');
-  if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
-    throw new Error('Amount must be a positive number');
-  }
-
-  // Safety check on AP3X portion
-  const adaLovelace = adaAmount ? Math.floor(adaAmount * 1_000_000) : 2_000_000; // min ~2 AP3X
-  const safetyCheck = safetyLayer.checkTransaction(adaLovelace);
-  if (!safetyCheck.allowed) {
-    throw new Error(`Safety limit exceeded: ${safetyCheck.reason}`);
-  }
-
-  const lucid = await initLucid(mnemonic);
-  const senderAddress = await lucid.wallet().address();
-
-  try {
-    getAddressDetails(recipientAddress);
-  } catch (error) {
-    throw new Error(`Invalid recipient address: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  let assetNameHex = assetName;
-  if (assetName && !/^[0-9a-fA-F]+$/.test(assetName)) {
-    assetNameHex = fromText(assetName);
-  }
-
-  const unit = `${policyId}${assetNameHex}`;
-  const assets = { [unit]: BigInt(amount) };
-
-  const outputLovelace = adaAmount
-    ? BigInt(Math.floor(adaAmount * 1_000_000))
-    : BigInt(2_000_000); // Default min AP3X
-
-  let tx = lucid.newTx()
-    .pay.ToAddress(recipientAddress, {
-      lovelace: outputLovelace,
-      ...assets,
-    });
-
-  const signBuilder = await tx.complete();
-  const signedTx = await signBuilder.sign.withWallet().complete();
-  const txHash = await signedTx.submit();
-
-  safetyLayer.recordTransaction(txHash, Number(outputLovelace), recipientAddress);
-
-  const displayAssetName = assetName ? formatAssetName(assetNameHex) : '';
-
-  return {
-    txHash,
-    senderAddress,
-    recipientAddress,
-    token: {
-      policyId,
-      name: displayAssetName,
-      amount,
-    },
-    ada: lovelaceToAda(outputLovelace),
-    links: {
-      explorer: explorerTxLink(txHash),
-    },
-  };
-}
-
-// Build a complex multi-output transaction
-export async function buildTransaction(
-  outputs: TxOutput[],
-  mnemonic: string,
-  metadata: any = null,
-  submit: boolean = false,
-): Promise<VectorBuildTransactionResult> {
-  if (!outputs || outputs.length === 0) {
-    throw new Error('At least one output is required');
-  }
-
-  // Calculate total AP3X across all outputs for safety check
-  const totalLovelace = outputs.reduce((sum, o) => sum + o.lovelace, 0);
-  const safetyCheck = safetyLayer.checkTransaction(totalLovelace);
-  if (!safetyCheck.allowed) {
-    throw new Error(`Safety limit exceeded: ${safetyCheck.reason}`);
-  }
-
-  const lucid = await initLucid(mnemonic);
-
-  let tx = lucid.newTx();
-
-  for (const output of outputs) {
-    const assets: Record<string, bigint> = {
-      lovelace: BigInt(output.lovelace),
-    };
-    if (output.assets) {
-      for (const [unit, qty] of Object.entries(output.assets)) {
-        assets[unit] = BigInt(qty);
-      }
-    }
-    tx = tx.pay.ToAddress(output.address, assets);
-  }
-
-  if (metadata) {
-    const parsedMetadata = typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
-    tx = tx.attachMetadata(674, parsedMetadata);
-  }
-
-  const completedTx = await tx.complete();
-  const txJson = (completedTx as any).toJSON?.() ?? {};
-  const fee = txJson?.body?.fee ?? '0';
-  const txHash = completedTx.toHash();
-  const txCbor = completedTx.toCBOR();
-
-  if (submit) {
-    const signedTx = await completedTx.sign.withWallet().complete();
-    const submittedHash = await signedTx.submit();
-
-    safetyLayer.recordTransaction(submittedHash, totalLovelace, outputs.map(o => o.address).join(', '));
-
-    return {
-      txCbor: '',
-      txHash: submittedHash,
-      fee: String(fee),
-      feeAda: lovelaceToAda(fee),
-      outputCount: outputs.length,
-      totalAda: lovelaceToAda(totalLovelace),
-      submitted: true,
-      links: { explorer: explorerTxLink(submittedHash) },
-    };
-  }
-
-  return {
-    txCbor,
-    txHash,
-    fee: String(fee),
-    feeAda: lovelaceToAda(fee),
-    outputCount: outputs.length,
-    totalAda: lovelaceToAda(totalLovelace),
-    submitted: false,
-  };
-}
-
-// Deploy a smart contract by locking funds at the script address
-export async function deployContract(
-  scriptCbor: string,
-  scriptType: string,
-  mnemonic: string,
-  initialDatum: string | null = null,
-  lovelaceAmount: number = 2_000_000,
-): Promise<VectorDeployContractResult> {
-  const safetyCheck = safetyLayer.checkTransaction(lovelaceAmount);
-  if (!safetyCheck.allowed) {
-    throw new Error(`Safety limit exceeded: ${safetyCheck.reason}`);
-  }
-
-  const lucid = await initLucid(mnemonic);
-
-  const validator: SpendingValidator = {
-    type: scriptType as any,
-    script: applyDoubleCborEncoding(scriptCbor),
-  };
-
-  const scriptAddress = validatorToAddress('Mainnet', validator);
-  const scriptHash = validatorToScriptHash(validator);
-
-  const datum = initialDatum || Data.void();
-
-  let tx = lucid.newTx()
-    .pay.ToAddressWithData(scriptAddress, { kind: "inline", value: datum }, { lovelace: BigInt(lovelaceAmount) });
-
-  const signBuilder = await tx.complete();
-  const signedTx = await signBuilder.sign.withWallet().complete();
-  const txHash = await signedTx.submit();
-
-  safetyLayer.recordTransaction(txHash, lovelaceAmount, scriptAddress);
-
-  return {
-    txHash,
-    scriptAddress,
-    scriptHash,
-    scriptType,
-    links: { explorer: explorerTxLink(txHash) },
-  };
-}
-
-// Interact with a deployed smart contract (lock or spend)
-export async function interactWithContract(
-  scriptCbor: string,
-  scriptType: string,
-  action: 'spend' | 'lock',
-  mnemonic: string,
-  redeemer: string | null = null,
-  datum: string | null = null,
-  lovelaceAmount: number = 2_000_000,
-  utxoRef: { txHash: string; outputIndex: number } | null = null,
-  assets: Record<string, string> | null = null,
-): Promise<VectorInteractContractResult> {
-  const lucid = await initLucid(mnemonic);
-  const walletAddress = await lucid.wallet().address();
-
-  const validator: SpendingValidator = {
-    type: scriptType as any,
-    script: applyDoubleCborEncoding(scriptCbor),
-  };
-
-  const scriptAddress = validatorToAddress('Mainnet', validator);
-
-  if (action === 'lock') {
-    const safetyCheck = safetyLayer.checkTransaction(lovelaceAmount);
-    if (!safetyCheck.allowed) {
-      throw new Error(`Safety limit exceeded: ${safetyCheck.reason}`);
-    }
-
-    const datumData = datum || Data.void();
-    const outputAssets: Record<string, bigint> = { lovelace: BigInt(lovelaceAmount) };
-    if (assets) {
-      for (const [unit, qty] of Object.entries(assets)) {
-        outputAssets[unit] = BigInt(qty);
-      }
-    }
-
-    let tx = lucid.newTx()
-      .pay.ToAddressWithData(scriptAddress, { kind: "inline", value: datumData }, outputAssets);
-
-    const signBuilder = await tx.complete();
-    const signedTx = await signBuilder.sign.withWallet().complete();
-    const txHash = await signedTx.submit();
-
-    safetyLayer.recordTransaction(txHash, lovelaceAmount, scriptAddress);
-
-    return {
-      txHash,
-      scriptAddress,
-      action: 'lock',
-      links: { explorer: explorerTxLink(txHash) },
-    };
-  } else {
-    // SPEND: collect from script
-    let scriptUtxos;
-    if (utxoRef) {
-      scriptUtxos = await lucid.utxosByOutRef([utxoRef]);
-    } else {
-      scriptUtxos = await lucid.utxosAt(scriptAddress);
-    }
-
-    if (!scriptUtxos || scriptUtxos.length === 0) {
-      throw new Error(`No UTxOs found at script address ${scriptAddress}`);
-    }
-
-    const redeemerData = redeemer || Data.void();
-
-    let completedTx;
-    try {
-      completedTx = await lucid.newTx()
-        .collectFrom(scriptUtxos, redeemerData)
-        .attach.SpendingValidator(validator)
-        .addSigner(walletAddress)
-        .complete();
-    } catch (err) {
-      // Retry without native UPLC evaluator if it fails
-      completedTx = await lucid.newTx()
-        .collectFrom(scriptUtxos, redeemerData)
-        .attach.SpendingValidator(validator)
-        .addSigner(walletAddress)
-        .complete({ localUPLCEval: false });
-    }
-
-    const signedTx = await completedTx.sign.withWallet().complete();
-    const txHash = await signedTx.submit();
-
-    // No spend recording for collecting - funds are coming back to wallet
-
-    return {
-      txHash,
-      scriptAddress,
-      action: 'spend',
-      links: { explorer: explorerTxLink(txHash) },
-    };
-  }
 }
 
 // Register all Vector MCP tools
@@ -550,91 +120,26 @@ ${tokens.length > 0 ? `Token Holdings (${tokens.length}):\n${tokenList}` : 'No t
     }
   );
 
-  // vector_get_address - Get the agent's wallet address and balance
-  server.tool(
-    "vector_get_address",
-    "Get the Vector wallet address, balance, and token holdings derived from a mnemonic",
-    {
-      mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the wallet"),
-    },
-    async ({ mnemonic }) => {
-      const rateCheck = rateLimiter.check();
-      if (!rateCheck.allowed) {
-        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
-      }
-      try {
-        const walletInfo = await getWalletInfo(mnemonic);
-
-        const tokenList = walletInfo.tokens.length > 0
-          ? walletInfo.tokens.map((t: VectorToken) => `${t.quantity} ${t.name}`).join('\n')
-          : 'No tokens found';
-
-        return {
-          content: [{
-            type: "text",
-            text: `# Vector Wallet Information
-
-Address: ${walletInfo.address}
-AP3X Balance: ${walletInfo.ada} AP3X
-UTXO Count: ${walletInfo.utxoCount}
-
-${walletInfo.tokens.length > 0 ? `## Token Holdings (${walletInfo.tokens.length}):\n${tokenList}` : 'No token holdings found'}`,
-          }],
-        };
-      } catch (err) {
-        const error = err as Error;
-        return {
-          content: [{
-            type: "text",
-            text: `Failed to get wallet information: ${error.message}
-
-**Troubleshooting Tips:**
-1. Make sure you have a valid 15 or 24-word BIP39 mnemonic
-2. Verify the Ogmios endpoint is reachable: ${VECTOR_OGMIOS_URL}
-3. Check the console logs for detailed error information`,
-          }],
-        };
-      }
-    }
-  );
-
-  // vector_get_utxos - List UTxOs for an address or the wallet
+  // vector_get_utxos - List UTxOs for an address
   server.tool(
     "vector_get_utxos",
-    "List unspent transaction outputs (UTxOs) for a Vector address or a wallet derived from a mnemonic",
+    "List unspent transaction outputs (UTxOs) for a Vector address",
     {
-      address: z.string().optional().describe("Vector address to query UTxOs for. If omitted, mnemonic is required."),
-      mnemonic: z.string().optional().describe("15 or 24-word BIP39 mnemonic (required if address is omitted)"),
+      address: z.string().describe("Vector address to query UTxOs for (addr1...)"),
     },
-    async ({ address, mnemonic }) => {
+    async ({ address }) => {
       const rateCheck = rateLimiter.check();
       if (!rateCheck.allowed) {
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
       }
       try {
-        let utxos;
-        let queryAddress: string;
-
-        if (address) {
-          const provider = new OgmiosProvider({
-            ogmiosUrl: VECTOR_OGMIOS_URL,
-            submitUrl: VECTOR_SUBMIT_URL,
-            koiosUrl: VECTOR_KOIOS_URL,
-          });
-          utxos = await provider.getUtxos(address);
-          queryAddress = address;
-        } else {
-          if (!mnemonic) throw new Error('Provide either address or mnemonic');
-          const lucid = await initLucid(mnemonic);
-          queryAddress = await lucid.wallet().address();
-          utxos = await lucid.utxosAt(queryAddress);
-        }
+        const utxos = await makeProvider().getUtxos(address);
 
         if (utxos.length === 0) {
           return {
             content: [{
               type: "text",
-              text: `No UTxOs found for ${queryAddress}`,
+              text: `No UTxOs found for ${address}`,
             }],
           };
         }
@@ -648,7 +153,7 @@ ${walletInfo.tokens.length > 0 ? `## Token Holdings (${walletInfo.tokens.length}
         return {
           content: [{
             type: "text",
-            text: `# UTxOs for ${queryAddress}
+            text: `# UTxOs for ${address}
 
 Total: ${utxos.length} UTxO(s)
 
@@ -667,66 +172,40 @@ ${utxoList}`,
     }
   );
 
-  // vector_send_apex - Send APEX with safety limits (or craft unsigned TX)
+  // vector_build_send_apex - build an UNSIGNED AP3X payment (keyless)
   server.tool(
-    "vector_send_apex",
-    "Send AP3X from a wallet to a recipient address. Set unsigned_only=true to return unsigned CBOR without submitting (transaction-crafter mode).",
+    "vector_build_send_apex",
+    "Build an UNSIGNED transaction sending AP3X to a recipient. Takes no key material - sign the returned CBOR with your local signer (vector_signer_sign), then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     {
+      changeAddress: z.string().describe("Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address."),
       recipientAddress: z.string().describe("Recipient Vector address (addr1...)"),
       amount: z.number().min(1).describe("Amount of AP3X to send"),
-      mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the sending wallet"),
       metadata: z.string().optional().describe("Optional transaction metadata in JSON format"),
-      unsigned_only: z.boolean().optional().default(false).describe("If true, return unsigned TX CBOR without signing or submitting"),
     },
-    async ({ recipientAddress, amount, mnemonic, metadata, unsigned_only }) => {
+    async ({ changeAddress, recipientAddress, amount, metadata }) => {
       const rateCheck = rateLimiter.check();
       if (!rateCheck.allowed) {
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
       }
       try {
-        if (unsigned_only) {
-          const lovelaceAmount = BigInt(Math.floor(amount * 1_000_000));
-          const lucid = await initLucid(mnemonic);
-          let txBuilder = lucid.newTx().pay.ToAddress(recipientAddress, { lovelace: lovelaceAmount });
-          if (metadata) {
-            const parsedMetadata = typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
-            txBuilder = txBuilder.attachMetadata(674, parsedMetadata);
-          }
-          const tx = await txBuilder.complete();
-          const txJson = (tx as any).toJSON?.() ?? {};
-          const fee = txJson?.body?.fee ?? '0';
-          const txCbor = tx.toCBOR();
-          return {
-            content: [{
-              type: "text",
-              text: `# Unsigned Transaction (Transaction-Crafter Mode)
-
-**Amount:** ${amount} AP3X (${lovelaceAmount} lovelace)
-**To:** ${recipientAddress}
-**Estimated Fee:** ${lovelaceToAda(fee)} AP3X
-
-**Unsigned TX CBOR:**
-\`\`\`
-${txCbor}
-\`\`\`
-
-This transaction has NOT been submitted. Sign and submit it separately.`,
-            }],
-          };
-        }
-
-        const result = await sendAda(recipientAddress, amount, mnemonic, metadata);
+        const lucid = await lucidForAddress(makeProvider(), changeAddress);
+        const result = await buildSendApex(lucid, { recipientAddress, amountApex: amount, metadataJson: metadata });
         return {
           content: [{
             type: "text",
-            text: `# AP3X Transaction Successful
+            text: `# Unsigned Transaction Built
 
-Transaction Hash: ${result.txHash}
-From: ${result.senderAddress}
-To: ${result.recipientAddress}
-Amount: ${result.amount} AP3X
+**Amount:** ${amount} AP3X
+**To:** ${recipientAddress}
+**Estimated Fee:** ${result.feeAda} AP3X
+**Tx Hash:** ${result.txHash}
 
-[View on Explorer](${result.links.explorer})`,
+**Unsigned TX CBOR:**
+\`\`\`
+${result.txCbor}
+\`\`\`
+
+Non-custodial flow: 1) sign locally with vector_signer_sign { txCbor } — your keys never leave your machine; 2) broadcast with vector_submit_transaction { signedTxCbor }; 3) confirm with vector_await_transaction { txHash }.`,
           }],
         };
       } catch (err) {
@@ -734,93 +213,56 @@ Amount: ${result.amount} AP3X
         return {
           content: [{
             type: "text",
-            text: `Failed to send AP3X: ${error.message}
+            text: `Failed to build transaction: ${error.message}
 
 **Troubleshooting Tips:**
-1. Check that your wallet has sufficient balance
+1. Verify the change address is your funded wallet address (addr1...)
 2. Verify the recipient address is correct (addr1...)
-3. Check spend limits with vector_get_spend_limits
-4. Verify the Ogmios endpoint is reachable`,
+3. Ensure the wallet has enough AP3X for the amount plus fees`,
           }],
         };
       }
     }
   );
 
-  // vector_send_tokens - Send native tokens with safety limits (or craft unsigned TX)
+  // vector_build_send_tokens - build an UNSIGNED native-token transfer (keyless)
   server.tool(
-    "vector_send_tokens",
-    "Send Vector native tokens from a wallet to a recipient address. Set unsigned_only=true to return unsigned CBOR without submitting.",
+    "vector_build_send_tokens",
+    "Build an UNSIGNED transaction sending Vector native tokens. Takes no key material - sign the returned CBOR with your local signer (vector_signer_sign), then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     {
+      changeAddress: z.string().describe("Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address."),
       recipientAddress: z.string().describe("Recipient Vector address (addr1...)"),
-      policyId: z.string().describe("Token policy ID"),
-      assetName: z.string().describe("Asset name (can be empty for policy-only tokens)"),
+      policyId: z.string().describe("Token policy ID (56 hex characters)"),
+      assetName: z.string().describe("Asset name (text or hex; can be empty for policy-only tokens)"),
       amount: z.string().describe("Amount of tokens to send"),
-      mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the sending wallet"),
-      adaAmount: z.number().optional().describe("Optional AP3X to include (uses minimum required if not specified)"),
-      unsigned_only: z.boolean().optional().default(false).describe("If true, return unsigned TX CBOR without signing or submitting"),
+      adaAmount: z.number().optional().describe("Optional AP3X to include with the tokens (defaults to the 2 AP3X minimum)"),
     },
-    async ({ recipientAddress, policyId, assetName, amount, mnemonic, adaAmount, unsigned_only }) => {
+    async ({ changeAddress, recipientAddress, policyId, assetName, amount, adaAmount }) => {
       const rateCheck = rateLimiter.check();
       if (!rateCheck.allowed) {
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
       }
       try {
-        if (unsigned_only) {
-          const lucid = await initLucid(mnemonic);
-          let assetNameHex = assetName;
-          if (assetName && !/^[0-9a-fA-F]+$/.test(assetName)) {
-            assetNameHex = fromText(assetName);
-          }
-          const unit = `${policyId}${assetNameHex}`;
-          const outputLovelace = adaAmount
-            ? BigInt(Math.floor(adaAmount * 1_000_000))
-            : BigInt(2_000_000);
-          const tx = await lucid.newTx()
-            .pay.ToAddress(recipientAddress, { lovelace: outputLovelace, [unit]: BigInt(amount) })
-            .complete();
-          const txJson = (tx as any).toJSON?.() ?? {};
-          const fee = txJson?.body?.fee ?? '0';
-          const txCbor = tx.toCBOR();
-          return {
-            content: [{
-              type: "text",
-              text: `# Unsigned Token Transaction (Transaction-Crafter Mode)
+        const lucid = await lucidForAddress(makeProvider(), changeAddress);
+        const result = await buildSendTokens(lucid, { recipientAddress, policyId, assetName, amount, apexAmount: adaAmount });
+        const displayName = assetName && !/^[0-9a-fA-F]+$/.test(assetName) ? assetName : (formatAssetName(assetName) || `${policyId.substring(0, 8)}...`);
+        return {
+          content: [{
+            type: "text",
+            text: `# Unsigned Token Transaction Built
 
-**Token:** ${formatAssetName(assetNameHex) || policyId.substring(0,8) + '...'}
+**Token:** ${displayName}
 **Amount:** ${amount}
 **To:** ${recipientAddress}
-**Included AP3X:** ${lovelaceToAda(outputLovelace)} AP3X
-**Estimated Fee:** ${lovelaceToAda(fee)} AP3X
+**Estimated Fee:** ${result.feeAda} AP3X
+**Tx Hash:** ${result.txHash}
 
 **Unsigned TX CBOR:**
 \`\`\`
-${txCbor}
+${result.txCbor}
 \`\`\`
 
-This transaction has NOT been submitted. Sign and submit it separately.`,
-            }],
-          };
-        }
-
-        const result = await sendTokens(recipientAddress, policyId, assetName, amount, mnemonic, adaAmount);
-        return {
-          content: [{
-            type: "text",
-            text: `# Token Transaction Successful
-
-Transaction Hash: ${result.txHash}
-From: ${result.senderAddress}
-To: ${result.recipientAddress}
-
-Token Details:
-- Policy ID: ${result.token.policyId}
-- Asset Name: ${result.token.name || '(none)'}
-- Amount: ${result.token.amount}
-
-Included AP3X: ${result.ada} AP3X
-
-[View on Explorer](${result.links.explorer})`,
+Non-custodial flow: 1) sign locally with vector_signer_sign { txCbor }; 2) broadcast with vector_submit_transaction { signedTxCbor }; 3) confirm with vector_await_transaction { txHash }.`,
           }],
         };
       } catch (err) {
@@ -828,114 +270,56 @@ Included AP3X: ${result.ada} AP3X
         return {
           content: [{
             type: "text",
-            text: `Failed to send tokens: ${error.message}
+            text: `Failed to build token transaction: ${error.message}
 
 **Troubleshooting Tips:**
-1. Check that your wallet has sufficient AP3X and token balance
-2. Verify the policy ID and asset name are correct
-3. Verify the recipient address is correct (addr1...)
-4. Check spend limits with vector_get_spend_limits`,
+1. Check that the wallet at changeAddress holds the token and enough AP3X
+2. Verify the policy ID (56 hex chars) and asset name are correct
+3. Verify the recipient address is correct (addr1...)`,
           }],
         };
       }
     }
   );
 
-  // vector_get_spend_limits - Check safety layer status
-  server.tool(
-    "vector_get_spend_limits",
-    "Check current spend limits and remaining daily budget",
-    {},
-    async () => {
-      const rateCheck = rateLimiter.check();
-      if (!rateCheck.allowed) {
-        return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
-      }
-      try {
-        const status = safetyLayer.getSpendStatus();
-        const log = safetyLayer.getAuditLog();
-
-        const recentTxs = log.slice(-5).reverse().map((entry) =>
-          `- ${entry.timestamp}: ${lovelaceToAda(entry.amountLovelace)} AP3X → ${entry.recipient.substring(0, 20)}... (${entry.txHash.substring(0, 16)}...)`
-        ).join('\n');
-
-        return {
-          content: [{
-            type: "text",
-            text: `# Vector Spend Limits
-
-Per-Transaction Limit: ${lovelaceToAda(status.perTransactionLimit)} AP3X
-Daily Limit: ${lovelaceToAda(status.dailyLimit)} AP3X
-Daily Spent: ${lovelaceToAda(status.dailySpent)} AP3X
-Daily Remaining: ${lovelaceToAda(status.dailyRemaining)} AP3X
-Resets At: ${status.resetTime}
-
-${log.length > 0 ? `## Recent Transactions (last ${Math.min(5, log.length)}):\n${recentTxs}` : 'No transactions recorded yet.'}`,
-          }],
-        };
-      } catch (err) {
-        const error = err as Error;
-        return {
-          content: [{
-            type: "text",
-            text: `Failed to get spend limits: ${error.message}`,
-          }],
-        };
-      }
-    }
-  );
-
-  // vector_build_transaction - Build a complex multi-output transaction
+  // vector_build_transaction - build an UNSIGNED multi-output transaction (keyless)
   server.tool(
     "vector_build_transaction",
-    "Build a complex multi-output transaction with metadata. Set submit=true to sign and submit, or false to return unsigned CBOR for review.",
+    "Build an UNSIGNED multi-output transaction with optional metadata. Takes no key material and never submits - sign the returned CBOR with your local signer (vector_signer_sign), then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     {
+      changeAddress: z.string().describe("Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address."),
       outputs: z.array(z.object({
         address: z.string().describe("Recipient Vector address"),
         lovelace: z.number().describe("Amount in lovelace (1 AP3X = 1,000,000 lovelace)"),
         assets: z.record(z.string(), z.string()).optional().describe("Optional native assets: { 'policyId+assetNameHex': 'quantity' }"),
       })).min(1).describe("Transaction outputs"),
-      mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the signing wallet"),
       metadata: z.string().optional().describe("Optional JSON metadata (attached under label 674)"),
-      submit: z.boolean().optional().describe("If true, sign and submit the transaction. If false/omitted, return unsigned CBOR for review."),
     },
-    async ({ outputs, mnemonic, metadata, submit }) => {
+    async ({ changeAddress, outputs, metadata }) => {
       const rateCheck = rateLimiter.check();
       if (!rateCheck.allowed) {
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
       }
       try {
-        const result = await buildTransaction(outputs, mnemonic, metadata, submit);
-
-        if (result.submitted) {
-          return {
-            content: [{
-              type: "text",
-              text: `# Transaction Submitted
-
-Transaction Hash: ${result.txHash}
-Fee: ${result.feeAda} AP3X
-Outputs: ${result.outputCount}
-Total AP3X Sent: ${result.totalAda} AP3X
-
-[View on Explorer](${result.links?.explorer})`,
-            }],
-          };
-        }
-
+        const lucid = await lucidForAddress(makeProvider(), changeAddress);
+        const result = await buildMultiOutput(lucid, { outputs, metadataJson: metadata });
+        const totalLovelace = outputs.reduce((sum, o) => sum + o.lovelace, 0);
         return {
           content: [{
             type: "text",
-            text: `# Transaction Built (Not Submitted)
+            text: `# Unsigned Transaction Built (Not Submitted)
 
-Transaction Hash: ${result.txHash}
-Fee: ${result.feeAda} AP3X
-Outputs: ${result.outputCount}
-Total AP3X: ${result.totalAda} AP3X
+**Tx Hash:** ${result.txHash}
+**Fee:** ${result.feeAda} AP3X
+**Outputs:** ${outputs.length}
+**Total AP3X:** ${lovelaceToAda(totalLovelace)} AP3X
 
-CBOR (hex): ${result.txCbor.substring(0, 200)}${result.txCbor.length > 200 ? '...' : ''}
+**Unsigned TX CBOR:**
+\`\`\`
+${result.txCbor}
+\`\`\`
 
-Use vector_dry_run with this CBOR to simulate, or call vector_build_transaction again with submit=true to submit.`,
+Use vector_dry_run with this CBOR to simulate it, sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction { txHash }.`,
           }],
         };
       } catch (err) {
@@ -947,8 +331,7 @@ Use vector_dry_run with this CBOR to simulate, or call vector_build_transaction 
 
 **Troubleshooting Tips:**
 1. Verify all recipient addresses are valid (addr1...)
-2. Ensure wallet has enough AP3X for outputs + fees
-3. Check spend limits with vector_get_spend_limits`,
+2. Ensure the wallet at changeAddress has enough AP3X for outputs + fees`,
           }],
         };
       }
@@ -958,18 +341,18 @@ Use vector_dry_run with this CBOR to simulate, or call vector_build_transaction 
   // vector_dry_run - Simulate a transaction without submitting
   server.tool(
     "vector_dry_run",
-    "Simulate a transaction without submitting - returns fee estimate and validation result",
+    "Simulate a transaction without submitting - returns fee estimate and validation result. Accepts either built CBOR or outputs to build from (keyless).",
     {
       txCbor: z.string().optional().describe("Hex-encoded CBOR of a built transaction to evaluate"),
       outputs: z.array(z.object({
         address: z.string().describe("Recipient Vector address"),
         lovelace: z.number().describe("Amount in lovelace"),
         assets: z.record(z.string(), z.string()).optional(),
-      })).optional().describe("If no txCbor provided, build a TX from these outputs and evaluate it"),
-      mnemonic: z.string().optional().describe("15 or 24-word BIP39 mnemonic (required when outputs is provided)"),
+      })).optional().describe("If no txCbor provided, build an unsigned TX from these outputs and evaluate it"),
+      changeAddress: z.string().optional().describe("Your wallet address (required when building from outputs)"),
       metadata: z.string().optional().describe("Optional JSON metadata when building from outputs"),
     },
-    async ({ txCbor, outputs, mnemonic, metadata }) => {
+    async ({ txCbor, outputs, changeAddress, metadata }) => {
       const rateCheck = rateLimiter.check();
       if (!rateCheck.allowed) {
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
@@ -979,42 +362,20 @@ Use vector_dry_run with this CBOR to simulate, or call vector_build_transaction 
         let feeFromBuild: string | null = null;
 
         if (!cborToEvaluate && outputs && outputs.length > 0) {
-          // Build the transaction first
-          if (!mnemonic) throw new Error('mnemonic is required when building from outputs');
-          const lucid = await initLucid(mnemonic);
-
-          let tx = lucid.newTx();
-          for (const output of outputs) {
-            const assets: Record<string, bigint> = { lovelace: BigInt(output.lovelace) };
-            if (output.assets) {
-              for (const [unit, qty] of Object.entries(output.assets)) {
-                assets[unit] = BigInt(qty);
-              }
-            }
-            tx = tx.pay.ToAddress(output.address, assets);
-          }
-
-          if (metadata) {
-            const parsedMetadata = typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
-            tx = tx.attachMetadata(674, parsedMetadata);
-          }
-
-          const completedTx = await tx.complete();
-          const txJson = (completedTx as any).toJSON?.() ?? {};
-          feeFromBuild = String(txJson?.body?.fee ?? '0');
-          const signedTx = await completedTx.sign.withWallet().complete();
-          cborToEvaluate = signedTx.toCBOR();
+          if (!changeAddress) throw new Error('changeAddress is required when building from outputs');
+          const lucid = await lucidForAddress(makeProvider(), changeAddress);
+          const built = await buildMultiOutput(lucid, { outputs, metadataJson: metadata });
+          feeFromBuild = built.fee;
+          // Ogmios evaluates scripts against the UNSIGNED transaction -
+          // signatures are not required for evaluation.
+          cborToEvaluate = built.txCbor;
         }
 
         if (!cborToEvaluate) {
           throw new Error('Provide either txCbor or outputs to evaluate');
         }
 
-        const provider = new OgmiosProvider({
-          ogmiosUrl: VECTOR_OGMIOS_URL,
-          submitUrl: VECTOR_SUBMIT_URL,
-          koiosUrl: VECTOR_KOIOS_URL,
-        });
+        const provider = makeProvider();
 
         let evalResult: VectorDryRunResult;
         try {
@@ -1040,7 +401,6 @@ Use vector_dry_run with this CBOR to simulate, or call vector_build_transaction 
             executionUnits: (totalMemory > 0 || totalCpu > 0) ? { memory: totalMemory, cpu: totalCpu } : undefined,
           };
         } catch (evalErr) {
-          // evaluateTransaction failed - still return fee if we built the tx
           if (feeFromBuild) {
             evalResult = {
               valid: true,
@@ -1182,37 +542,25 @@ Transaction Hash: ${txHash}
     "vector_get_transaction_history",
     "Get transaction history for a Vector address via Koios indexed queries",
     {
-      address: z.string().optional().describe("Vector address to query. If omitted, mnemonic is required."),
-      mnemonic: z.string().optional().describe("15 or 24-word BIP39 mnemonic (required if address is omitted)"),
+      address: z.string().describe("Vector address to query (addr1...)"),
       limit: z.number().min(1).max(50).optional().describe("Number of transactions to return (default: 20, max: 50)"),
       offset: z.number().min(0).optional().describe("Offset for pagination (default: 0)"),
     },
-    async ({ address, mnemonic, limit, offset }) => {
+    async ({ address, limit, offset }) => {
       const rateCheck = rateLimiter.check();
       if (!rateCheck.allowed) {
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
       }
       try {
-        let queryAddress = address;
-        if (!queryAddress) {
-          if (!mnemonic) throw new Error('Provide either address or mnemonic');
-          const lucid = await initLucid(mnemonic);
-          queryAddress = await lucid.wallet().address();
-        }
+        const provider = makeProvider();
 
-        const provider = new OgmiosProvider({
-          ogmiosUrl: VECTOR_OGMIOS_URL,
-          submitUrl: VECTOR_SUBMIT_URL,
-          koiosUrl: VECTOR_KOIOS_URL,
-        });
-
-        const txs = await provider.getTransactionHistory(queryAddress, offset || 0, limit || 20);
+        const txs = await provider.getTransactionHistory(address, offset || 0, limit || 20);
 
         if (txs.length === 0) {
           return {
             content: [{
               type: "text",
-              text: `No transactions found for ${queryAddress}`,
+              text: `No transactions found for ${address}`,
             }],
           };
         }
@@ -1225,13 +573,13 @@ Transaction Hash: ${txHash}
         return {
           content: [{
             type: "text",
-            text: `# Transaction History for ${queryAddress}
+            text: `# Transaction History for ${address}
 
 Showing ${txs.length} transaction(s) (offset: ${offset || 0}):
 
 ${txList}
 
-[View on Explorer](${VECTOR_EXPLORER_URL}/address/${queryAddress})`,
+[View on Explorer](${VECTOR_EXPLORER_URL}/address/${address})`,
           }],
         };
       } catch (err) {
@@ -1251,44 +599,42 @@ ${txList}
     }
   );
 
-  // vector_deploy_contract - Deploy a Plutus/Aiken smart contract
+  // vector_build_deploy_contract - build an UNSIGNED contract deployment (keyless)
   server.tool(
-    "vector_deploy_contract",
-    "Deploy a Plutus/Aiken smart contract to Vector by sending funds to its script address",
+    "vector_build_deploy_contract",
+    "Build an UNSIGNED transaction deploying a Plutus/Aiken smart contract (locks funds at its script address). Takes no key material - sign with your local signer, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     {
+      changeAddress: z.string().describe("Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address."),
       scriptCbor: z.string().describe("Compiled Plutus/Aiken script in CBOR hex format"),
       scriptType: z.enum(["PlutusV1", "PlutusV2", "PlutusV3"]).describe("Script version"),
-      mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the deploying wallet"),
       initialDatum: z.string().optional().describe("Initial datum as CBOR hex. Use 'd87980' for void/unit datum. Defaults to void if omitted."),
       lovelaceAmount: z.number().optional().describe("AP3X to lock at the script address in lovelace (default: 2,000,000 = 2 AP3X)"),
     },
-    async ({ scriptCbor, scriptType, mnemonic, initialDatum, lovelaceAmount }) => {
+    async ({ changeAddress, scriptCbor, scriptType, initialDatum, lovelaceAmount }) => {
       const rateCheck = rateLimiter.check();
       if (!rateCheck.allowed) {
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
       }
       try {
-        const result = await deployContract(
-          scriptCbor,
-          scriptType,
-          mnemonic,
-          initialDatum || null,
-          lovelaceAmount || 2_000_000,
-        );
-
+        const lucid = await lucidForAddress(makeProvider(), changeAddress);
+        const result = await buildDeployContract(lucid, { scriptCbor, scriptType, initialDatum, lovelaceAmount });
         return {
           content: [{
             type: "text",
-            text: `# Smart Contract Deployed
+            text: `# Unsigned Contract Deployment Built
 
-Transaction Hash: ${result.txHash}
-Script Address: ${result.scriptAddress}
-Script Hash: ${result.scriptHash}
-Script Type: ${result.scriptType}
+**Script Address:** ${result.scriptAddress}
+**Script Hash:** ${result.scriptHash}
+**Script Type:** ${result.scriptType}
+**Estimated Fee:** ${result.feeAda} AP3X
+**Tx Hash:** ${result.txHash}
 
-Funds locked at the script address. Use vector_interact_contract to interact with this contract.
+**Unsigned TX CBOR:**
+\`\`\`
+${result.txCbor}
+\`\`\`
 
-[View on Explorer](${result.links.explorer})`,
+Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction { txHash }. Once confirmed, use vector_build_interact_contract to interact with the deployed contract.`,
           }],
         };
       } catch (err) {
@@ -1296,28 +642,27 @@ Funds locked at the script address. Use vector_interact_contract to interact wit
         return {
           content: [{
             type: "text",
-            text: `Failed to deploy contract: ${error.message}
+            text: `Failed to build contract deployment: ${error.message}
 
 **Troubleshooting Tips:**
 1. Verify the script CBOR is valid hex (compiled Aiken or Plutus output)
-2. Ensure wallet has sufficient AP3X for the locked amount + fees
-3. Check that the script type matches the compiled version (PlutusV1/V2/V3)
-4. Check spend limits with vector_get_spend_limits`,
+2. Ensure the wallet at changeAddress has sufficient AP3X for the locked amount + fees
+3. Check that the script type matches the compiled version (PlutusV1/V2/V3)`,
           }],
         };
       }
     }
   );
 
-  // vector_interact_contract - Interact with a deployed smart contract
+  // vector_build_interact_contract - build an UNSIGNED contract interaction (keyless)
   server.tool(
-    "vector_interact_contract",
-    "Interact with a deployed Plutus/Aiken smart contract - lock AP3X or spend from it",
+    "vector_build_interact_contract",
+    "Build an UNSIGNED transaction interacting with a deployed Plutus/Aiken contract - lock AP3X at it or spend from it. Takes no key material - sign with your local signer, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     {
+      changeAddress: z.string().describe("Your wallet address (source of funds, change, and the required signer for spends). Get it from your local signer's vector_signer_get_address."),
       scriptCbor: z.string().describe("Compiled Plutus/Aiken script in CBOR hex"),
       scriptType: z.enum(["PlutusV1", "PlutusV2", "PlutusV3"]).describe("Script version"),
       action: z.enum(["spend", "lock"]).describe("'spend' to collect UTxOs from the script, 'lock' to send funds to it"),
-      mnemonic: z.string().describe("15 or 24-word BIP39 mnemonic for the wallet"),
       redeemer: z.string().optional().describe("Redeemer as CBOR hex (required for spend, use 'd87980' for void)"),
       datum: z.string().optional().describe("Datum as CBOR hex (required for lock, use 'd87980' for void)"),
       lovelaceAmount: z.number().optional().describe("Lovelace to lock (for lock action, default: 2,000,000 = 2 AP3X)"),
@@ -1327,38 +672,33 @@ Funds locked at the script address. Use vector_interact_contract to interact wit
       }).optional().describe("Specific UTxO to spend from (optional, otherwise spends all UTxOs at script address)"),
       assets: z.record(z.string(), z.string()).optional().describe("Additional native assets for lock action: { 'policyId+assetNameHex': 'quantity' }"),
     },
-    async ({ scriptCbor, scriptType, action, mnemonic, redeemer, datum, lovelaceAmount, utxoRef, assets }) => {
+    async ({ changeAddress, scriptCbor, scriptType, action, redeemer, datum, lovelaceAmount, utxoRef, assets }) => {
       const rateCheck = rateLimiter.check();
       if (!rateCheck.allowed) {
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
       }
       try {
-        const result = await interactWithContract(
-          scriptCbor,
-          scriptType,
-          action,
-          mnemonic,
-          redeemer || null,
-          datum || null,
-          lovelaceAmount || 2_000_000,
-          utxoRef || null,
-          assets || null,
-        );
-
-        const actionVerb = result.action === 'spend' ? 'collected from' : 'locked at';
-
+        const lucid = await lucidForAddress(makeProvider(), changeAddress);
+        const result = await buildInteractContract(lucid, {
+          scriptCbor, scriptType, action, changeAddress, redeemer, datum, lovelaceAmount, utxoRef, assets,
+        });
+        const actionVerb = result.action === 'spend' ? 'collects from' : 'locks funds at';
         return {
           content: [{
             type: "text",
-            text: `# Contract Interaction Successful
+            text: `# Unsigned Contract Interaction Built
 
-Transaction Hash: ${result.txHash}
-Action: ${result.action}
-Script Address: ${result.scriptAddress}
+**Action:** ${result.action} (${actionVerb} the script address)
+**Script Address:** ${result.scriptAddress}
+**Estimated Fee:** ${result.feeAda} AP3X
+**Tx Hash:** ${result.txHash}
 
-Funds ${actionVerb} the script address.
+**Unsigned TX CBOR:**
+\`\`\`
+${result.txCbor}
+\`\`\`
 
-[View on Explorer](${result.links.explorer})`,
+Sign locally with vector_signer_sign { txCbor }, then broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.`,
           }],
         };
       } catch (err) {
@@ -1366,14 +706,13 @@ Funds ${actionVerb} the script address.
         return {
           content: [{
             type: "text",
-            text: `Failed to interact with contract: ${error.message}
+            text: `Failed to build contract interaction: ${error.message}
 
 **Troubleshooting Tips:**
 1. For 'spend': ensure the script address has UTxOs and the redeemer satisfies the validator
-2. For 'lock': ensure wallet has sufficient AP3X and the datum matches the script's expectations
-3. Spending requires collateral - ensure wallet has a pure-AP3X UTxO (no native tokens)
-4. Verify the script CBOR matches the deployed script exactly
-5. Check spend limits with vector_get_spend_limits`,
+2. For 'lock': ensure the wallet at changeAddress has sufficient AP3X and the datum matches the script's expectations
+3. Spending requires collateral - ensure the wallet has a pure-AP3X UTxO (no native tokens)
+4. Verify the script CBOR matches the deployed script exactly`,
           }],
         };
       }

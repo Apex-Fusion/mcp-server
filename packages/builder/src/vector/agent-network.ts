@@ -306,21 +306,21 @@ ${capList}
         if (!vkeyHash) throw new Error('Cannot derive payment key hash from wallet address');
 
         const utxos = await lucid.utxosAt(await lucid.wallet().address());
-        const seedUtxo = utxos.find(u => {
+        const oneShotUtxo = utxos.find(u => {
           const keys = Object.keys(u.assets);
           return keys.length === 1 && keys[0] === 'lovelace' && u.assets['lovelace'] >= MIN_AP3X_DEPOSIT + 2_000_000n;
         }) || utxos[0];
-        if (!seedUtxo) throw new Error('No UTxOs in wallet. Please fund the wallet first.');
+        if (!oneShotUtxo) throw new Error('No UTxOs in wallet. Please fund the wallet first.');
 
-        const nftAssetName = deriveNftAssetName(seedUtxo.txHash, seedUtxo.outputIndex);
+        const nftAssetName = deriveNftAssetName(oneShotUtxo.txHash, oneShotUtxo.outputIndex);
         const nftUnit = `${REGISTRY_POLICY_ID}${nftAssetName}`;
         const datum = buildAgentDatum(vkeyHash, name, description, capabilities, framework, endpoint);
         const registryScript = { type: 'PlutusV3' as const, script: REGISTRY_SCRIPT_CBOR };
         const registryAddress = validatorToAddress('Mainnet', registryScript);
-        const registerRedeemer = Data.to(new Constr(0, [new Constr(0, [seedUtxo.txHash, BigInt(seedUtxo.outputIndex)])]));
+        const registerRedeemer = Data.to(new Constr(0, [new Constr(0, [oneShotUtxo.txHash, BigInt(oneShotUtxo.outputIndex)])]));
 
         const tx = await lucid.newTx()
-          .collectFrom([seedUtxo])
+          .collectFrom([oneShotUtxo])
           .mintAssets({ [nftUnit]: 1n }, registerRedeemer)
           .attach.MintingPolicy(registryScript)
           .pay.ToAddressWithData(registryAddress, { kind: "inline", value: datum }, { lovelace: MIN_AP3X_DEPOSIT, [nftUnit]: 1n })
@@ -357,8 +357,8 @@ Save your Agent DID - you'll need it to update, deregister, or let other agents 
 
 **Troubleshooting Tips:**
 1. Ensure wallet has at least 12 AP3X (10 deposit + fees)
-2. Check spend limits with vector_get_spend_limits
-3. Each wallet can register multiple agents (different seed UTxOs)
+2. Server spend limits for this tool are set via VECTOR_SPEND_LIMIT_PER_TX / VECTOR_SPEND_LIMIT_DAILY
+3. Each wallet can register multiple agents (different one-shot UTxOs)
 4. Verify Ogmios endpoint is reachable at ${VECTOR_OGMIOS_URL}`,
           }],
         };
@@ -451,7 +451,7 @@ The agent's profile has been updated on-chain. The identity NFT and deposit are 
 1. Verify the agent DID is correct
 2. Your wallet must be the agent's current owner
 3. Ensure wallet has enough AP3X for transaction fees
-4. Check spend limits with vector_get_spend_limits`,
+4. Server spend limits for this tool are set via VECTOR_SPEND_LIMIT_PER_TX / VECTOR_SPEND_LIMIT_DAILY`,
           }],
         };
       }
@@ -672,7 +672,7 @@ The message is recorded on-chain in TX metadata label 674.`,
 1. Verify the agent DID is correct: did:vector:agent:{policyId}:{nftAssetName}
 2. Ensure wallet has at least 3 AP3X (2 AP3X delivery + fees)
 3. Use vector_get_agent_profile to verify the agent exists first
-4. Check spend limits with vector_get_spend_limits`,
+4. Server spend limits for this tool are set via VECTOR_SPEND_LIMIT_PER_TX / VECTOR_SPEND_LIMIT_DAILY`,
           }],
         };
       }

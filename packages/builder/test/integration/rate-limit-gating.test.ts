@@ -14,8 +14,14 @@ import type { RawServerHandle } from '../setup.ts';
 // .superpowers/sdd/pr5-integration-tests-report.md for the mutation-testing
 // evidence.
 //
-// Tool choice: vector_get_spend_limits (vector.ts) reads only in-process
-// SafetyLayer state - confirmed by reading safety.ts, no network/wallet.
+// Tool choice: vector_build_send_apex (vector.ts) with a deliberately invalid
+// changeAddress. lucidForAddress (packages/builder/src/vector/build.ts)
+// validates the address with getAddressDetails() and throws BEFORE any
+// provider call - proven by Task 2's booby-trapped-provider test. Handlers
+// return caught errors as normal content, so isError stays false and this
+// probe is just as hermetic as the spend-limit-status tool it replaces
+// (vector.ts no longer has one - Task 5 deleted it, since SafetyLayer state
+// is no longer exposed to keyless callers).
 // vector_get_agent_profile (agent-network.ts) and
 // vector_self_improvement_analyze_metrics (self-improvement.ts) DO reach
 // Ogmios/Koios in their normal bodies, but only after their own
@@ -78,11 +84,13 @@ describe('per-identity rate limiting across real registered tools', () => {
   });
 
   test('alice exhausts her budget on a vector.ts tool; bob is unaffected (isolation via the real tools, not just limiterFor)', async () => {
-    const first = await call(alice, 'vector_get_spend_limits');
+    const PROBE_ARGS = { changeAddress: 'not-an-address', recipientAddress: 'not-an-address', amount: 1 };
+
+    const first = await call(alice, 'vector_build_send_apex', PROBE_ARGS);
     assert.equal(first.isError, false, 'first call must not be a tool error');
     assert.ok(!RATE_LIMIT_PATTERN.test(first.text), 'first call must not be rate-limited yet');
 
-    const second = await call(alice, 'vector_get_spend_limits');
+    const second = await call(alice, 'vector_build_send_apex', PROBE_ARGS);
     assert.equal(second.isError, false, 'a rate-limit refusal is a normal, well-formed result - not a thrown tool error');
     assert.match(second.text, RATE_LIMIT_PATTERN, 'alice must now be rate-limited');
 
@@ -91,7 +99,7 @@ describe('per-identity rate limiting across real registered tools', () => {
     // inference from limiterFor() in isolation (rate-limiter.test.ts already
     // covers that in isolation; this covers the wiring rate-limiter.test.ts
     // cannot see).
-    const bobFirst = await call(bob, 'vector_get_spend_limits');
+    const bobFirst = await call(bob, 'vector_build_send_apex', PROBE_ARGS);
     assert.equal(bobFirst.isError, false);
     assert.ok(!RATE_LIMIT_PATTERN.test(bobFirst.text), "bob must be unaffected by alice's exhausted budget");
   });

@@ -33,7 +33,7 @@ function labelForToken(token: string): string {
 //   (hex / base64url / alphanumeric) to avoid this - there is no way for this parser
 //   to detect the fragmentation after the fact, since the comma is already consumed
 //   by the top-level split before any entry is inspected.
-export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig {
+export function loadAuthConfig(env: Record<string, string | undefined> = process.env): AuthConfig {
   const raw = (env.MCP_AUTH_TOKENS ?? '').trim();
   if (raw === '') return { enabled: false, identities: new Map() };
 
