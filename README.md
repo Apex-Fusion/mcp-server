@@ -25,15 +25,36 @@ Hosted instances run on both networks, exposing all 24 tools:
 > (per-IP rate limiting, no token required) is a planned follow-up, not yet shipped. Self-host
 > this release for tokenless access today.
 
+> **Transport: the hosted URLs above still answer on `/sse` only.** This codebase now serves
+> a modern Streamable HTTP endpoint, `/mcp`, alongside `/sse` + `/messages` - the legacy SSE
+> transport, deprecated by the MCP spec (2026-07-28 revision), retained for compatibility.
+> `/mcp` becomes each hosted instance's primary endpoint once this release merges and deploys
+> - testnet automatically on the next push to `main`, mainnet on the next deliberate cutover
+> dispatch, the same split the migration above went through. Until then,
+> `https://mcp.vector.mainnet.apexfusion.org/mcp` and its testnet twin are not reachable;
+> self-host this release (below) to use `/mcp` today.
+
 Connect from Claude Code in one command. Both hosted instances require a bearer token from the
-operators (contact the Apex Fusion team for one):
+operators (contact the Apex Fusion team for one).
+
+Modern transport (Streamable HTTP) - works today against a self-hosted instance (below); against
+the hosted URLs above it goes live once each instance deploys this release (see the transport
+note above):
+
+```bash
+claude mcp add --transport http vector-mcp <url>/mcp \
+  --header "Authorization: Bearer <your-token>"
+```
+
+Legacy SSE transport - what the hosted URLs above actually answer on today:
 
 ```bash
 claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse \
   --header "Authorization: Bearer <your-token>"
 ```
 
-Self-hosting (below) needs no token and gives every caller open access to your own instance.
+Self-hosting (below) needs no token, gives every caller open access to your own instance, and
+serves `/mcp` today.
 
 > **Security notice: the non-custodial migration is complete, in this codebase and on both
 > hosted instances, as of the 2026-07-31 cutover deploy.** No tool in this repository accepts a
@@ -85,7 +106,7 @@ limitations.
 - **Agent messaging** - send on-chain messages between agents via TX metadata (keyless)
 - **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals; the on-chain module is live on Vector mainnet, and every write tool is keyless in this codebase
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
-- **SSE transport** - HTTP server with Server-Sent Events for MCP client connectivity
+- **Dual transport** - modern Streamable HTTP (`/mcp`) plus legacy SSE (`/sse` + `/messages`, deprecated by the MCP spec (2026-07-28 revision), retained for compatibility)
 
 ## MCP Tools (24)
 
@@ -170,6 +191,16 @@ npm start
 # Server listens on port 3000 (configurable via PORT env var)
 ```
 
+Connect with the modern transport:
+
+```bash
+claude mcp add --transport http vector-mcp http://localhost:3000/mcp
+```
+
+Add `--header "Authorization: Bearer <your-token>"` if you set `MCP_AUTH_TOKENS`. The legacy
+SSE pair (`/sse` + `/messages`, deprecated by the MCP spec, retained for compatibility) is
+still available at `http://localhost:3000/sse` for clients that need it.
+
 If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` first - see [Configuration](#configuration) below.
 
 ### 4. Add to Claude Desktop
@@ -223,10 +254,16 @@ it, lives in your local signer instead - see `VECTOR_SIGNER_SPEND_LIMIT_PER_TX` 
 `VECTOR_SIGNER_SPEND_LIMIT_DAILY` / `VECTOR_SIGNER_AUDIT_LOG_PATH` in
 [`packages/signer/README.md`](packages/signer/README.md#configuration).
 
-> **Running a public instance?** Set `MCP_AUTH_TOKENS`. Without it every caller
-> is treated as one anonymous identity and shares a single rate-limit bucket, so
-> one busy client throttles everyone. Rate limits are applied per identity, so
-> give each client its own token.
+> **Running a public instance?** Set `MCP_AUTH_TOKENS` to gate access to known callers, each
+> with its own rate-limit budget. With `MCP_AUTH_TOKENS` unset, callers are admitted
+> anonymously with per-client-IP rate limits; the deployment's reverse proxy supplies the
+> client address via the rightmost X-Forwarded-For entry. Tracked identities are capped (LRU);
+> eviction resets a bucket's budget - a memory bound, not a security boundary, since an
+> attacker rotating enough source IPs can still defeat per-IP limiting at a tier only the
+> reverse proxy or network layer can police. `/mcp` sessions get the same per-identity
+> treatment: idle sessions are reaped after `VECTOR_MCP_SESSION_IDLE_MS` (default 10 minutes),
+> and concurrent sessions per identity are capped at `VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY`
+> (default 32).
 
 > **Malformed values fail loudly, not silently.** The server refuses to start if
 > `MCP_AUTH_TOKENS` contains an empty token, a token with embedded whitespace, a
