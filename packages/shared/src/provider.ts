@@ -3,8 +3,23 @@
  *
  * Implements the @lucid-evolution/lucid Provider interface so we can use Lucid's
  * transaction building/signing without depending on Blockfrost.
+ *
+ * Uses the global `fetch` (native, undici-backed - guaranteed since the node
+ * floor is >=22), not a bundled polyfill. This used to import `fetch` from
+ * `cross-fetch`, whose underlying `node-fetch` embeds the request URL
+ * directly in its own thrown error messages (`request to ${url} failed,
+ * reason: ...`, `invalid json response body at ${url} reason: ...`) - a
+ * leak that bypassed every sanitiser below it, since those only handle the
+ * `!response.ok` case, not a fetch()-level rejection or a response.json()
+ * parse failure. Undici's errors do not embed the URL (verified live on this
+ * Node build: a DNS failure throws `TypeError: fetch failed` with the real
+ * reason on `.cause`, not in `.message`), but every fetch() call and every
+ * `.json()` parse is still wrapped below regardless - a JSON-parse failure
+ * leaks a snippet of the raw body into its own SyntaxError message
+ * (`Unexpected token '<', "<html><bod"... is not valid JSON`, verified live
+ * too) independent of which fetch implementation is in use, and operators
+ * still need the detail this file's console.error calls carry.
  */
-import fetch from 'cross-fetch';
 import type {
   Provider,
   ProtocolParameters,
@@ -24,9 +39,13 @@ interface OgmiosProviderConfig {
 /**
  * Interpret a submit-api response body as a transaction hash.
  *
- * Exported and pure so it can be tested without a network round trip — the
- * class method that calls it cannot be, because provider.ts imports `fetch`
- * from cross-fetch rather than reading the global.
+ * Exported and pure so it can be tested without a network round trip. Now
+ * that `provider.ts` reads the global `fetch` instead of importing one from
+ * `cross-fetch`, `OgmiosProvider`'s own methods are also stubbable in tests
+ * (`globalThis.fetch = ...`) - `parseSubmitResponse` stays a separate pure
+ * function anyway, on its own merits: it is reused nowhere near a network
+ * call, and testing the parsing rule in isolation is simpler than testing it
+ * through a live or stubbed HTTP round trip either way.
  *
  * Refuses rather than guessing. The previous implementation fell back to the
  * first 64 characters of the *submitted CBOR*, which is a well-formed 64-char
@@ -90,7 +109,8 @@ export function koiosIndicatesConfirmed(data: unknown): boolean {
  * that has no business reaching a caller. Call sites console.error the full
  * detail (status, body, and which endpoint) themselves before throwing this -
  * full detail to the operator's log, a clean summary to the caller. That
- * split is the sanitisation.
+ * split is the sanitisation. `status` also accepts a string, for a network
+ * failure or a JSON-RPC error code where there is no HTTP status at all.
  *
  * Exported and pure so it can be tested without a network round trip - same
  * rationale as parseSubmitResponse above.
@@ -122,6 +142,18 @@ function escapeRegExp(s: string): string {
  * ogmios.vector.mainnet.apexfusion.org:1337"), which the generic
  * https?:// pattern alone would miss. Caps the result length so a large
  * upstream error page cannot flood a tool response.
+ *
+ * Known limitation, stated plainly rather than left for a reader to
+ * discover: this only removes http(s) URLs and whatever hostnames the
+ * caller passes in as `knownHosts` (this file always passes the three
+ * configured Ogmios/Koios/submit-API hosts). A submission-rejection body
+ * that happens to name a DIFFERENT internal host - one this server was
+ * never configured to talk to - passes through unscrubbed, bounded only by
+ * the 2000-character cap above. Closing that fully would mean pattern-
+ * matching arbitrary hostname shapes out of free text, which risks
+ * mangling a legitimate ledger-error string; the three known hosts cover
+ * every endpoint this server itself is configured to reach, which is the
+ * actual leak surface audit E is about.
  *
  * Exported and pure so it can be tested without a network round trip - same
  * rationale as parseSubmitResponse above.
@@ -159,6 +191,12 @@ export function scrubUrls(text: string, knownHosts: string[] = []): string {
  * discarded outright: the body is still attacker-adjacent (an internal or
  * misconfigured endpoint's own response), even though its content is
  * otherwise legitimate to return.
+ *
+ * A NETWORK failure to even reach the submit API (no HTTP response at all)
+ * is deliberately NOT routed through this function - see submitTx below. It
+ * is not a ledger verdict on anything, and calling it a "rejection" would be
+ * actively misleading; it goes through formatServiceError instead, the same
+ * as an Ogmios/Koios connection failure.
  */
 export function formatSubmitRejection(
   status: number,
@@ -168,6 +206,25 @@ export function formatSubmitRejection(
 ): string {
   const suffix = statusText ? ` ${statusText}` : '';
   return `Transaction submission rejected (${status}${suffix}): ${scrubUrls(body, knownHosts)}`;
+}
+
+/**
+ * Render an Error (or thrown non-Error value) into one log-friendly string,
+ * including its `.cause` when present - operator-log use only, never for a
+ * caller-visible message. Native fetch (undici) throws are often terse
+ * ("fetch failed") with the actual DNS/connection reason attached as
+ * `.cause` rather than folded into `.message` (verified live: a DNS failure
+ * yields message "fetch failed", cause.message "getaddrinfo ENOTFOUND
+ * <host>") - without this, the operator's console.error would show only the
+ * useless top-level message.
+ */
+function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    const cause = (err as { cause?: unknown }).cause;
+    const causeText = cause instanceof Error ? cause.message : cause !== undefined ? String(cause) : undefined;
+    return causeText ? `${err.message} (cause: ${causeText})` : err.message;
+  }
+  return String(err);
 }
 
 export class OgmiosProvider implements Provider {
@@ -183,19 +240,44 @@ export class OgmiosProvider implements Provider {
   }
 
   /**
-   * Send a JSON-RPC request to Ogmios
+   * The three configured endpoints, for scrubUrls' knownHosts parameter -
+   * defensive: a shared reverse proxy in front of more than one of these
+   * services could in principle echo a SIBLING service's hostname in its own
+   * error page, so every caller-visible scrub pass considers all three, not
+   * just the one endpoint actually being called.
+   */
+  private knownHosts(): string[] {
+    return [this.ogmiosUrl, this.submitUrl, this.koiosUrl].filter((u): u is string => Boolean(u));
+  }
+
+  /**
+   * Send a JSON-RPC request to Ogmios.
+   *
+   * Every failure mode a bare `await fetch(...)` can produce is caught here
+   * and rethrown sanitised: a rejected fetch (network/DNS failure - the
+   * class of error node-fetch used to embed this.ogmiosUrl into, see the
+   * file header), a non-OK HTTP response, a response body that is not valid
+   * JSON, and a well-formed JSON-RPC error object. Full detail (including
+   * the URL) always goes to console.error first; only a sanitised summary is
+   * ever thrown.
    */
   private async rpc(method: string, params?: unknown): Promise<any> {
-    const response = await fetch(this.ogmiosUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method,
-        params: params || {},
-        id: null,
-      }),
-    });
+    let response: Response;
+    try {
+      response = await fetch(this.ogmiosUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method,
+          params: params || {},
+          id: null,
+        }),
+      });
+    } catch (err) {
+      console.error(`[OgmiosProvider] Ogmios network error (${method}) at ${this.ogmiosUrl}: ${describeError(err)}`);
+      throw new Error(formatServiceError('Ogmios', method, 'network error'));
+    }
 
     if (!response.ok) {
       const text = await response.text();
@@ -203,7 +285,14 @@ export class OgmiosProvider implements Provider {
       throw new Error(formatServiceError('Ogmios', method, response.status, response.statusText));
     }
 
-    const json = await response.json();
+    let json: any;
+    try {
+      json = await response.json();
+    } catch (err) {
+      console.error(`[OgmiosProvider] Ogmios response parse error (${method}) at ${this.ogmiosUrl}: ${describeError(err)}`);
+      throw new Error(formatServiceError('Ogmios', method, 'invalid response'));
+    }
+
     if (json.error) {
       console.error(`[OgmiosProvider] Ogmios RPC error (${method}) at ${this.ogmiosUrl}:`, json.error);
       throw new Error(formatServiceError('Ogmios', method, json.error?.code ?? 'error', json.error?.message ?? 'RPC error'));
@@ -298,7 +387,11 @@ export class OgmiosProvider implements Provider {
     const policyId = unit.slice(0, 56);
     const assetName = unit.slice(56);
 
-    // Try Koios indexer first (fastest path)
+    // Try Koios indexer first (fastest path). Every failure here - network,
+    // non-OK, or unparseable body - is logged for operators and then falls
+    // through to the generic "not found" throw below, which names none of
+    // it: the caller only ever learns the asset was not found, not why the
+    // Koios attempt failed.
     if (this.koiosUrl) {
       try {
         const response = await fetch(`${this.koiosUrl}/api/v1/asset_utxos`, {
@@ -311,9 +404,11 @@ export class OgmiosProvider implements Provider {
           if (data.length > 0) {
             return this.koiosUtxoToLucid(data[0]);
           }
+        } else {
+          console.error(`[OgmiosProvider] Koios asset_utxos query failed at ${this.koiosUrl}: ${response.status} ${response.statusText}`);
         }
       } catch (err) {
-        // Koios unreachable - caller can fall back to scanning UTxOs
+        console.error(`[OgmiosProvider] Koios asset_utxos error at ${this.koiosUrl}: ${describeError(err)}`);
       }
     }
 
@@ -353,7 +448,8 @@ export class OgmiosProvider implements Provider {
   }
 
   async getDelegation(rewardAddress: string): Promise<Delegation> {
-    // Try Koios first if available
+    // Try Koios first if available - same swallow-to-default shape as
+    // getUtxoByUnit above, now with operator visibility on the way in.
     if (this.koiosUrl) {
       try {
         const response = await fetch(`${this.koiosUrl}/api/v1/account_info`, {
@@ -369,16 +465,18 @@ export class OgmiosProvider implements Provider {
               rewards: BigInt(data[0].rewards_available || 0),
             };
           }
+        } else {
+          console.error(`[OgmiosProvider] Koios account_info query failed at ${this.koiosUrl}: ${response.status} ${response.statusText}`);
         }
-      } catch {
-        // Fall through to default
+      } catch (err) {
+        console.error(`[OgmiosProvider] Koios account_info error at ${this.koiosUrl}: ${describeError(err)}`);
       }
     }
     return { poolId: null, rewards: 0n };
   }
 
   async getDatum(datumHash: string): Promise<string> {
-    // Try Koios if available
+    // Try Koios if available - same shape again.
     if (this.koiosUrl) {
       try {
         const response = await fetch(`${this.koiosUrl}/api/v1/datum_info`, {
@@ -391,9 +489,11 @@ export class OgmiosProvider implements Provider {
           if (data.length > 0 && data[0].bytes) {
             return data[0].bytes;
           }
+        } else {
+          console.error(`[OgmiosProvider] Koios datum_info query failed at ${this.koiosUrl}: ${response.status} ${response.statusText}`);
         }
-      } catch {
-        // Fall through
+      } catch (err) {
+        console.error(`[OgmiosProvider] Koios datum_info error at ${this.koiosUrl}: ${describeError(err)}`);
       }
     }
     throw new Error(`Datum not found for hash: ${datumHash}. Datum lookups require Koios indexer.`);
@@ -406,11 +506,11 @@ export class OgmiosProvider implements Provider {
    * `koiosIndicatesConfirmed` above, kept separate so it can be unit tested
    * without a network round trip. Unlike the Koios branch inside `awaitTx`
    * below (which swallows every failure into "keep polling"), this throws on
-   * a network failure or a non-OK response: the caller could not determine
-   * status, which is a different situation from "asked, and it is not
-   * confirmed yet", and callers such as `pollUntilConfirmed`
+   * a network failure, a non-OK response, or an unparseable body: the caller
+   * could not determine status, which is a different situation from "asked,
+   * and it is not confirmed yet", and callers such as `pollUntilConfirmed`
    * (packages/builder/src/vector/poll.ts) need to be able to tell the two
-   * apart.
+   * apart. Every throw here is sanitised the same way rpc()'s is.
    */
   async getKoiosTxStatus(txHash: string): Promise<unknown> {
     if (!this.koiosUrl) {
@@ -420,17 +520,28 @@ export class OgmiosProvider implements Provider {
       );
     }
 
-    const response = await fetch(`${this.koiosUrl}/api/v1/tx_status`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ _tx_hashes: [txHash] }),
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${this.koiosUrl}/api/v1/tx_status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ _tx_hashes: [txHash] }),
+      });
+    } catch (err) {
+      console.error(`[OgmiosProvider] Koios network error (tx_status) at ${this.koiosUrl}: ${describeError(err)}`);
+      throw new Error(formatServiceError('Koios', 'tx_status', 'network error'));
+    }
     if (!response.ok) {
       const text = await response.text();
       console.error(`[OgmiosProvider] Koios tx_status query failed at ${this.koiosUrl}: ${response.status} ${response.statusText} - ${text}`);
       throw new Error(formatServiceError('Koios', 'tx_status', response.status, response.statusText));
     }
-    return response.json();
+    try {
+      return await response.json();
+    } catch (err) {
+      console.error(`[OgmiosProvider] Koios response parse error (tx_status) at ${this.koiosUrl}: ${describeError(err)}`);
+      throw new Error(formatServiceError('Koios', 'tx_status', 'invalid response'));
+    }
   }
 
   /**
@@ -444,7 +555,9 @@ export class OgmiosProvider implements Provider {
    * indistinguishable from "checked and it is not there yet". Left
    * unmodified rather than deleted or reworked: TypeScript requires it to
    * satisfy `implements Provider`, and changing its own retry/error
-   * semantics is out of scope here since nothing depends on them.
+   * semantics is out of scope here since nothing depends on them. The two
+   * catch blocks now log for operator visibility (they did not before);
+   * the swallow-and-continue-polling behavior itself is unchanged.
    */
   async awaitTx(txHash: string, checkInterval: number = 3000): Promise<boolean> {
     // Poll for tx confirmation
@@ -466,8 +579,8 @@ export class OgmiosProvider implements Provider {
               return true;
             }
           }
-        } catch {
-          // Continue polling
+        } catch (err) {
+          console.error(`[OgmiosProvider] awaitTx Koios poll error at ${this.koiosUrl}: ${describeError(err)}`);
         }
       } else {
         // Without Koios, try querying the UTxO by outRef
@@ -476,8 +589,8 @@ export class OgmiosProvider implements Provider {
           if (utxos.length > 0) {
             return true;
           }
-        } catch {
-          // Not yet confirmed, continue
+        } catch (err) {
+          console.error(`[OgmiosProvider] awaitTx getUtxosByOutRef poll error: ${describeError(err)}`);
         }
       }
     }
@@ -518,6 +631,15 @@ export class OgmiosProvider implements Provider {
 
   /**
    * Get transaction history for an address via Koios.
+   *
+   * Step 1 (address_txs) is load-bearing: any failure - network, non-OK, or
+   * unparseable body - is sanitised and thrown, same shape as rpc()/
+   * getKoiosTxStatus(). Step 2 (tx_info) is optional detail on top of a
+   * result Step 1 already produced: any failure there - network, non-OK, or
+   * unparseable body - degrades to the basic tx list instead of failing the
+   * whole call, extending what used to be only a `!response.ok` fallback to
+   * cover every failure mode, with operator logging on each path (none of
+   * which existed before this change).
    */
   async getTransactionHistory(
     address: string,
@@ -532,11 +654,17 @@ export class OgmiosProvider implements Provider {
     }
 
     // Step 1: Get tx hashes for the address
-    const txListResponse = await fetch(`${this.koiosUrl}/api/v1/address_txs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ _addresses: [address], _after_block_height: 0 }),
-    });
+    let txListResponse: Response;
+    try {
+      txListResponse = await fetch(`${this.koiosUrl}/api/v1/address_txs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ _addresses: [address], _after_block_height: 0 }),
+      });
+    } catch (err) {
+      console.error(`[OgmiosProvider] Koios network error (address_txs) at ${this.koiosUrl}: ${describeError(err)}`);
+      throw new Error(formatServiceError('Koios', 'address_txs', 'network error'));
+    }
 
     if (!txListResponse.ok) {
       const text = await txListResponse.text();
@@ -544,7 +672,13 @@ export class OgmiosProvider implements Provider {
       throw new Error(formatServiceError('Koios', 'address_txs', txListResponse.status, txListResponse.statusText));
     }
 
-    const txList: any[] = await txListResponse.json();
+    let txList: any[];
+    try {
+      txList = await txListResponse.json();
+    } catch (err) {
+      console.error(`[OgmiosProvider] Koios response parse error (address_txs) at ${this.koiosUrl}: ${describeError(err)}`);
+      throw new Error(formatServiceError('Koios', 'address_txs', 'invalid response'));
+    }
 
     // Apply pagination
     const paginatedTxs = txList.slice(offset, offset + limit);
@@ -553,27 +687,43 @@ export class OgmiosProvider implements Provider {
       return [];
     }
 
-    // Step 2: Fetch full tx details
-    const txHashes = paginatedTxs.map((tx: any) => tx.tx_hash);
-    const txInfoResponse = await fetch(`${this.koiosUrl}/api/v1/tx_info`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ _tx_hashes: txHashes }),
-    });
+    const basicTxList = () => paginatedTxs.map((tx: any) => ({
+      txHash: tx.tx_hash,
+      blockHeight: tx.block_height || 0,
+      blockTime: tx.block_time
+        ? new Date(tx.block_time * 1000).toISOString()
+        : '',
+      fee: '0',
+    }));
 
-    if (!txInfoResponse.ok) {
-      // Fall back to basic tx list without details
-      return paginatedTxs.map((tx: any) => ({
-        txHash: tx.tx_hash,
-        blockHeight: tx.block_height || 0,
-        blockTime: tx.block_time
-          ? new Date(tx.block_time * 1000).toISOString()
-          : '',
-        fee: '0',
-      }));
+    // Step 2: Fetch full tx details - optional enrichment, falls back to the
+    // basic list above on any failure rather than failing the whole call.
+    const txHashes = paginatedTxs.map((tx: any) => tx.tx_hash);
+    let txInfoResponse: Response;
+    try {
+      txInfoResponse = await fetch(`${this.koiosUrl}/api/v1/tx_info`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ _tx_hashes: txHashes }),
+      });
+    } catch (err) {
+      console.error(`[OgmiosProvider] Koios network error (tx_info) at ${this.koiosUrl}: ${describeError(err)} - falling back to basic tx list`);
+      return basicTxList();
     }
 
-    const txInfos: any[] = await txInfoResponse.json();
+    if (!txInfoResponse.ok) {
+      const text = await txInfoResponse.text().catch(() => '');
+      console.error(`[OgmiosProvider] Koios tx_info query failed at ${this.koiosUrl}: ${txInfoResponse.status} ${txInfoResponse.statusText} - ${text} - falling back to basic tx list`);
+      return basicTxList();
+    }
+
+    let txInfos: any[];
+    try {
+      txInfos = await txInfoResponse.json();
+    } catch (err) {
+      console.error(`[OgmiosProvider] Koios response parse error (tx_info) at ${this.koiosUrl}: ${describeError(err)} - falling back to basic tx list`);
+      return basicTxList();
+    }
 
     return txInfos.map((info: any) => ({
       txHash: info.tx_hash,
@@ -595,16 +745,34 @@ export class OgmiosProvider implements Provider {
     }));
   }
 
+  /**
+   * A NETWORK failure to reach the submit API (fetch() itself rejects, no
+   * HTTP response was ever received) is not a ledger verdict on anything -
+   * it is this server's own infrastructure failing to talk to the submit
+   * endpoint, the same class of problem as an Ogmios/Koios connection
+   * failure. It is sanitised through formatServiceError, not
+   * formatSubmitRejection: calling an unreachable endpoint a "rejection"
+   * would misleadingly imply the ledger looked at the transaction and said
+   * no, when nothing looked at it at all. An actual non-OK HTTP response
+   * from the submit API IS the ledger's verdict, and keeps going through
+   * formatSubmitRejection exactly as before.
+   */
   async submitTx(tx: string): Promise<string> {
     // tx is a hex-encoded CBOR transaction
     // submit-api expects raw CBOR bytes with Content-Type: application/cbor
     const bytes = Buffer.from(tx, 'hex');
 
-    const response = await fetch(this.submitUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/cbor' },
-      body: bytes,
-    });
+    let response: Response;
+    try {
+      response = await fetch(this.submitUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/cbor' },
+        body: bytes,
+      });
+    } catch (err) {
+      console.error(`[OgmiosProvider] Submit API network error at ${this.submitUrl}: ${describeError(err)}`);
+      throw new Error(formatServiceError('Submit API', 'submitTx', 'network error'));
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -614,7 +782,7 @@ export class OgmiosProvider implements Provider {
           response.status,
           response.statusText,
           errorText,
-          [this.ogmiosUrl, this.submitUrl, this.koiosUrl].filter((u): u is string => Boolean(u)),
+          this.knownHosts(),
         ),
       );
     }
