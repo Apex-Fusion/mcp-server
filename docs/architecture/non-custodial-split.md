@@ -134,7 +134,7 @@ This is why governance is the last family: the LLM must drive a stateful, multi-
 
 ## 7. Tool inventory
 
-**Builder — 24 tools, zero keys.**
+**Builder — 24 tools at full migration, zero keys.**
 
 | Group | Tools |
 |---|---|
@@ -189,7 +189,7 @@ TDD throughout: failing test before implementation, every PR.
 | **4** | **Signer package** (purely additive): `KeySource`, decode, `PolicyEngine`, audit, 4 tools. Heavy TDD | no |
 | **5** | Builder hardening: auth (enforced when configured), per-identity rate limits, `submit_transaction`, `await_transaction` | no |
 | **6** | **Family 1 — wallet/tx keyless.** Mnemonics removed; `build_*` tools land ✅ **(landed — this PR)** | **yes** |
-| **7** | **Family 2 — agent registry keyless.** Drops `@ts-nocheck` from `agent-network.ts` | yes |
+| **7** | **Family 2 — agent registry keyless.** Drops `@ts-nocheck` from `agent-network.ts` ✅ **(landed — this PR)** | yes |
 | **8** | **Family 3 — governance keyless.** Plus env-driven ref-UTxO config and a CBOR encoding fix | yes |
 | **9** | Mainnet cutover: README, security-page correction, deliberate `workflow_dispatch` | — |
 

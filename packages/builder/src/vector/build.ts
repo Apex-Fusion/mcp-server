@@ -36,7 +36,7 @@ export async function lucidForAddress(provider: Provider, changeAddress: string)
   return lucid;
 }
 
-function toBuildResult(completed: TxSignBuilder): VectorUnsignedBuildResult {
+export function toBuildResult(completed: TxSignBuilder): VectorUnsignedBuildResult {
   const txJson = (completed as any).toJSON?.() ?? {};
   const fee = String(txJson?.body?.fee ?? '0');
   return {

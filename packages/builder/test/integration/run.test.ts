@@ -2,6 +2,7 @@ import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { walletFromSeed } from '@lucid-evolution/lucid';
 import { startServer, stopServer, callTool, getMnemonic, wait, ServerContext } from '../setup.ts';
+import { signWithMnemonic } from './sign-helper.ts';
 
 // Always-succeeds PlutusV2 validator (accepts any datum/redeemer/context, returns True)
 const ALWAYS_SUCCEEDS_V2 = '49480100002221200101';
@@ -222,27 +223,85 @@ describe('Smart Contract Tools', () => {
 });
 
 // ─── Agent Network Tools ────────────────────────────────────────────────────
+// Keyless since spec PR 7: each old custodial call (mnemonic in, submitted
+// on-chain out, all inside one tool call) is now build_* (hosted, unsigned)
+// -> signWithMnemonic (local, stands in for the local signer) ->
+// vector_submit_transaction (hosted) - the same non-custodial flow the
+// Transaction Tools tests above and keyless-e2e.test.ts already exercise.
+// vector_discover_agents/vector_get_agent_profile are read-only and were
+// never custodial - both unchanged (tool name and call shape). walletHasAda
+// gating, the settle waits, and the assertSuccessOrKnownError convention are
+// unchanged from the pre-keyless version of this section.
+//
+// Known/accepted risk, same shape as the pre-keyless suite: if register
+// submits but a later step in this chain fails before deregister runs, the
+// 10 AP3X deposit stays locked on-chain under this test agent - nothing in
+// this file reclaims it automatically.
+
+// Extracts the CBOR block a build_* tool response embeds ("```\n<hex>\n```"),
+// or null if the build didn't produce one (a known-error response, e.g. an
+// unfunded wallet) - lets callers skip signing/submitting instead of crashing
+// on a missing match.
+function extractCborOrNull(text: string): string | null {
+  const m = text.match(/```\n([0-9a-f]+)\n```/);
+  return m ? m[1] : null;
+}
+
+// build_* (hosted, unsigned) -> signWithMnemonic (local) ->
+// vector_submit_transaction (hosted). Reuses assertSuccessOrKnownError at
+// both legs: the build may legitimately fail a known way on an unfunded
+// wallet (no sign/submit attempted then), and submit is only attempted once
+// the build actually produced CBOR to sign. Returns the build response text
+// (callers that need e.g. the registered DID parse it from there) plus
+// whether the transaction was actually submitted, so callers only chain
+// follow-on state (agentDid) off a real submission, not just a successful build.
+async function buildSignSubmit(
+  toolName: string, args: Record<string, unknown>, buildSuccessPattern: RegExp,
+): Promise<{ buildText: string; submitted: boolean }> {
+  const buildText = await callTool(ctx.client, toolName, args);
+  console.log(buildText);
+  assertSuccessOrKnownError(buildText, buildSuccessPattern, toolName);
+  const cbor = extractCborOrNull(buildText);
+  if (!buildSuccessPattern.test(buildText) || !cbor) {
+    console.log(`  ⚠ ${toolName}: build did not succeed - skipping sign/submit`);
+    return { buildText, submitted: false };
+  }
+  const { signedCborHex } = signWithMnemonic(cbor, mnemonic);
+  const submitText = await callTool(ctx.client, 'vector_submit_transaction', { signedTxCbor: signedCborHex });
+  console.log(submitText);
+  // A successful build against a FUNDED wallet is expected to submit
+  // successfully too - hard-assert here instead of the tolerant
+  // assertSuccessOrKnownError, which would otherwise treat a real submit
+  // regression (e.g. a signing defect - see task-5-report.md's Bug #1) as
+  // an indistinguishable "known error, wallet may be unfunded" and let it
+  // pass silently. Falls back to the graceful known-error path when the
+  // wallet isn't funded (mirrors every other assertion in this file).
+  if (walletHasAda) {
+    assert.match(submitText, /Transaction Submitted/, `${toolName} (submit): expected success on a funded wallet, got: ${submitText.slice(0, 300)}`);
+  } else {
+    assertSuccessOrKnownError(submitText, /Transaction Submitted/, `${toolName} (submit)`);
+  }
+  return { buildText, submitted: /Transaction Submitted/.test(submitText) };
+}
 
 describe('Agent Network Tools', () => {
-  test('vector_register_agent', { timeout: 120_000 }, async () => {
+  test('vector_build_register_agent -> sign -> submit', { timeout: 120_000 }, async () => {
     if (walletHasAda) {
       console.log('Waiting 10s for UTxOs to settle before register...');
       await wait(10);
     }
     const timestamp = Date.now();
-    const text = await callTool(ctx.client, 'vector_register_agent', {
-      mnemonic,
+    const { buildText, submitted } = await buildSignSubmit('vector_build_register_agent', {
+      changeAddress: walletAddress,
       name: `TestAgent-${timestamp}`,
       description: 'Integration test agent',
       capabilities: ['testing'],
       framework: 'custom',
       endpoint: '',
-    });
-    console.log(text);
-    assertSuccessOrKnownError(text, /Agent DID:/, 'vector_register_agent');
+    }, /Agent DID:/);
 
-    const didMatch = text.match(/(did:vector:agent:[a-f0-9]+:[a-f0-9]+)/);
-    if (didMatch) {
+    const didMatch = buildText.match(/(did:vector:agent:[a-f0-9]+:[a-f0-9]+)/);
+    if (submitted && didMatch) {
       agentDid = didMatch[1];
       console.log(`Registered agent DID: ${agentDid}`);
     }
@@ -266,7 +325,7 @@ describe('Agent Network Tools', () => {
     assertSuccessOrKnownError(text, /Agent Profile/, 'vector_get_agent_profile');
   });
 
-  test('vector_update_agent', { timeout: 120_000 }, async () => {
+  test('vector_build_update_agent -> sign -> submit', { timeout: 120_000 }, async () => {
     if (!agentDid) {
       console.log('Skipping update — no agent registered');
       return;
@@ -275,16 +334,14 @@ describe('Agent Network Tools', () => {
       console.log('Waiting 10s for UTxOs to settle before update...');
       await wait(10);
     }
-    const text = await callTool(ctx.client, 'vector_update_agent', {
-      mnemonic,
+    await buildSignSubmit('vector_build_update_agent', {
+      changeAddress: walletAddress,
       agent_id: agentDid,
       description: 'Updated integration test agent',
-    });
-    console.log(text);
-    assertSuccessOrKnownError(text, /Agent Updated|Updated fields/, 'vector_update_agent');
+    }, /Agent DID:/);
   });
 
-  test('vector_transfer_agent (to self)', { timeout: 120_000 }, async () => {
+  test('vector_build_transfer_agent (to self) -> sign -> submit', { timeout: 120_000 }, async () => {
     if (!agentDid || !walletAddress) {
       console.log('Skipping transfer — no agent registered or no wallet address');
       return;
@@ -293,33 +350,29 @@ describe('Agent Network Tools', () => {
       console.log('Waiting 10s for UTxOs to settle before transfer...');
       await wait(10);
     }
-    const text = await callTool(ctx.client, 'vector_transfer_agent', {
-      mnemonic,
+    await buildSignSubmit('vector_build_transfer_agent', {
+      changeAddress: walletAddress,
       agent_id: agentDid,
       new_owner_address: walletAddress,
-    });
-    console.log(text);
-    assertSuccessOrKnownError(text, /Agent Transferred|Transfer/, 'vector_transfer_agent');
+    }, /Agent DID:/);
   });
 
-  test('vector_message_agent', { timeout: 120_000 }, async () => {
+  test('vector_build_message_agent -> sign -> submit', { timeout: 120_000 }, async () => {
     // Use a known DID format even if registration failed, to test the tool responds
     const testDid = agentDid || `did:vector:agent:${ALWAYS_SUCCEEDS_V2}:${'a'.repeat(64)}`;
     if (walletHasAda && agentDid) {
       console.log('Waiting 10s for UTxOs to settle before message...');
       await wait(10);
     }
-    const text = await callTool(ctx.client, 'vector_message_agent', {
+    await buildSignSubmit('vector_build_message_agent', {
+      changeAddress: walletAddress,
       agent_id: testDid,
       message_type: 'inquiry',
       payload: 'integration test ping',
-      mnemonic,
-    });
-    console.log(text);
-    assertSuccessOrKnownError(text, /Message Sent/, 'vector_message_agent');
+    }, /Unsigned Message Built/);
   });
 
-  test('vector_deregister_agent', { timeout: 120_000 }, async () => {
+  test('vector_build_deregister_agent -> sign -> submit', { timeout: 120_000 }, async () => {
     if (!agentDid) {
       console.log('Skipping deregister — no agent registered');
       return;
@@ -328,11 +381,9 @@ describe('Agent Network Tools', () => {
       console.log('Waiting 10s for UTxOs to settle before deregister...');
       await wait(10);
     }
-    const text = await callTool(ctx.client, 'vector_deregister_agent', {
-      mnemonic,
+    await buildSignSubmit('vector_build_deregister_agent', {
+      changeAddress: walletAddress,
       agent_id: agentDid,
-    });
-    console.log(text);
-    assertSuccessOrKnownError(text, /Agent Deregistered|deposit returned/, 'vector_deregister_agent');
+    }, /Deposit returned on confirmation/);
   });
 });

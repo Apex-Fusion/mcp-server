@@ -12,9 +12,9 @@ import { resolve, join, relative } from 'node:path';
  * non-custodial split; growing it should be impossible to do accidentally.
  */
 const SRC_ROOT = resolve(import.meta.dirname!, '../src');
+const SCRIPTS_ROOT = resolve(import.meta.dirname!, '../scripts');
 const CUSTODIAL_UNTIL_LATER_PR = new Set([
-  'vector/agent-network.ts',     // family 2 — goes keyless in spec PR 7
-  'vector/self-improvement.ts',  // family 3 — goes keyless in spec PR 8
+  'vector/self-improvement.ts',  // family 3 (governance) — goes keyless in spec PR 8
 ]);
 // No \b boundaries: this is deliberately a substring match, not a whole-word
 // one. Word-bounding let `seedPhrase`, `WALLET_SEED` or `bip39x` slip past
@@ -46,6 +46,16 @@ describe('builder custody boundary', () => {
         if (FORBIDDEN.test(line)) offenders.push(`${rel}:${i + 1}: ${line.trim()}`);
       });
     }
+    // scripts/ is dev-tooling, not shipped builder source - it has no
+    // custodial carve-out, so nothing here is ever checked against the
+    // allowlist (unlike SRC_ROOT files above).
+    for (const file of sourceFiles(SCRIPTS_ROOT)) {
+      const rel = relative(SCRIPTS_ROOT, file).replace(/\\/g, '/');
+      const lines = readFileSync(file, 'utf-8').split('\n');
+      lines.forEach((line, i) => {
+        if (FORBIDDEN.test(line)) offenders.push(`scripts/${rel}:${i + 1}: ${line.trim()}`);
+      });
+    }
     assert.deepEqual(offenders, [], `key-material vocabulary found in keyless builder source:\n${offenders.join('\n')}`);
   });
 
@@ -59,12 +69,12 @@ describe('builder custody boundary', () => {
     }
   });
 
-  // The allowlist may only shrink (PR 7 drops agent-network.ts to reach 1, PR 8
-  // drops self-improvement.ts to reach 0 - see the "goes keyless in spec PR N"
-  // comments above). Pinning the size means any widening is a deliberate,
+  // The allowlist may only shrink (PR 7 dropped agent-network.ts to reach 1,
+  // PR 8 drops self-improvement.ts to reach 0 - see the "goes keyless in spec
+  // PR N" comment above). Pinning the size means any widening is a deliberate,
   // reviewable number change instead of a silent `.add(...)` slipping through.
   test('the allowlist may only shrink', () => {
-    assert.equal(CUSTODIAL_UNTIL_LATER_PR.size, 2, 'the custodial allowlist may only shrink - PR 7 takes it to 1 (drop agent-network), PR 8 to 0');
+    assert.equal(CUSTODIAL_UNTIL_LATER_PR.size, 1, 'the custodial allowlist may only shrink - spec PR 8 takes it to 0');
   });
 
   // Pins every FORBIDDEN alternative individually against a fixture corpus, so

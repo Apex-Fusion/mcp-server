@@ -60,6 +60,27 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
+  "vector_build_deregister_agent": {
+    "description": "Build an UNSIGNED transaction that deregisters an agent (burns the identity NFT, returns the 10 AP3X deposit to the owner wallet). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "The agent OWNER's wallet address (receives the returned deposit). Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "agent_id": {
+          "description": "Agent DID to deregister: did:vector:agent:{policyId}:{nftAssetName}",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeAddress",
+        "agent_id"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
   "vector_build_interact_contract": {
     "description": "Build an UNSIGNED transaction interacting with a deployed Plutus/Aiken contract - lock AP3X at it or spend from it. Takes no key material - sign with your local signer, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     "inputSchema": {
@@ -134,6 +155,90 @@
         "scriptCbor",
         "scriptType",
         "action"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_message_agent": {
+    "description": "Build an UNSIGNED transaction that sends an on-chain message to a registered agent via TX metadata (label 674), delivering 2 AP3X to the agent's owner address. Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address (pays the 2 AP3X delivery and fee; recorded as the sender). Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "agent_id": {
+          "description": "Recipient agent DID: did:vector:agent:{policyId}:{nftAssetName}",
+          "type": "string"
+        },
+        "message_type": {
+          "description": "Type of message",
+          "type": "string",
+          "enum": [
+            "inquiry",
+            "proposal",
+            "result"
+          ]
+        },
+        "payload": {
+          "description": "Message payload (string, max 512 chars)",
+          "type": "string",
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "changeAddress",
+        "agent_id",
+        "message_type",
+        "payload"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_register_agent": {
+    "description": "Build an UNSIGNED transaction that registers an agent in the Vector on-chain registry (mints a soulbound identity NFT, locks a 10 AP3X deposit). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address (source of the deposit and change). Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Agent name (e.g. 'TradingBot', 'ResearchAgent')",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "description": {
+          "description": "Short description of the agent's purpose",
+          "type": "string",
+          "maxLength": 256
+        },
+        "capabilities": {
+          "description": "List of capability tags (e.g. ['investing', 'research', 'environmental'])",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "framework": {
+          "description": "Framework used (e.g. 'OpenClaw', 'LangChain', 'CrewAI', 'custom')",
+          "type": "string"
+        },
+        "endpoint": {
+          "description": "A2A communication endpoint URL (or empty string if not applicable)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeAddress",
+        "name",
+        "description",
+        "capabilities",
+        "framework",
+        "endpoint"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
@@ -262,22 +367,74 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_deregister_agent": {
-    "description": "Deregister an agent from the Vector registry. Burns the identity NFT and returns the 10 AP3X deposit to your wallet.",
+  "vector_build_transfer_agent": {
+    "description": "Build an UNSIGNED transaction that transfers agent ownership to a new address (must be a verification-key address, not a script). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
     "inputSchema": {
       "type": "object",
       "properties": {
-        "mnemonic": {
-          "description": "15 or 24-word BIP39 mnemonic for the agent's owner wallet",
+        "changeAddress": {
+          "description": "The CURRENT owner's wallet address. Get it from vector_signer_get_address.",
           "type": "string"
         },
         "agent_id": {
-          "description": "Agent DID to deregister: did:vector:agent:{policyId}:{nftAssetName}",
+          "description": "Agent DID to transfer: did:vector:agent:{policyId}:{nftAssetName}",
+          "type": "string"
+        },
+        "new_owner_address": {
+          "description": "Bech32 address of the new owner (must be a verification key address, not a script address)",
           "type": "string"
         }
       },
       "required": [
-        "mnemonic",
+        "changeAddress",
+        "agent_id",
+        "new_owner_address"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_update_agent": {
+    "description": "Build an UNSIGNED transaction that updates a registered agent's profile fields. Only the specified fields change; others are preserved. Takes no key material - the on-chain validator requires the owner's signature, which you add locally with vector_signer_sign before vector_submit_transaction, then confirm with vector_await_transaction.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "The agent OWNER's wallet address. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "agent_id": {
+          "description": "Agent DID to update: did:vector:agent:{policyId}:{nftAssetName}",
+          "type": "string"
+        },
+        "name": {
+          "description": "New agent name",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "description": {
+          "description": "New description",
+          "type": "string",
+          "maxLength": 256
+        },
+        "capabilities": {
+          "description": "New capability tags (replaces existing list)",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "framework": {
+          "description": "New framework identifier",
+          "type": "string"
+        },
+        "endpoint": {
+          "description": "New A2A endpoint URL (or empty string to clear)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeAddress",
         "agent_id"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
@@ -427,90 +584,6 @@
       },
       "required": [
         "address"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
-  "vector_message_agent": {
-    "description": "Send an on-chain message to a registered Vector agent via TX metadata (label 674). Delivers 2 AP3X to the agent's owner address.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "agent_id": {
-          "description": "Recipient agent DID: did:vector:agent:{policyId}:{nftAssetName}",
-          "type": "string"
-        },
-        "message_type": {
-          "description": "Type of message",
-          "type": "string",
-          "enum": [
-            "inquiry",
-            "proposal",
-            "result"
-          ]
-        },
-        "payload": {
-          "description": "Message payload (string, max 512 chars)",
-          "type": "string",
-          "maxLength": 512
-        },
-        "mnemonic": {
-          "description": "15 or 24-word BIP39 mnemonic for the sending wallet",
-          "type": "string"
-        }
-      },
-      "required": [
-        "agent_id",
-        "message_type",
-        "payload",
-        "mnemonic"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
-  "vector_register_agent": {
-    "description": "Register an agent in the Vector on-chain agent registry. Mints a soulbound identity NFT and locks a 10 AP3X deposit.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "mnemonic": {
-          "description": "15 or 24-word BIP39 mnemonic for the registering wallet",
-          "type": "string"
-        },
-        "name": {
-          "description": "Agent name (e.g. 'TradingBot', 'ResearchAgent')",
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64
-        },
-        "description": {
-          "description": "Short description of the agent's purpose",
-          "type": "string",
-          "maxLength": 256
-        },
-        "capabilities": {
-          "description": "List of capability tags (e.g. ['investing', 'research', 'environmental'])",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "framework": {
-          "description": "Framework used (e.g. 'OpenClaw', 'LangChain', 'CrewAI', 'custom')",
-          "type": "string"
-        },
-        "endpoint": {
-          "description": "A2A communication endpoint URL (or empty string if not applicable)",
-          "type": "string"
-        }
-      },
-      "required": [
-        "mnemonic",
-        "name",
-        "description",
-        "capabilities",
-        "framework",
-        "endpoint"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
@@ -768,79 +841,6 @@
       },
       "required": [
         "signedTxCbor"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
-  "vector_transfer_agent": {
-    "description": "Transfer agent ownership to a new address. The new owner must have a verification key credential (not a script address).",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "mnemonic": {
-          "description": "15 or 24-word BIP39 mnemonic for the current owner's wallet",
-          "type": "string"
-        },
-        "agent_id": {
-          "description": "Agent DID to transfer: did:vector:agent:{policyId}:{nftAssetName}",
-          "type": "string"
-        },
-        "new_owner_address": {
-          "description": "Bech32 address of the new owner (must be a verification key address, not a script address)",
-          "type": "string"
-        }
-      },
-      "required": [
-        "mnemonic",
-        "agent_id",
-        "new_owner_address"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
-  "vector_update_agent": {
-    "description": "Update a registered agent's profile fields (name, description, capabilities, framework, endpoint). Only the specified fields are changed; others are preserved.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "mnemonic": {
-          "description": "15 or 24-word BIP39 mnemonic for the agent's owner wallet",
-          "type": "string"
-        },
-        "agent_id": {
-          "description": "Agent DID to update: did:vector:agent:{policyId}:{nftAssetName}",
-          "type": "string"
-        },
-        "name": {
-          "description": "New agent name",
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64
-        },
-        "description": {
-          "description": "New description",
-          "type": "string",
-          "maxLength": 256
-        },
-        "capabilities": {
-          "description": "New capability tags (replaces existing list)",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "framework": {
-          "description": "New framework identifier",
-          "type": "string"
-        },
-        "endpoint": {
-          "description": "New A2A endpoint URL (or empty string to clear)",
-          "type": "string"
-        }
-      },
-      "required": [
-        "mnemonic",
-        "agent_id"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }

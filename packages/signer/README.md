@@ -145,27 +145,29 @@ over-counts, which refuses too much rather than too little.
   transactions, but an injected agent can still cause any transaction *within* policy.
   Recipient allowlisting is the next lever.
 - **Pairing this signer with the hosted builder now removes the custody exposure it was
-  designed to fix — for the wallet, transaction, and smart-contract family.** The signer's own
-  four tools are complete and independently verified end to end against live chain data
-  (`test/integration/roundtrip.test.ts`), and the hosted *builder's* tools in that family are
-  keyless: `vector_build_send_apex`, `vector_build_send_tokens`, `vector_build_transaction`,
-  `vector_build_deploy_contract`, and `vector_build_interact_contract` all take a wallet
-  *address*, never a mnemonic, and `vector_submit_transaction` / `vector_await_transaction`
-  complete the round trip. The pipeline — hosted keyless build → sign → submit → await — is
-  E2E-proven on Vector testnet (`packages/builder/test/integration/keyless-e2e.test.ts`): a
-  builder-produced unsigned transaction is signed with the same CML primitives `sign.ts` uses
-  (hash the body, produce a vkey witness, attach it — explicitly a stand-in for calling
-  `vector_signer_sign` directly, not a call to this package's own code), then submitted and
-  confirmed on real Vector testnet blocks. This signer's own tool surface, policy engine, and
-  audit log are exercised separately, by this package's own suite
-  (`test/integration/roundtrip.test.ts` and the smoke tests above). **What is still open: the
-  agent-registry and self-improvement tool families.** Their tools still require your mnemonic
-  as a call
-  parameter, so pairing this signer with the builder does not yet cover them. That migration is
-  tracked separately in
+  designed to fix — for the wallet, transaction, smart-contract, and agent-registry family.**
+  The signer's own four tools are complete and independently verified end to end against live
+  chain data (`test/integration/roundtrip.test.ts`), and the hosted *builder's* tools in these
+  families are keyless: `vector_build_send_apex`, `vector_build_send_tokens`,
+  `vector_build_transaction`, `vector_build_deploy_contract`, `vector_build_interact_contract`,
+  `vector_build_register_agent`, `vector_build_update_agent`, `vector_build_transfer_agent`,
+  `vector_build_deregister_agent`, and `vector_build_message_agent` all take a wallet *address*,
+  never a mnemonic, and `vector_submit_transaction` / `vector_await_transaction` complete the
+  round trip. The pipeline — hosted keyless build → sign → submit → await — is E2E-proven on
+  Vector testnet for both: a payment self-send
+  (`packages/builder/test/integration/keyless-e2e.test.ts`) and a full register → update →
+  deregister agent lifecycle with the 10 AP3X deposit round-tripped exactly
+  (`registry-e2e.test.ts`). Both sign with the same CML primitives `sign.ts` uses (hash the
+  body, produce a vkey witness, attach it — explicitly a stand-in for calling
+  `vector_signer_sign` directly, not a call to this package's own code), then submit and confirm
+  on real Vector testnet blocks. This signer's own tool surface, policy engine, and audit log
+  are exercised separately, by this package's own suite (`test/integration/roundtrip.test.ts`
+  and the smoke tests above). **What is still open: the Self-Improvement Module.** Its 5 tools
+  still require your mnemonic as a call parameter, so pairing this signer with the builder does
+  not yet cover them. That migration is tracked separately in
   [`docs/architecture/non-custodial-split.md`](../../docs/architecture/non-custodial-split.md)
-  and has not shipped. Until it does, the root README's custody notice still describes those two
-  families accurately.
+  and has not shipped. Until it does, the root README's custody notice still describes that one
+  family accurately.
 
 ## Running it
 
@@ -192,9 +194,9 @@ example):
 ```
 
 Register it alongside the hosted builder so an agent has both sets of tools available. For the
-wallet, transaction, and smart-contract family, this pairing keeps your mnemonic off the hosted
-server today — both halves are ready. See the last bullet under Known limitations above for
-what's still open: the agent-registry and self-improvement families.
+wallet, transaction, smart-contract, and agent-registry family, this pairing keeps your
+mnemonic off the hosted server today — both halves are ready. See the last bullet under Known
+limitations above for what's still open: the Self-Improvement Module.
 
 ## Testing
 
