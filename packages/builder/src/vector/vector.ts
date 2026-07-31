@@ -179,7 +179,7 @@ ${utxoList}`,
     {
       changeAddress: z.string().describe("Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address."),
       recipientAddress: z.string().describe("Recipient Vector address (addr1...)"),
-      amount: z.number().min(1).describe("Amount of AP3X to send"),
+      amount: z.number().min(0.000001).describe("Amount of AP3X to send (minimum 0.000001 = 1 lovelace; the ledger's own minimum-UTxO rule applies per output and will reject dust with a clear error)"),
       metadata: z.string().optional().describe("Optional transaction metadata in JSON format"),
     },
     async ({ changeAddress, recipientAddress, amount, metadata }) => {

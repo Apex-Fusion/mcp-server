@@ -151,6 +151,34 @@ describe('buildSendApex', () => {
       'lost a lovelace - buildSendApex must call apexToLovelace, not Math.floor(amountApex * 1_000_000)',
     );
   });
+
+  test('builds a sub-1-AP3X send at the new schema floor (audit D: the dust floor)', async () => {
+    // vector.ts's amount schema used to be z.number().min(1), which forbade
+    // this send outright. Task 3 moved the schema floor to 0.000001 AP3X (one
+    // lovelace) and left the ledger's own min-UTxO rule - a function of
+    // coinsPerUtxoByte (4310 in this fixture's captured protocol params) and
+    // the output's serialized size - to be the real, size-dependent
+    // constraint, surfaced by Lucid when an output is actually too small.
+    //
+    // Empirically (this fixture, this Lucid version): a plain single-address,
+    // no-asset, no-datum output bottoms out at 849,070 lovelace (~0.84907
+    // AP3X) - close to the plan's own 0.85-1.0 AP3X estimate. Lucid does NOT
+    // throw below that floor; .complete() silently bumps the coin value up to
+    // it instead, which would make a smaller test amount here measure Lucid's
+    // rounding-up behavior instead of the schema-floor change this test
+    // exists to pin. 0.9 AP3X clears that floor with margin, stays under 1
+    // AP3X (the old, now-removed schema minimum) to prove the point, and sits
+    // in the same CBOR uint32 size class as the floor itself (both encode as
+    // 5 bytes), so the floor does not shift between the two values.
+    const r = await buildSendApex(lucid, { recipientAddress: FOREIGN_ADDRESS, amountApex: 0.9 });
+    const outs = decodeOutputs(r.txCbor);
+    const toRecipient = outs.filter((o) => o.address === FOREIGN_ADDRESS);
+    assert.equal(toRecipient.length, 1);
+    assert.equal(
+      toRecipient[0].lovelace, 900_000n,
+      'sub-1-AP3X send must build offline and carry the exact requested lovelace amount',
+    );
+  });
 });
 
 describe('buildSendTokens', () => {
