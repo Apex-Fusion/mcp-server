@@ -13,5 +13,8 @@
     "@lucid-evolution/lucid": "^0.4.29",
     "@noble/hashes": "^1.7.1",
     "cross-fetch": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

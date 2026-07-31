@@ -170,10 +170,26 @@ Example non-custodial flow for a registry op: `vector_build_register_agent` →
 
 ### 1. Install and build
 
+Requires Node.js >= 22 (matches `engines` in every `package.json` and the Dockerfile's
+`node:22-alpine` base).
+
 ```bash
 npm install
 npm run build
 ```
+
+**Dependency advisories.** `npm audit` currently reports 1 low-severity advisory: an `esbuild`
+arbitrary-file-read issue that only triggers via its own Windows dev server, reachable solely
+through `tsup` (a build-time-only dependency, absent from the production image, which installs
+with `npm ci --omit=dev`). As of 2026-07-31 this tree carried 44 advisories, including 1
+critical (`tar`, GHSA-23hp-3jrh-7fpw) that arrived because `@cardano-sdk/crypto` - pulled in
+transitively through `@lucid-evolution/lucid` - declared the entire `npm` CLI package as a
+runtime dependency. That dependency was dead weight: `@cardano-sdk/crypto`'s own published code
+never requires `npm`, and neither `npm` nor `tar` appears anywhere in this server's built
+bundle. Regenerating the lockfile picked up a newer `@cardano-sdk/crypto` release that dropped
+the stray dependency outright, clearing all 43 of those advisories without any override needed;
+`package.json` also carries a defensive `overrides` pin on `tar` and `brace-expansion` against
+future regressions, though it is not what resolved this one.
 
 ### 2. Configure environment (optional)
 

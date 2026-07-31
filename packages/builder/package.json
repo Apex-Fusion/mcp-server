@@ -25,5 +25,8 @@
   },
   "devDependencies": {
     "@apexfusion/vector-mcp-shared": "*"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
