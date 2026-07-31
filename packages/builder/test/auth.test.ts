@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadAuthConfig, resolveIdentity } from '../src/auth.ts';
+import { loadAuthConfig, resolveIdentity, clientIpOf } from '../src/auth.ts';
 
 describe('loadAuthConfig', () => {
   test('is disabled when MCP_AUTH_TOKENS is unset', () => {
@@ -60,11 +60,11 @@ describe('resolveIdentity — auth disabled', () => {
   const off = loadAuthConfig({});
 
   test('allows a request with no header', () => {
-    assert.deepStrictEqual(resolveIdentity(undefined, off), { ok: true, identity: 'anonymous' });
+    assert.deepStrictEqual(resolveIdentity(undefined, off, '203.0.113.50'), { ok: true, identity: 'anon:203.0.113.50' });
   });
 
   test('allows a request with a bogus header', () => {
-    assert.deepStrictEqual(resolveIdentity('Bearer whatever', off), { ok: true, identity: 'anonymous' });
+    assert.deepStrictEqual(resolveIdentity('Bearer whatever', off, '203.0.113.50'), { ok: true, identity: 'anon:203.0.113.50' });
   });
 });
 
@@ -72,34 +72,34 @@ describe('resolveIdentity — auth enabled', () => {
   const on = loadAuthConfig({ MCP_AUTH_TOKENS: 'alice:tok-a,bob:tok-b' });
 
   test('accepts a valid bearer token and returns its label', () => {
-    assert.deepStrictEqual(resolveIdentity('Bearer tok-a', on), { ok: true, identity: 'alice' });
+    assert.deepStrictEqual(resolveIdentity('Bearer tok-a', on, '203.0.113.50'), { ok: true, identity: 'alice' });
   });
 
   test('is case-insensitive on the Bearer scheme', () => {
-    assert.deepStrictEqual(resolveIdentity('bearer tok-a', on), { ok: true, identity: 'alice' });
+    assert.deepStrictEqual(resolveIdentity('bearer tok-a', on, '203.0.113.50'), { ok: true, identity: 'alice' });
   });
 
   test('rejects a missing header', () => {
-    const r = resolveIdentity(undefined, on);
+    const r = resolveIdentity(undefined, on, '203.0.113.50');
     assert.equal(r.ok, false);
   });
 
   test('rejects an unknown token', () => {
-    assert.equal(resolveIdentity('Bearer nope', on).ok, false);
+    assert.equal(resolveIdentity('Bearer nope', on, '203.0.113.50').ok, false);
   });
 
   test('rejects a valid token without the Bearer scheme', () => {
-    assert.equal(resolveIdentity('tok-a', on).ok, false);
+    assert.equal(resolveIdentity('tok-a', on, '203.0.113.50').ok, false);
   });
 
   test('rejects a token with trailing whitespace padding', () => {
     // Exact match only. Tolerating padding here would mean two distinct
     // strings resolve to one identity, which muddies rate-limit accounting.
-    assert.equal(resolveIdentity('Bearer  tok-a ', on).ok, false);
+    assert.equal(resolveIdentity('Bearer  tok-a ', on, '203.0.113.50').ok, false);
   });
 
   test('a rejection reason never contains the supplied token', () => {
-    const r = resolveIdentity('Bearer super-secret-value', on);
+    const r = resolveIdentity('Bearer super-secret-value', on, '203.0.113.50');
     assert.equal(r.ok, false);
     assert.ok(!JSON.stringify(r).includes('super-secret-value'), 'must not echo the token');
   });
@@ -114,29 +114,29 @@ describe('loadAuthConfig — adversarial: delimiter and charset edge cases', () 
     const c = loadAuthConfig({ MCP_AUTH_TOKENS: 'alice:tok:with:colons' });
     assert.equal(c.identities.size, 1);
     assert.equal(c.identities.get('tok:with:colons'), 'alice');
-    assert.deepStrictEqual(resolveIdentity('Bearer tok:with:colons', c), { ok: true, identity: 'alice' });
+    assert.deepStrictEqual(resolveIdentity('Bearer tok:with:colons', c, '203.0.113.50'), { ok: true, identity: 'alice' });
   });
 
   test('handles a very long token', () => {
     const token = 'a'.repeat(5000);
     const c = loadAuthConfig({ MCP_AUTH_TOKENS: `bob:${token}` });
     assert.equal(c.identities.get(token), 'bob');
-    assert.deepStrictEqual(resolveIdentity(`Bearer ${token}`, c), { ok: true, identity: 'bob' });
+    assert.deepStrictEqual(resolveIdentity(`Bearer ${token}`, c, '203.0.113.50'), { ok: true, identity: 'bob' });
   });
 
   test('accepts non-whitespace unicode characters in a token', () => {
     const token = 'tok-é中文-😀'; // "tok-é中文-😀"
     const c = loadAuthConfig({ MCP_AUTH_TOKENS: `bob:${token}` });
-    assert.deepStrictEqual(resolveIdentity(`Bearer ${token}`, c), { ok: true, identity: 'bob' });
+    assert.deepStrictEqual(resolveIdentity(`Bearer ${token}`, c, '203.0.113.50'), { ok: true, identity: 'bob' });
   });
 
   test('a zero-width space (U+200B) in a token is not a bug: preserved by trim, ' +
     'excluded from neither \\s nor \\S, so config and header matching stay consistent', () => {
     const token = 'tok-a\u200B'; // trailing zero-width space (U+200B)
     const c = loadAuthConfig({ MCP_AUTH_TOKENS: `bob:${token}` });
-    assert.deepStrictEqual(resolveIdentity(`Bearer ${token}`, c), { ok: true, identity: 'bob' });
+    assert.deepStrictEqual(resolveIdentity(`Bearer ${token}`, c, '203.0.113.50'), { ok: true, identity: 'bob' });
     // The visually-identical token WITHOUT the invisible character must NOT match.
-    assert.equal(resolveIdentity('Bearer tok-a', c).ok, false);
+    assert.equal(resolveIdentity('Bearer tok-a', c, '203.0.113.50').ok, false);
   });
 
   test('rejects a token containing an embedded ASCII space', () => {
@@ -163,9 +163,9 @@ describe('loadAuthConfig — adversarial: delimiter and charset edge cases', () 
     const c = loadAuthConfig({ MCP_AUTH_TOKENS: 'alice:correct,horse,battery,staple' });
     assert.equal(c.identities.size, 4);
     assert.equal(c.identities.get('correct'), 'alice');
-    assert.ok(resolveIdentity('Bearer horse', c).ok, 'fragment "horse" became an unintended standalone valid token');
-    assert.ok(resolveIdentity('Bearer battery', c).ok, 'fragment "battery" became an unintended standalone valid token');
-    assert.ok(resolveIdentity('Bearer staple', c).ok, 'fragment "staple" became an unintended standalone valid token');
+    assert.ok(resolveIdentity('Bearer horse', c, '203.0.113.50').ok, 'fragment "horse" became an unintended standalone valid token');
+    assert.ok(resolveIdentity('Bearer battery', c, '203.0.113.50').ok, 'fragment "battery" became an unintended standalone valid token');
+    assert.ok(resolveIdentity('Bearer staple', c, '203.0.113.50').ok, 'fragment "staple" became an unintended standalone valid token');
   });
 });
 
@@ -191,8 +191,8 @@ describe('loadAuthConfig — adversarial: identity mapping', () => {
     const c = loadAuthConfig({ MCP_AUTH_TOKENS: 'alice:tok-old,alice:tok-new' });
     assert.equal(c.identities.get('tok-old'), 'alice');
     assert.equal(c.identities.get('tok-new'), 'alice');
-    assert.deepStrictEqual(resolveIdentity('Bearer tok-old', c), { ok: true, identity: 'alice' });
-    assert.deepStrictEqual(resolveIdentity('Bearer tok-new', c), { ok: true, identity: 'alice' });
+    assert.deepStrictEqual(resolveIdentity('Bearer tok-old', c, '203.0.113.50'), { ok: true, identity: 'alice' });
+    assert.deepStrictEqual(resolveIdentity('Bearer tok-new', c, '203.0.113.50'), { ok: true, identity: 'alice' });
   });
 
   test('a label of only whitespace falls back to a hash-derived label, like a bare token', () => {
@@ -204,7 +204,7 @@ describe('loadAuthConfig — adversarial: identity mapping', () => {
   test('__proto__ and constructor as label/token values are inert (backed by a Map, not a plain object)', () => {
     const c = loadAuthConfig({ MCP_AUTH_TOKENS: '__proto__:constructor' });
     assert.equal(c.identities.get('constructor'), '__proto__');
-    assert.deepStrictEqual(resolveIdentity('Bearer constructor', c), { ok: true, identity: '__proto__' });
+    assert.deepStrictEqual(resolveIdentity('Bearer constructor', c, '203.0.113.50'), { ok: true, identity: '__proto__' });
     assert.equal(Object.prototype.hasOwnProperty.call({}, 'polluted'), false);
   });
 });
@@ -284,31 +284,76 @@ describe('resolveIdentity — adversarial', () => {
   const on = loadAuthConfig({ MCP_AUTH_TOKENS: 'alice:tok-a,bob:tok-b' });
 
   test('token comparison is case-sensitive (exact match only)', () => {
-    assert.equal(resolveIdentity('Bearer TOK-A', on).ok, false);
-    assert.equal(resolveIdentity('Bearer Tok-A', on).ok, false);
+    assert.equal(resolveIdentity('Bearer TOK-A', on, '203.0.113.50').ok, false);
+    assert.equal(resolveIdentity('Bearer Tok-A', on, '203.0.113.50').ok, false);
   });
 
   test('a strict prefix of a valid token is rejected', () => {
-    assert.equal(resolveIdentity('Bearer tok', on).ok, false);
+    assert.equal(resolveIdentity('Bearer tok', on, '203.0.113.50').ok, false);
   });
 
   test('a superstring of a valid token is rejected (no partial/prefix matching)', () => {
-    assert.equal(resolveIdentity('Bearer tok-a-extra', on).ok, false);
+    assert.equal(resolveIdentity('Bearer tok-a-extra', on, '203.0.113.50').ok, false);
   });
 
   test('an empty string Authorization header is treated exactly the same as a missing one', () => {
-    assert.deepStrictEqual(resolveIdentity('', on), resolveIdentity(undefined, on));
+    assert.deepStrictEqual(resolveIdentity('', on, '203.0.113.50'), resolveIdentity(undefined, on, '203.0.113.50'));
   });
 
   test('"Bearer" with no token at all is rejected as malformed', () => {
-    assert.equal(resolveIdentity('Bearer', on).ok, false);
-    assert.equal(resolveIdentity('Bearer ', on).ok, false);
+    assert.equal(resolveIdentity('Bearer', on, '203.0.113.50').ok, false);
+    assert.equal(resolveIdentity('Bearer ', on, '203.0.113.50').ok, false);
   });
 
   test('a malformed-header rejection reason never contains the header value', () => {
     const weird = 'not-even-bearer-scheme-' + 'x'.repeat(50);
-    const r = resolveIdentity(weird, on);
+    const r = resolveIdentity(weird, on, '203.0.113.50');
     assert.equal(r.ok, false);
     assert.ok(!JSON.stringify(r).includes(weird));
+  });
+});
+
+describe('clientIpOf', () => {
+  const mk = (xff: string | string[] | undefined, remote?: string) =>
+    ({ headers: { 'x-forwarded-for': xff }, socket: { remoteAddress: remote } });
+
+  test('takes the RIGHTMOST X-Forwarded-For entry (the one our proxy appended)', () => {
+    assert.equal(clientIpOf(mk('203.0.113.50')), '203.0.113.50');
+    assert.equal(clientIpOf(mk('6.6.6.6, 203.0.113.50')), '203.0.113.50');
+    assert.equal(clientIpOf(mk('forged, also-forged, 198.51.100.7')), '198.51.100.7');
+  });
+
+  test('normalizes IPv6-mapped IPv4 and strips whitespace', () => {
+    assert.equal(clientIpOf(mk('::ffff:203.0.113.50')), '203.0.113.50');
+    assert.equal(clientIpOf(mk('  203.0.113.50  ')), '203.0.113.50');
+  });
+
+  test('array-valued header uses the last header instance', () => {
+    assert.equal(clientIpOf(mk(['1.1.1.1', '2.2.2.2, 203.0.113.9'])), '203.0.113.9');
+  });
+
+  test('falls back to socket.remoteAddress, then "unknown"', () => {
+    assert.equal(clientIpOf(mk(undefined, '::ffff:127.0.0.1')), '127.0.0.1');
+    assert.equal(clientIpOf(mk(undefined, undefined)), 'unknown');
+    assert.equal(clientIpOf({ headers: {} }), 'unknown');
+  });
+
+  test('an empty rightmost entry falls back rather than yielding an empty identity', () => {
+    assert.equal(clientIpOf(mk('203.0.113.50,', '10.0.0.1')), '10.0.0.1');
+  });
+});
+
+describe('resolveIdentity with auth disabled (per-IP anonymous buckets)', () => {
+  const disabled = loadAuthConfig({});
+  test('identity is anon:<ip>, distinct per client', () => {
+    const a = resolveIdentity(undefined, disabled, '203.0.113.50');
+    const b = resolveIdentity(undefined, disabled, '198.51.100.7');
+    assert.deepEqual(a, { ok: true, identity: 'anon:203.0.113.50' });
+    assert.deepEqual(b, { ok: true, identity: 'anon:198.51.100.7' });
+    assert.notEqual((a as any).identity, (b as any).identity);
+  });
+  test('a presented token is ignored when auth is disabled - still per-IP', () => {
+    const r = resolveIdentity('Bearer whatever', disabled, '203.0.113.50');
+    assert.deepEqual(r, { ok: true, identity: 'anon:203.0.113.50' });
   });
 });

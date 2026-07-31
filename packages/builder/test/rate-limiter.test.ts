@@ -1,6 +1,6 @@
 import { describe, test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { RateLimiter, limiterFor, resetLimiters } from '../src/vector/rate-limiter.ts';
+import { RateLimiter, limiterFor, resetLimiters, MAX_TRACKED_IDENTITIES } from '../src/vector/rate-limiter.ts';
 
 beforeEach(() => resetLimiters());
 
@@ -114,5 +114,22 @@ describe('RateLimiter — genuine sliding-window expiry', () => {
 
     t.mock.timers.tick(2); // now 60.001s after the original call
     assert.equal(l.check().allowed, true, '60.001s later: window elapsed, budget renewed');
+  });
+});
+
+describe('limiter registry cap', () => {
+  test('evicts the least-recently-used identity at the cap, and refresh-on-access protects active callers', () => {
+    resetLimiters();
+    const first = limiterFor('keeper');
+    for (let i = 0; i < MAX_TRACKED_IDENTITIES - 1; i++) limiterFor(`filler-${i}`);
+    // registry is now exactly at the cap; 'keeper' is the oldest by insertion.
+    assert.equal(limiterFor('keeper'), first, 'accessing keeper must refresh its recency, not evict it');
+    limiterFor('overflow-1'); // evicts filler-0 (now the oldest), NOT keeper
+    assert.equal(limiterFor('keeper'), first, 'keeper must survive the overflow eviction');
+    // filler-0 was evicted: asking for it again yields a FRESH instance (budget reset - the
+    // documented memory-bound trade).
+    const refilled = limiterFor('filler-0');
+    assert.ok(refilled instanceof RateLimiter);
+    resetLimiters();
   });
 });

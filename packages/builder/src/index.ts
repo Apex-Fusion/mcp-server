@@ -26,7 +26,7 @@ if (existsSync(envPath)) {
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { registerVectorTools } from "./vector/index.js";
-import { loadAuthConfig, resolveIdentity } from "./auth.js";
+import { loadAuthConfig, resolveIdentity, clientIpOf } from "./auth.js";
 
 function createMcpServer(identity: string) {
   const server = new McpServer({
@@ -43,7 +43,7 @@ const authConfig = loadAuthConfig();
 if (authConfig.enabled) {
   console.error(`Auth: enabled (${authConfig.identities.size} identit${authConfig.identities.size === 1 ? 'y' : 'ies'} configured)`);
 } else {
-  console.error('Auth: DISABLED — every caller is treated as "anonymous" and shares one rate-limit bucket.');
+  console.error('Auth: DISABLED - anonymous callers are admitted with per-client-IP rate limits.');
   console.error('Auth: set MCP_AUTH_TOKENS to require a bearer token. Do not run a public instance without it.');
 }
 
@@ -55,7 +55,7 @@ const httpServer = createServer(async (req, res) => {
   const url = new URL(req.url!, `http://localhost:${PORT}`);
 
   if (req.method === 'GET' && url.pathname === '/sse') {
-    const auth = resolveIdentity(req.headers.authorization, authConfig);
+    const auth = resolveIdentity(req.headers.authorization, authConfig, clientIpOf(req));
     if (!auth.ok) {
       res.writeHead(401, { 'Content-Type': 'text/plain', 'WWW-Authenticate': 'Bearer' });
       res.end(auth.reason);
@@ -71,7 +71,7 @@ const httpServer = createServer(async (req, res) => {
     });
     await session.connect(transport);
   } else if (req.method === 'POST' && url.pathname === '/messages') {
-    const auth = resolveIdentity(req.headers.authorization, authConfig);
+    const auth = resolveIdentity(req.headers.authorization, authConfig, clientIpOf(req));
     if (!auth.ok) {
       res.writeHead(401, { 'Content-Type': 'text/plain', 'WWW-Authenticate': 'Bearer' });
       res.end(auth.reason);

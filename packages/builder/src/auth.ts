@@ -14,7 +14,32 @@ export interface AuthConfig {
   identities: Map<string, string>;
 }
 
-export const ANONYMOUS = 'anonymous';
+export const ANONYMOUS_PREFIX = 'anon:';
+
+/**
+ * Client address for rate-limit identity when auth is disabled.
+ *
+ * Trust model: this server binds 127.0.0.1 behind ONE trusted reverse proxy that
+ * APPENDS the true peer address to X-Forwarded-For. The RIGHTMOST entry is therefore
+ * the only trustworthy one; everything left of it is client-supplied and forgeable.
+ * Direct access (self-hosting without a proxy) has no XFF header and falls back to the
+ * socket's remote address.
+ */
+export function clientIpOf(req: {
+  headers: Record<string, string | string[] | undefined>;
+  socket?: { remoteAddress?: string };
+}): string {
+  const raw = req.headers['x-forwarded-for'];
+  const headerValue = Array.isArray(raw) ? raw[raw.length - 1] : raw;
+  if (headerValue) {
+    const entries = headerValue.split(',');
+    const rightmost = entries[entries.length - 1]?.trim();
+    if (rightmost) return rightmost.replace(/^::ffff:/i, '');
+  }
+  const remote = req.socket?.remoteAddress;
+  if (remote) return remote.replace(/^::ffff:/i, '');
+  return 'unknown';
+}
 
 /** Stable, non-reversible label for a bare token, so logs can name a caller safely. */
 function labelForToken(token: string): string {
@@ -86,9 +111,13 @@ export function loadAuthConfig(env: Record<string, string | undefined> = process
 
 export function resolveIdentity(
   authHeader: string | undefined,
-  config: AuthConfig
+  config: AuthConfig,
+  clientIp: string
 ): { ok: true; identity: string } | { ok: false; reason: string } {
-  if (!config.enabled) return { ok: true, identity: ANONYMOUS };
+  // Auth disabled: every caller is admitted, but each client IP gets its OWN
+  // rate-limit bucket. Before this, all anonymous callers shared one bucket and
+  // one busy caller throttled the whole box - untenable for a public instance.
+  if (!config.enabled) return { ok: true, identity: ANONYMOUS_PREFIX + clientIp };
 
   if (!authHeader) {
     return { ok: false, reason: 'Missing Authorization header. Expected: Authorization: Bearer <token>' };
