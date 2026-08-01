@@ -126,8 +126,9 @@ over-counts, which refuses too much rather than too little.
   today's spend, which quietly raises the effective daily limit. The practical effect: if the
   audit log's directory disappears, the disk fills, or the path loses write permission, every
   `vector_signer_sign` call starts returning `REFUSED`, including transactions well inside
-  policy, until it is writable again. That refusal names the audit failure explicitly, unlike
-  an ordinary policy refusal. Signing stops outright until the log is writable again.
+  policy, until it is writable again. That refusal names the audit failure explicitly rather
+  than reading like an ordinary policy refusal, but it is still a full stop on signing, not a
+  warning.
 - **The key is plaintext at rest** in v1 (env var or file). The win is that it is *local*
   and never transits your model provider or a shared host, not that it is in an HSM.
   `KeySource` exists so keychain and hardware backends can be added without touching the

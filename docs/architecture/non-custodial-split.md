@@ -119,7 +119,7 @@ interface Policy {
 
 `vector_signer_decode_transaction` is a read-only preview so an agent can show a human what it is about to sign.
 
-**Accepted trade-off of the 4-call shape:** the signer records **intent to spend** at signing time, not confirmed submission. If a submit later fails, the audit log over-counts. Conservative, therefore acceptable, and it is the price of the signer having no network access.
+**Accepted trade-off of the 4-call shape:** the signer records **intent to spend** at signing time, not confirmed submission. If a submit later fails, the audit log over-counts. Conservative, therefore acceptable, and it is the price of the signer having no network access. This trade-off is documented.
 
 ### Two-step self-improvement flow
 
@@ -250,7 +250,7 @@ CI only runs `npm run build`, and `tsup`/esbuild strips types without checking t
 
 **Native-asset outflow is not limited in v1.** Spend limits apply to lovelace. A transaction moving ~2 AP3X plus a valuable NFT to a foreign address passes the lovelace check. Blanket-denying asset outflow is not viable because legitimate registry flows mint an NFT to the registry script address.
 
-v1 mitigation: all asset movements are decoded, logged, and returned in the policy decision, and `assetOutflowPolicy` is configurable (`allow` default | `deny` | `allowlist`) for high-value wallets. Post-v1: per-policy asset rules.
+v1 mitigation: all asset movements are decoded, logged, and returned in the policy decision, and `assetOutflowPolicy` is configurable (`allow` default | `deny` | `allowlist`) for high-value wallets. **This is a stated limitation.** Post-v1: per-policy asset rules.
 
 **Key at rest is plaintext in v1** (env var or `0600` file). The win is that the key is *local and never transits the LLM or a shared host*, not that it is in an HSM. `KeySource` exists so keychain/HSM/hardware land later without touching the sign path.
 

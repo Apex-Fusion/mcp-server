@@ -87,7 +87,7 @@
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (holds the AP3X, receives change, and is the required signer for spends). Get it from your local signer's vector_signer_get_address.",
+          "description": "Your wallet address (supplies the inputs, receives change, and is the required signer for spends). Get it from your local signer's vector_signer_get_address.",
           "type": "string"
         },
         "scriptCbor": {
@@ -494,7 +494,7 @@
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (holds the AP3X; receives change). Get it from your local signer's vector_signer_get_address.",
+          "description": "Your wallet address (holds the AP3X and tokens; receives change). Get it from your local signer's vector_signer_get_address.",
           "type": "string"
         },
         "recipientAddress": {
@@ -534,7 +534,7 @@
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (holds the AP3X; receives change). Get it from your local signer's vector_signer_get_address.",
+          "description": "Your wallet address (supplies the inputs; receives change). Get it from your local signer's vector_signer_get_address.",
           "type": "string"
         },
         "outputs": {
