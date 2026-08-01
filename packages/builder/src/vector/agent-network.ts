@@ -38,7 +38,7 @@ export function registerAgentNetworkTools(server: McpServer, identity: string) {
     return null;
   }
 
-  // vector_get_agent_profile (read-only)  — UNCHANGED behavior; body moves to typed helpers
+  // vector_get_agent_profile (read-only) - UNCHANGED behavior; body moves to typed helpers
   server.tool(
     "vector_get_agent_profile",
     "Get a registered agent's profile from the on-chain registry by DID (did:vector:agent:...)",
@@ -88,12 +88,12 @@ ${capList}
     }
   );
 
-  // vector_discover_agents (read-only) — UNCHANGED behavior
+  // vector_discover_agents (read-only) - UNCHANGED behavior
   server.tool(
     "vector_discover_agents",
     "Discover registered agents in the Vector on-chain registry, optionally filtered by capability or framework",
     {
-      capability: z.string().optional().describe("Filter by capability tag (e.g. 'investing', 'research')"),
+      capability: z.string().optional().describe("Filter by capability tag (e.g. 'research', 'data-extraction')"),
       framework: z.string().optional().describe("Filter by framework (e.g. 'OpenClaw', 'LangChain', 'CrewAI')"),
       limit: z.number().optional().default(20).describe("Maximum number of agents to return (default: 20)"),
     },
@@ -142,15 +142,15 @@ ${capList}
     }
   );
 
-  // vector_build_register_agent — KEYLESS
+  // vector_build_register_agent - KEYLESS
   server.tool(
     "vector_build_register_agent",
     "Build an UNSIGNED transaction that registers an agent in the Vector on-chain registry (mints a soulbound identity NFT, locks a 10 AP3X deposit). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
     {
       changeAddress: z.string().describe("Your wallet address (source of the deposit and change). Get it from vector_signer_get_address."),
-      name: z.string().min(1).max(64).describe("Agent name (e.g. 'TradingBot', 'ResearchAgent')"),
+      name: z.string().min(1).max(64).describe("Agent name (e.g. 'ResearchAgent', 'ArchiveBot')"),
       description: z.string().max(256).describe("Short description of the agent's purpose"),
-      capabilities: z.array(z.string()).describe("List of capability tags (e.g. ['investing', 'research', 'environmental'])"),
+      capabilities: z.array(z.string()).describe("List of capability tags (e.g. ['research', 'data-extraction', 'environmental'])"),
       framework: z.string().describe("Framework used (e.g. 'OpenClaw', 'LangChain', 'CrewAI', 'custom')"),
       endpoint: z.string().describe("A2A communication endpoint URL (or empty string if not applicable)"),
     },
@@ -196,7 +196,7 @@ The DID above is bound to the exact wallet UTxO this build consumed - if that UT
     }
   );
 
-  // vector_build_update_agent — KEYLESS
+  // vector_build_update_agent - KEYLESS
   server.tool(
     "vector_build_update_agent",
     "Build an UNSIGNED transaction that updates a registered agent's profile fields. Only the specified fields change; others are preserved. Takes no key material - the on-chain validator requires the owner's signature, which you add locally with vector_signer_sign before vector_submit_transaction, then confirm with vector_await_transaction.",
@@ -249,7 +249,7 @@ The identity NFT and deposit are unchanged by this update. ${SIGN_AND_SUBMIT_COP
     }
   );
 
-  // vector_build_transfer_agent — KEYLESS
+  // vector_build_transfer_agent - KEYLESS
   server.tool(
     "vector_build_transfer_agent",
     "Build an UNSIGNED transaction that transfers agent ownership to a new address (must be a verification-key address, not a script). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
@@ -300,7 +300,7 @@ After this transaction confirms, only the new owner can update, transfer, or der
     }
   );
 
-  // vector_build_deregister_agent — KEYLESS
+  // vector_build_deregister_agent - KEYLESS
   server.tool(
     "vector_build_deregister_agent",
     "Build an UNSIGNED transaction that deregisters an agent (burns the identity NFT, returns the 10 AP3X deposit to the owner wallet). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
@@ -343,19 +343,19 @@ The identity NFT is burned by this transaction; the deposit returns to the chang
 1. Verify the agent DID is correct
 2. The changeAddress must be the agent's current owner wallet
 3. Use vector_get_agent_profile to check the agent's current state
-4. If the error mentions needing a plain AP3X-only UTxO: the wallet must hold at least one token-free UTxO; send yourself a small AP3X payment first.`,
+4. If the error mentions needing a plain AP3X-only UTxO: the wallet must hold at least one token-free UTxO; send yourself a small AP3X transfer first.`,
           }],
         };
       }
     }
   );
 
-  // vector_build_message_agent — KEYLESS
+  // vector_build_message_agent - KEYLESS
   server.tool(
     "vector_build_message_agent",
     "Build an UNSIGNED transaction that sends an on-chain message to a registered agent via TX metadata (label 674), delivering 2 AP3X to the agent's owner address. Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
     {
-      changeAddress: z.string().describe("Your wallet address (pays the 2 AP3X delivery and fee; recorded as the sender). Get it from vector_signer_get_address."),
+      changeAddress: z.string().describe("Your wallet address (covers the 2 AP3X delivery and fee; recorded as the sender). Get it from vector_signer_get_address."),
       agent_id: z.string().describe("Recipient agent DID: did:vector:agent:{policyId}:{nftAssetName}"),
       message_type: z.enum(["inquiry", "proposal", "result"]).describe("Type of message"),
       payload: z.string().max(512).describe("Message payload (string, max 512 chars)"),

@@ -1,6 +1,6 @@
 // packages/builder/src/vector/build.ts
 //
-// Keyless transaction building — the core of the non-custodial split's
+// Keyless transaction building - the core of the non-custodial split's
 // builder side. Every function here takes an already-initialized Lucid
 // instance whose wallet was selected with selectWallet.fromAddress (no key
 // material anywhere in this package) and returns UNSIGNED CBOR. Signing
@@ -30,7 +30,7 @@ export async function lucidForAddress(provider: Provider, changeAddress: string)
   const lucid = await Lucid(provider, 'Mainnet');
   const utxos = await lucid.utxosAt(changeAddress);
   if (utxos.length === 0) {
-    throw new Error(`No UTxOs found at ${changeAddress} — the wallet is empty or the address is wrong`);
+    throw new Error(`No UTxOs found at ${changeAddress} - the wallet is empty or the address is wrong`);
   }
   lucid.selectWallet.fromAddress(changeAddress, utxos);
   return lucid;
@@ -181,7 +181,7 @@ export async function buildInteractContract(
         .addSigner(p.changeAddress)
         .complete();
     } catch {
-      // Retry without the native UPLC evaluator — falls back to the provider's
+      // Retry without the native UPLC evaluator - falls back to the provider's
       // evaluateTx (network); mirrors the pre-split behaviour for chain quirks.
       completed = await lucid.newTx()
         .collectFrom(scriptUtxos, redeemerData)

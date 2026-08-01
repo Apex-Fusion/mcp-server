@@ -42,7 +42,7 @@ export interface VectorTransactionHistoryResult {
 
 export interface VectorUnsignedBuildResult {
   txCbor: string;   // hex CBOR of the UNSIGNED transaction
-  txHash: string;   // body hash — stable across signing
+  txHash: string;   // body hash - stable across signing
   fee: string;      // lovelace
   feeAda: string;
 }

@@ -1,4 +1,4 @@
-// Sign with CML directly. No Lucid instance and no Provider — Lucid's
+// Sign with CML directly. No Lucid instance and no Provider - Lucid's
 // constructor requires a Provider, which would put a network object inside the
 // signer. This path was verified to produce a byte-identical result.
 import * as CML from '@anastasia-labs/cardano-multiplatform-lib-nodejs';
@@ -17,13 +17,13 @@ export function signTransaction(
   }
 
   // from_cbor_hex only requires that a *prefix* of unsignedCborHex parse as a
-  // valid transaction — it does not check that parsing consumed the whole
+  // valid transaction - it does not check that parsing consumed the whole
   // string. This is the same gap decode.ts closes (see its comment for the
   // full reasoning) and the check here is deliberately identical. sign.ts
   // calls from_cbor_hex independently and does NOT inherit decode.ts's guard
   // automatically just because the two modules share a package: confirmed
   // empirically that, without this check, signing FIXTURE_CBOR with
-  // 'deadbeef' appended did not throw — it silently signed the shorter,
+  // 'deadbeef' appended did not throw - it silently signed the shorter,
   // valid prefix and returned a confident, fully-formed signature, with the
   // appended bytes dropped and no indication anything was wrong. That is
   // worse here than in decode.ts: the caller would receive a cryptographic
@@ -63,7 +63,7 @@ export function signTransaction(
   // included specifically to consume collateral after a phase-2 validation
   // failure). It lives on Transaction, not TransactionBody, so hardcoding it
   // would be invisible to hash_transaction(body) and to every hash-equality
-  // check — the signer must not silently rewrite a claim a node re-checks.
+  // check - the signer must not silently rewrite a claim a node re-checks.
   const signed = CML.Transaction.new(body, witnessSet, tx.is_valid(), tx.auxiliary_data());
 
   return { signedCborHex: signed.to_cbor_hex(), txHashHex: txHash.to_hex() };

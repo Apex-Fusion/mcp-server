@@ -1,4 +1,4 @@
-// Pure transaction helpers. No network access — this module is safe to import
+// Pure transaction helpers. No network access - this module is safe to import
 // from the signer, which must have no network capability.
 import { blake2b } from '@noble/hashes/blake2b';
 
