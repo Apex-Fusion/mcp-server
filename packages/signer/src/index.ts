@@ -12,7 +12,7 @@ const config = loadConfig();
 const server = new McpServer({ name: 'vector-mcp-signer', version: '0.1.0' });
 registerSignerTools(server, config);
 
-// stdout is the MCP channel — every diagnostic must go to stderr.
+// stdout is the MCP channel - every diagnostic must go to stderr.
 console.error(`vector-mcp-signer ready. Key source: ${config.keySource.describe()}`);
 console.error(`Audit log: ${config.auditLogPath}`);
 

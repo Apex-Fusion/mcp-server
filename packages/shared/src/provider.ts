@@ -64,7 +64,7 @@ export function parseSubmitResponse(body: string): string {
     const candidate = parsed?.txId ?? parsed?.txHash ?? parsed?.id;
     if (isTxHash(candidate)) return candidate;
   } catch {
-    // Not JSON — fall through to the bare-text form below.
+    // Not JSON - fall through to the bare-text form below.
   }
 
   const bare = trimmed.replace(/^"|"$/g, '');

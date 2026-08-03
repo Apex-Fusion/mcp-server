@@ -171,7 +171,7 @@ export async function buildRegisterAgent(lucid: LucidEvolution, p: {
     const keys = Object.keys(u.assets);
     return keys.length === 1 && keys[0] === 'lovelace' && u.assets['lovelace'] >= MIN_AP3X_DEPOSIT + 2_000_000n;
   }) || utxos[0];
-  if (!oneShotUtxo) throw new Error('No UTxOs at the changeAddress. Fund the wallet first.');
+  if (!oneShotUtxo) throw new Error('No UTxOs at the changeAddress. Add AP3X to the wallet first.');
   const nftAssetName = deriveNftAssetName(oneShotUtxo.txHash, oneShotUtxo.outputIndex);
   const nftUnit = `${REGISTRY_POLICY_ID}${nftAssetName}`;
   const datum = buildAgentDatum(vkeyHash, p.name, p.description, p.capabilities, p.framework, p.endpoint);
@@ -317,7 +317,7 @@ export async function buildDeregisterAgent(
     })
     .sort((a, b) => Number(b.assets.lovelace - a.assets.lovelace))[0];
   if (!feeUtxo) {
-    throw new Error("Deregistration needs a plain AP3X-only UTxO in the wallet to clear the validator's returned-change floor; send yourself a small AP3X-only payment first.");
+    throw new Error("Deregistration needs a plain AP3X-only UTxO in the wallet to clear the validator's returned-change floor; send yourself a small AP3X-only transfer first.");
   }
   const completed = await lucid.newTx()
     .collectFrom([utxo], spendRedeemer)

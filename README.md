@@ -79,8 +79,8 @@ Self-hosting instructions are below.
 ## Local signer (non-custodial path)
 
 `packages/signer` is a local MCP server that holds your key and signs transactions locally
-instead of handing your mnemonic to a shared host. It has **no network access at all** —
-stdio transport, no Provider, no egress — so a key given to it never reaches a shared server
+instead of handing your mnemonic to a shared host. It has **no network access at all**:
+stdio transport only, no Provider, no egress, so a key given to it never reaches a shared server
 or your model provider. Four tools: `vector_signer_get_address`, `vector_signer_decode_transaction`,
 `vector_signer_sign`, `vector_signer_get_spend_limits`.
 
@@ -124,7 +124,7 @@ limitations.
 
 | Tool | Description |
 |------|-------------|
-| `vector_build_send_apex` | Build an unsigned AP3X payment (keyless — sign with the local signer) |
+| `vector_build_send_apex` | Build an unsigned AP3X transfer (keyless - sign with the local signer) |
 | `vector_build_send_tokens` | Build an unsigned native-token transfer (keyless) |
 | `vector_build_transaction` | Build an unsigned multi-output transaction (keyless, never submits) |
 | `vector_dry_run` | Simulate a transaction without submitting - estimate fees and validate |
@@ -267,7 +267,7 @@ If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` firs
 | `VECTOR_MCP_SESSION_IDLE_MS` | `/mcp` session idle timeout before the reaper closes it, in ms (min `100`) | `600000` (10 min) |
 | `VECTOR_MCP_SESSION_SWEEP_MS` | How often the `/mcp` idle reaper sweeps, in ms (min `100`) | `60000` (1 min) |
 | `VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY` | Max concurrent `/mcp` sessions per identity before the oldest is evicted (min `1`) | `32` |
-| `MCP_AUTH_TOKENS` | Bearer tokens that may call this server. Comma-separated; each entry is `label:token` or a bare token. **When unset, the server is open to anyone who can reach it.** | _(unset — auth disabled)_ |
+| `MCP_AUTH_TOKENS` | Bearer tokens that may call this server. Comma-separated; each entry is `label:token` or a bare token. **When unset, the server is open to anyone who can reach it.** | _(unset - auth disabled)_ |
 
 The four numeric knobs above fail loudly at startup on a malformed value: anything that is not
 a plain integer, or is below its listed minimum, raises a startup error naming the variable and
@@ -292,10 +292,10 @@ it, lives in your local signer instead - see `VECTOR_SIGNER_SPEND_LIMIT_PER_TX` 
 > (`VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY`) - see the Configuration table above for defaults and
 > minimums.
 
-> **Malformed values fail loudly, not silently.** The server refuses to start if
+> **Malformed values fail loudly.** The server refuses to start if
 > `MCP_AUTH_TOKENS` contains an empty token, a token with embedded whitespace, a
 > duplicate token, or a value where every comma-separated entry is blank (e.g. a
-> stray `,,,`) — each raises a startup error that names the problem but never
+> stray `,,,`). Each case raises a startup error that names the problem but never
 > echoes a token value. Commas delimit entries and cannot be escaped, so generate
 > tokens from a comma-free charset (hex / base64url / alphanumeric).
 
@@ -339,7 +339,7 @@ it, lives in your local signer instead - see `VECTOR_SIGNER_SPEND_LIMIT_PER_TX` 
 npm run test:unit
 ```
 
-No wallet, no network — pure logic only (CBOR encode/decode assertions).
+No wallet, no network - pure logic only (CBOR encode/decode assertions).
 
 ```bash
 npm run test:smoke

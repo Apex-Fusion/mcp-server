@@ -52,7 +52,7 @@ describe('buildMultiOutput', () => {
 });
 
 describe('buildDeployContract', () => {
-  test('locks funds at the derived script address with an inline datum', async () => {
+  test('locks AP3X at the derived script address with an inline datum', async () => {
     const r = await buildDeployContract(lucid, {
       scriptCbor: ALWAYS_SUCCEEDS_V2, scriptType: 'PlutusV2', lovelaceAmount: 2_000_000,
     });

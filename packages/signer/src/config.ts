@@ -1,5 +1,5 @@
 // Signer configuration, entirely from the environment. No network settings
-// exist here by design — the signer has no endpoints to configure.
+// exist here by design - the signer has no endpoints to configure.
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';

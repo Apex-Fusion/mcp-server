@@ -22,12 +22,12 @@
     }
   },
   "vector_build_deploy_contract": {
-    "description": "Build an UNSIGNED transaction deploying a Plutus/Aiken smart contract (locks funds at its script address). Takes no key material - sign with your local signer, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
+    "description": "Build an UNSIGNED transaction deploying a Plutus/Aiken smart contract (locks AP3X at its script address). Takes no key material - sign with your local signer, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address.",
+          "description": "Your wallet address (holds the AP3X; receives change). Get it from your local signer's vector_signer_get_address.",
           "type": "string"
         },
         "scriptCbor": {
@@ -87,7 +87,7 @@
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (source of funds, change, and the required signer for spends). Get it from your local signer's vector_signer_get_address.",
+          "description": "Your wallet address (supplies the inputs, receives change, and is the required signer for spends). Get it from your local signer's vector_signer_get_address.",
           "type": "string"
         },
         "scriptCbor": {
@@ -104,7 +104,7 @@
           ]
         },
         "action": {
-          "description": "'spend' to collect UTxOs from the script, 'lock' to send funds to it",
+          "description": "'spend' to collect UTxOs from the script, 'lock' to send AP3X to it",
           "type": "string",
           "enum": [
             "spend",
@@ -165,7 +165,7 @@
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (pays the 2 AP3X delivery and fee; recorded as the sender). Get it from vector_signer_get_address.",
+          "description": "Your wallet address (covers the 2 AP3X delivery and fee; recorded as the sender). Get it from vector_signer_get_address.",
           "type": "string"
         },
         "agent_id": {
@@ -206,7 +206,7 @@
           "type": "string"
         },
         "name": {
-          "description": "Agent name (e.g. 'TradingBot', 'ResearchAgent')",
+          "description": "Agent name (e.g. 'ResearchAgent', 'ArchiveBot')",
           "type": "string",
           "minLength": 1,
           "maxLength": 64
@@ -217,7 +217,7 @@
           "maxLength": 256
         },
         "capabilities": {
-          "description": "List of capability tags (e.g. ['investing', 'research', 'environmental'])",
+          "description": "List of capability tags (e.g. ['research', 'data-extraction', 'environmental'])",
           "type": "array",
           "items": {
             "type": "string"
@@ -463,7 +463,7 @@
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address.",
+          "description": "Your wallet address (holds the AP3X; receives change). Get it from your local signer's vector_signer_get_address.",
           "type": "string"
         },
         "recipientAddress": {
@@ -494,7 +494,7 @@
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address.",
+          "description": "Your wallet address (holds the AP3X and tokens; receives change). Get it from your local signer's vector_signer_get_address.",
           "type": "string"
         },
         "recipientAddress": {
@@ -534,7 +534,7 @@
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (source of funds; receives change). Get it from your local signer's vector_signer_get_address.",
+          "description": "Your wallet address (supplies the inputs; receives change). Get it from your local signer's vector_signer_get_address.",
           "type": "string"
         },
         "outputs": {
@@ -660,7 +660,7 @@
       "type": "object",
       "properties": {
         "capability": {
-          "description": "Filter by capability tag (e.g. 'investing', 'research')",
+          "description": "Filter by capability tag (e.g. 'research', 'data-extraction')",
           "type": "string"
         },
         "framework": {
