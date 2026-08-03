@@ -14,6 +14,7 @@ import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
 import { blake2b } from '@noble/hashes/blake2b';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import type { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
+import { apexToLovelace } from '@apexfusion/vector-mcp-shared/tx';
 import type {
   VectorBuildStakeResult, VectorBuildProposalLockResult, VectorBuildProposalSpendResult,
 } from '@apexfusion/vector-mcp-shared/types';
@@ -387,7 +388,7 @@ export async function buildCritique(lucid: LucidEvolution, p: {
   if (!(p.stakeApex >= MIN_CRITIQUE_STAKE_APEX)) {
     throw new Error(`Critique stake must be at least ${MIN_CRITIQUE_STAKE_APEX} AP3X.`);
   }
-  const stakeLovelace = BigInt(Math.floor(p.stakeApex * 1_000_000));
+  const stakeLovelace = apexToLovelace(p.stakeApex);
 
   let finalHash = p.critiqueHash;
   let finalUri = p.storageUri;
@@ -473,7 +474,7 @@ export async function buildEndorse(lucid: LucidEvolution, p: {
   if (!(p.stakeApex >= MIN_ENDORSE_STAKE_APEX)) {
     throw new Error(`Endorsement stake must be at least ${MIN_ENDORSE_STAKE_APEX} AP3X.`);
   }
-  const stakeLovelace = BigInt(Math.floor(p.stakeApex * 1_000_000));
+  const stakeLovelace = apexToLovelace(p.stakeApex);
 
   const vkeyHash = paymentKeyHashOf(changeAddress);
 
@@ -532,7 +533,7 @@ export async function buildProposalLock(lucid: LucidEvolution, p: {
   if (!(p.stakeApex >= MIN_PROPOSAL_STAKE_APEX)) {
     throw new Error(`Proposal stake must be at least ${MIN_PROPOSAL_STAKE_APEX} AP3X.`);
   }
-  const stakeLovelace = BigInt(Math.floor(p.stakeApex * 1_000_000));
+  const stakeLovelace = apexToLovelace(p.stakeApex);
 
   // Proposal-type datum. Same Constr indices as the custodial switch - the
   // deployed module validator parses these exact bytes.

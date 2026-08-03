@@ -2,6 +2,48 @@
 // from the signer, which must have no network capability.
 import { blake2b } from '@noble/hashes/blake2b';
 
+/**
+ * AP3X (decimal) to lovelace (integer), exactly.
+ *
+ * Never multiply by 1e6 in floating point: e.g. 1.005 * 1_000_000 is
+ * 1004999.9999999999 in IEEE-754, and Math.floor then silently loses a
+ * lovelace (empirically confirmed - see tx.test.ts). Amounts are money;
+ * they get string-exact conversion instead.
+ *
+ * The string comes from Number.prototype.toString(), NOT toFixed(): toFixed
+ * expands the double's true binary value out to the requested digit count,
+ * which reintroduces the exact noise this function exists to avoid (e.g.
+ * (2.05).toFixed(20) is "2.04999999999999982236" - the wrong digits after
+ * the 2nd decimal place). toString() instead yields the shortest decimal
+ * string that round-trips back to the same double, which for a value typed
+ * or parsed from a decimal literal like "2.05" reliably reproduces "2.05".
+ *
+ * More than 6 decimal places is a caller error, not something to round
+ * away silently - AP3X divides no finer than 1 lovelace (1e-6 AP3X).
+ */
+export function apexToLovelace(amountApex: number): bigint {
+  if (typeof amountApex !== 'number' || !Number.isFinite(amountApex)) {
+    throw new Error(`Amount must be a finite number, got ${String(amountApex)}`);
+  }
+  if (amountApex < 0) {
+    throw new Error(`Amount must not be negative, got ${amountApex}`);
+  }
+  const str = amountApex.toString();
+  if (/e/i.test(str)) {
+    // Only reachable outside 1e-6 <= amountApex < 1e21: below one lovelace
+    // or beyond any realistic AP3X amount either way. Reject explicitly
+    // rather than let the plain split-on-'.' below misparse the exponent.
+    throw new Error(`Amount is out of range: ${amountApex}`);
+  }
+  const [whole, frac = ''] = str.split('.');
+  if (frac.length > 6) {
+    throw new Error(
+      `Amount has more than 6 decimal places (${amountApex}); AP3X is divisible to 6 places (1 lovelace).`
+    );
+  }
+  return BigInt(whole) * 1_000_000n + BigInt(frac.padEnd(6, '0'));
+}
+
 export function lovelaceToAda(lovelace: string | number | bigint): string {
   if (lovelace === undefined || lovelace === null) return '0.000000';
   try {

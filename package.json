@@ -5,7 +5,7 @@
   "type": "module",
   "workspaces": ["packages/*"],
   "scripts": {
-    "postinstall": "ln -sf ../../../libsodium-sumo/dist/modules-sumo-esm/libsodium-sumo.mjs node_modules/libsodium-wrappers-sumo/dist/modules-sumo-esm/libsodium-sumo.mjs 2>/dev/null || true",
+    "postinstall": "node scripts/link-libsodium.mjs",
     "clean": "rm -rf packages/*/build",
     "build": "npm run build --workspace=@apexfusion/vector-mcp-builder && npm run build --workspace=@apexfusion/vector-mcp-signer",
     "typecheck": "tsc --noEmit -p packages/shared && tsc --noEmit -p packages/builder && tsc --noEmit -p packages/signer",
@@ -24,8 +24,12 @@
     "tsx": "^4.21.0",
     "typescript": "^5.7.3"
   },
+  "overrides": {
+    "tar": "^7.5.21",
+    "brace-expansion": "^2.0.2"
+  },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22"
   },
   "license": "ISC",
   "author": "Apex Fusion",

@@ -81,7 +81,7 @@ ${capList}
 **Troubleshooting Tips:**
 1. Verify the DID format: did:vector:agent:{policyId}:{nftAssetName}
 2. The agent may not be registered or may have deregistered
-3. Check that Koios is reachable at ${VECTOR_KOIOS_URL}`,
+3. Verify the configured Koios endpoint is reachable`,
           }],
         };
       }
@@ -133,7 +133,7 @@ ${capList}
             text: `Failed to discover agents: ${err instanceof Error ? err.message : String(err)}
 
 **Troubleshooting Tips:**
-1. Check that Ogmios is reachable at ${VECTOR_OGMIOS_URL}
+1. Verify the configured Ogmios endpoint is reachable
 2. The registry may be empty - no agents have registered yet
 3. Try without filters to list all agents`,
           }],
@@ -189,7 +189,7 @@ The DID above is bound to the exact wallet UTxO this build consumed - if that UT
 **Troubleshooting Tips:**
 1. Ensure the changeAddress wallet holds at least 12 AP3X (10 deposit + fees)
 2. Each wallet can register multiple agents (different one-shot UTxOs)
-3. Verify Ogmios endpoint is reachable at ${VECTOR_OGMIOS_URL}`,
+3. Verify the configured Ogmios endpoint is reachable`,
           }],
         };
       }

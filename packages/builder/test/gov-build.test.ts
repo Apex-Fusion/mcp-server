@@ -326,6 +326,31 @@ describe('buildEndorse (offline, FixtureProvider)', () => {
     assert.equal(endorseOut!.amount().coin(), 7_000_000n, 'exactly-minimum stake (5 AP3X) must still build: 5 + 2 AP3X');
   });
 
+  test('pins exact lovelace at the call site for a fractional stake float math gets wrong', async () => {
+    // 10.005 and 5.005 (the "obvious" values at each family's minimum) both
+    // happen to be bit-exact under Math.floor(x * 1e6) on this Node/V8 build
+    // (verified: node -e "console.log(Math.floor(10.005*1e6), Math.floor(5.005*1e6))"
+    // -> 10005000 5005000, both correct - neither reproduces the defect).
+    // Scanned upward from the 5 AP3X endorse minimum
+    // for a real loser instead: 8.03 * 1_000_000 === 8029999.999999999 in
+    // IEEE-754 (node -e "console.log(Math.floor(8.03*1e6))" -> 8029999, one
+    // lovelace short of the correct 8030000). This pins buildEndorse's OWN
+    // call site - apexToLovelace itself is already proven exact in
+    // packages/shared/test/tx.test.ts; this test instead catches a future
+    // revert of THIS call site back to Math.floor(stakeApex * 1_000_000).
+    const r = await buildEndorse(lucid, {
+      agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 3, stakeApex: 8.03,
+    });
+    assert.equal(r.stakeLovelace, '8030000');
+    const tx = decodeTx(r.txCbor);
+    const endorseOut = findOutputTo(tx, r.scriptAddress);
+    assert.ok(endorseOut, 'no output to the endorsement address');
+    assert.equal(
+      endorseOut!.amount().coin(), 10_030_000n,
+      'lost a lovelace - buildEndorse must call apexToLovelace, not Math.floor(stakeApex * 1_000_000): stake (8.03 AP3X = 8,030,000 lovelace) + 2 AP3X rider (2,000,000) = 10,030,000',
+    );
+  });
+
   test('rejects a stake below the minimum', async () => {
     await assert.rejects(
       buildEndorse(lucid, {

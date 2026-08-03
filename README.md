@@ -170,10 +170,26 @@ Example non-custodial flow for a registry op: `vector_build_register_agent` →
 
 ### 1. Install and build
 
+Requires Node.js >= 22 (matches `engines` in every `package.json` and the Dockerfile's
+`node:22-alpine` base).
+
 ```bash
 npm install
 npm run build
 ```
+
+**Dependency advisories.** `npm audit` currently reports 1 low-severity advisory: an `esbuild`
+arbitrary-file-read issue that only triggers via its own Windows dev server, reachable solely
+through `tsup` (a build-time-only dependency, absent from the production image, which installs
+with `npm ci --omit=dev`). As of 2026-07-31 this tree carried 44 advisories, including 1
+critical (`tar`, GHSA-23hp-3jrh-7fpw) that arrived because `@cardano-sdk/crypto` - pulled in
+transitively through `@lucid-evolution/lucid` - declared the entire `npm` CLI package as a
+runtime dependency. That dependency was dead weight: `@cardano-sdk/crypto`'s own published code
+never requires `npm`, and neither `npm` nor `tar` appears anywhere in this server's built
+bundle. Regenerating the lockfile picked up a newer `@cardano-sdk/crypto` release that dropped
+the stray dependency outright, clearing all 43 of those advisories without any override needed;
+`package.json` also carries a defensive `overrides` pin on `tar` and `brace-expansion` against
+future regressions, though it is not what resolved this one.
 
 ### 2. Configure environment (optional)
 
@@ -282,6 +298,31 @@ it, lives in your local signer instead - see `VECTOR_SIGNER_SPEND_LIMIT_PER_TX` 
 > stray `,,,`) — each raises a startup error that names the problem but never
 > echoes a token value. Commas delimit entries and cannot be escaped, so generate
 > tokens from a comma-free charset (hex / base64url / alphanumeric).
+
+> **Error responses do not echo configured endpoints.** This covers every failure
+> mode a network call can produce, not just an HTTP-level rejection: a DNS
+> failure, a dropped connection, and a malformed (non-JSON) response body are all
+> sanitised the same way an ordinary `4xx`/`5xx` status is - the underlying HTTP
+> client is the platform's native `fetch`, chosen in part because its own errors
+> do not embed the request URL the way some polyfills do. A failed Ogmios or
+> Koios query is this server's own infrastructure problem, not something the
+> caller can act on - it is reported by service name and status only, for
+> example "Ogmios request failed (queryLedgerState/utxo): 503 Service
+> Unavailable" or, for a connection failure, "...: network error". A rejected
+> transaction submission is different: the ledger's verdict on the CALLER'S OWN
+> transaction (a bad input, an unmet script condition, a fee too small) stays in
+> the response, since it is the feedback loop an agent needs to self-correct after
+> build → sign → submit - only URL-shaped content is scrubbed out of it first, for
+> example "Transaction submission rejected (400 Bad Request):
+> ValueNotConservedUTxO...". A NETWORK failure to even reach the submit API is
+> reported as an infrastructure failure instead ("...: network error"), never
+> worded as a ledger rejection, since nothing looked at the transaction at all.
+> Neither case ever echoes the configured `VECTOR_OGMIOS_URL` / `VECTOR_KOIOS_URL`
+> / `VECTOR_SUBMIT_URL` value itself, and full unscrubbed detail always goes to
+> the server's own `console.error` log for operators. **Known limit:** the
+> submission-rejection scrub removes http(s) URLs and the three endpoints above
+> by name - a rejection body that happens to name some other internal hostname
+> passes through unscrubbed, bounded by a 2000-character cap.
 
 ### Mainnet endpoints
 
