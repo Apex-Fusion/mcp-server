@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.apex-fusion/vector",
+  "title": "Vector (Apex Fusion)",
+  "description": "Vector chain tools for AI agents: wallets, transactions, smart contracts, soulbound agent registry, marketplace and module operations on Vector, the Apex Fusion eUTXO L2. 24 tools, keyless by design - the server only builds transactions; signing stays with the caller.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/Apex-Fusion/mcp-server",
+    "source": "github"
+  },
+  "websiteUrl": "https://apex-fusion.github.io/vector-ai-documentation/",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.vector.{network}.apexfusion.org/mcp",
+      "variables": {
+        "network": {
+          "description": "Vector network to target",
+          "isRequired": true,
+          "choices": [
+            "mainnet",
+            "testnet"
+          ],
+          "default": "mainnet"
+        }
+      }
+    },
+    {
+      "type": "sse",
+      "url": "https://mcp.vector.{network}.apexfusion.org/sse",
+      "variables": {
+        "network": {
+          "description": "Vector network to target",
+          "isRequired": true,
+          "choices": [
+            "mainnet",
+            "testnet"
+          ],
+          "default": "mainnet"
+        }
+      }
+    }
+  ]
+}
