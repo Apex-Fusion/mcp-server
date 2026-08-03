@@ -14,7 +14,72 @@ export interface AuthConfig {
   identities: Map<string, string>;
 }
 
-export const ANONYMOUS = 'anonymous';
+export const ANONYMOUS_PREFIX = 'anon:';
+
+/**
+ * Strips a trailing port suffix from a proxy-supplied address. The trusted proxy
+ * SHOULD emit a bare address, but a proxy that includes the ephemeral source port
+ * (e.g. "$remote_addr:$remote_port"-style config) would otherwise fragment one
+ * client across many rate-limit buckets - ephemeral ports rotate per connection,
+ * which defeats both per-IP limiting and the registry cap. Bracketed IPv6
+ * ("[::1]:8080", or bare "[::1]" with no port) is unwrapped; unbracketed IPv6 is
+ * returned unchanged, since its own colons are address, not a port delimiter, and
+ * there is no way to tell them apart without the brackets.
+ */
+function stripPort(addr: string): string {
+  const bracketed = /^\[(.+)\](?::\d+)?$/.exec(addr);
+  if (bracketed) return bracketed[1];
+  const ipv4WithPort = /^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/.exec(addr);
+  if (ipv4WithPort) return ipv4WithPort[1];
+  return addr;
+}
+
+/**
+ * Client address for rate-limit identity when auth is disabled.
+ *
+ * Trust model: this server binds 127.0.0.1 behind ONE trusted reverse proxy that
+ * APPENDS the true peer address to X-Forwarded-For. The RIGHTMOST entry is therefore
+ * the only trustworthy one; everything left of it is client-supplied and forgeable.
+ * Direct access (self-hosting without a proxy) has no XFF header and falls back to the
+ * socket's remote address. The trusted proxy SHOULD emit that rightmost entry as a bare
+ * address with no port; a port suffix is stripped defensively (see stripPort) rather than
+ * trusted to be absent.
+ *
+ * Two fallback-tier edges collapse distinct callers into one bucket by design, not by
+ * bug - both are accepted degraded modes of this fallback tier, and both are visible
+ * in logs by their bucket name rather than silently misattributed:
+ * - In the proxied topology, the socket-fallback path sees the PROXY's own loopback
+ *   address, never the original caller's - the proxy is the direct TCP peer. Any
+ *   request that reaches the builder with no XFF header at all (a proxy
+ *   misconfiguration, a health check, direct loopback access) lands in one
+ *   ordinary-looking `anon:127.0.0.1` bucket shared by everything that arrived that way.
+ * - A request with neither an XFF header nor a readable socket address collapses to
+ *   the shared `anon:unknown` bucket.
+ */
+export function clientIpOf(req: {
+  headers: Record<string, string | string[] | undefined>;
+  socket?: { remoteAddress?: string };
+}): string {
+  // Node joins duplicate X-Forwarded-For header instances into one comma-joined
+  // string by default (only set-cookie is ever really an array), so this array
+  // branch is defensive - it matches the general IncomingHttpHeaders shape rather
+  // than an observed runtime case.
+  const raw = req.headers['x-forwarded-for'];
+  const headerValue = Array.isArray(raw) ? raw[raw.length - 1] : raw;
+  if (headerValue) {
+    const entries = headerValue.split(',');
+    // split() always returns at least one element, so this index is never out of
+    // range.
+    const rightmost = entries[entries.length - 1].trim();
+    if (rightmost) return stripPort(rightmost).replace(/^::ffff:/i, '');
+  }
+  // socket.remoteAddress is kernel-supplied and never carries a port (Node exposes
+  // remotePort separately), so no stripPort pass is needed here - only the
+  // proxy-controlled XFF value can carry one.
+  const remote = req.socket?.remoteAddress;
+  if (remote) return remote.replace(/^::ffff:/i, '');
+  return 'unknown';
+}
 
 /** Stable, non-reversible label for a bare token, so logs can name a caller safely. */
 function labelForToken(token: string): string {
@@ -86,9 +151,13 @@ export function loadAuthConfig(env: Record<string, string | undefined> = process
 
 export function resolveIdentity(
   authHeader: string | undefined,
-  config: AuthConfig
+  config: AuthConfig,
+  clientIp: string
 ): { ok: true; identity: string } | { ok: false; reason: string } {
-  if (!config.enabled) return { ok: true, identity: ANONYMOUS };
+  // Auth disabled: every caller is admitted, but each client IP gets its OWN
+  // rate-limit bucket. Before this, all anonymous callers shared one bucket and
+  // one busy caller throttled the whole box - untenable for a public instance.
+  if (!config.enabled) return { ok: true, identity: ANONYMOUS_PREFIX + clientIp };
 
   if (!authHeader) {
     return { ok: false, reason: 'Missing Authorization header. Expected: Authorization: Bearer <token>' };

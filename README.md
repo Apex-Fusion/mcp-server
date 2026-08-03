@@ -22,18 +22,41 @@ Hosted instances run on both networks, exposing all 24 tools:
 > 11, "Rollout", for the full history). **Both hosted instances currently require a bearer
 > token from the operators to connect** - that is an access control, not a custody one:
 > neither instance accepts a mnemonic from any caller, token or not. Open public access
-> (per-IP rate limiting, no token required) is a planned follow-up, not yet shipped. Self-host
+> (per-IP rate limiting, no token required) is a planned follow-up, not yet enabled on the
+> hosted instances - the per-IP rate-limiting code ships in this release; only the ops action
+> of unsetting `MCP_AUTH_TOKENS` remains, coordinated separately after this deploys. Self-host
 > this release for tokenless access today.
 
+> **Transport: the hosted URLs above still answer on `/sse` only.** This codebase now serves
+> a modern Streamable HTTP endpoint, `/mcp`, alongside `/sse` + `/messages` - the legacy SSE
+> transport, deprecated by the MCP spec (2026-07-28 revision), retained for compatibility.
+> `/mcp` becomes each hosted instance's primary endpoint once this release merges and deploys
+> - testnet automatically on the next push to `main`, mainnet on the next deliberate cutover
+> dispatch, the same split the migration above went through. Until then,
+> `https://mcp.vector.mainnet.apexfusion.org/mcp` and its testnet twin are not reachable;
+> self-host this release (below) to use `/mcp` today.
+
 Connect from Claude Code in one command. Both hosted instances require a bearer token from the
-operators (contact the Apex Fusion team for one):
+operators (contact the Apex Fusion team for one).
+
+Modern transport (Streamable HTTP) - works today against a self-hosted instance (below); against
+the hosted URLs above it goes live once each instance deploys this release (see the transport
+note above):
+
+```bash
+claude mcp add --transport http vector-mcp <url>/mcp \
+  --header "Authorization: Bearer <your-token>"
+```
+
+Legacy SSE transport - what the hosted URLs above actually answer on today:
 
 ```bash
 claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse \
   --header "Authorization: Bearer <your-token>"
 ```
 
-Self-hosting (below) needs no token and gives every caller open access to your own instance.
+Self-hosting (below) needs no token, gives every caller open access to your own instance, and
+serves `/mcp` today.
 
 > **Security notice: the non-custodial migration is complete, in this codebase and on both
 > hosted instances, as of the 2026-07-31 cutover deploy.** No tool in this repository accepts a
@@ -85,7 +108,7 @@ limitations.
 - **Agent messaging** - send on-chain messages between agents via TX metadata (keyless)
 - **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals; the on-chain module is live on Vector mainnet, and every write tool is keyless in this codebase
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
-- **SSE transport** - HTTP server with Server-Sent Events for MCP client connectivity
+- **Dual transport** - modern Streamable HTTP (`/mcp`) plus legacy SSE (`/sse` + `/messages`, deprecated by the MCP spec (2026-07-28 revision), retained for compatibility)
 
 ## MCP Tools (24)
 
@@ -170,6 +193,16 @@ npm start
 # Server listens on port 3000 (configurable via PORT env var)
 ```
 
+Connect with the modern transport:
+
+```bash
+claude mcp add --transport http vector-mcp http://localhost:3000/mcp
+```
+
+Add `--header "Authorization: Bearer <your-token>"` if you set `MCP_AUTH_TOKENS`. The legacy
+SSE pair (`/sse` + `/messages`, deprecated by the MCP spec, retained for compatibility) is
+still available at `http://localhost:3000/sse` for clients that need it.
+
 If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` first - see [Configuration](#configuration) below.
 
 ### 4. Add to Claude Desktop
@@ -214,8 +247,16 @@ If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` firs
 | `VECTOR_KOIOS_URL` | Koios REST API endpoint | `https://v2.koios.vector.testnet.apexfusion.org/` |
 | `VECTOR_SUBMIT_URL` | Transaction submit API | `https://submit.vector.testnet.apexfusion.org/api/submit/tx` |
 | `VECTOR_EXPLORER_URL` | Block explorer base URL | `https://vector.testnet.apexscan.org` |
-| `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute | `60` |
+| `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute, per identity (min `1`) | `60` |
+| `VECTOR_MCP_SESSION_IDLE_MS` | `/mcp` session idle timeout before the reaper closes it, in ms (min `100`) | `600000` (10 min) |
+| `VECTOR_MCP_SESSION_SWEEP_MS` | How often the `/mcp` idle reaper sweeps, in ms (min `100`) | `60000` (1 min) |
+| `VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY` | Max concurrent `/mcp` sessions per identity before the oldest is evicted (min `1`) | `32` |
 | `MCP_AUTH_TOKENS` | Bearer tokens that may call this server. Comma-separated; each entry is `label:token` or a bare token. **When unset, the server is open to anyone who can reach it.** | _(unset — auth disabled)_ |
+
+The four numeric knobs above fail loudly at startup on a malformed value: anything that is not
+a plain integer, or is below its listed minimum, raises a startup error naming the variable and
+the value it got, rather than silently falling back to some other behavior (an unparseable rate
+limit silently disabling rate limiting, for example).
 
 This server has no spend-limit or audit-log configuration of its own: it holds no key material
 for any family, so it has nothing left to limit. Every spend limit, and the audit log recording
@@ -223,10 +264,17 @@ it, lives in your local signer instead - see `VECTOR_SIGNER_SPEND_LIMIT_PER_TX` 
 `VECTOR_SIGNER_SPEND_LIMIT_DAILY` / `VECTOR_SIGNER_AUDIT_LOG_PATH` in
 [`packages/signer/README.md`](packages/signer/README.md#configuration).
 
-> **Running a public instance?** Set `MCP_AUTH_TOKENS`. Without it every caller
-> is treated as one anonymous identity and shares a single rate-limit bucket, so
-> one busy client throttles everyone. Rate limits are applied per identity, so
-> give each client its own token.
+> **Running a public instance?** Set `MCP_AUTH_TOKENS` to gate access to known callers, each
+> with its own rate-limit budget. With `MCP_AUTH_TOKENS` unset, callers are admitted
+> anonymously with per-client-IP rate limits; the deployment's reverse proxy supplies the
+> client address via the rightmost X-Forwarded-For entry. Tracked identities are capped (LRU);
+> eviction resets a bucket's budget - a memory bound, not a security boundary, since an
+> attacker rotating enough source IPs can still defeat per-IP limiting at a tier only the
+> reverse proxy or network layer can police. `/mcp` sessions get the same per-identity
+> treatment: idle sessions are reaped (`VECTOR_MCP_SESSION_IDLE_MS`, swept every
+> `VECTOR_MCP_SESSION_SWEEP_MS`), and concurrent sessions per identity are capped
+> (`VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY`) - see the Configuration table above for defaults and
+> minimums.
 
 > **Malformed values fail loudly, not silently.** The server refuses to start if
 > `MCP_AUTH_TOKENS` contains an empty token, a token with embedded whitespace, a
@@ -286,24 +334,24 @@ against live chain data. **Never submits.** Never runs in CI. See
 ## Architecture
 
 ```
-┌──────────────────────┐      ┌──────────────────────────┐
-│  Claude / GPT / etc. │◄────►│  vector-mcp-server       │
-│  (any MCP client)    │ SSE  │                          │
-└──────────────────────┘      │  ┌────────────────────┐  │
-                              │  │ Rate Limiter        │  │
-                              │  │ (60 calls/min)      │  │
-                              │  └────────┬───────────┘  │
-                              │           │               │
-                              │  ┌────────▼───────────┐  │
-                              │  │ Lucid + Ogmios     │  │
-                              │  │ Provider            │  │
-                              │  └────────┬───────────┘  │
-                              │           │               │
-                              │  ┌────────▼───────────┐  │
-                              │  │ Ogmios / Koios /   │  │
-                              │  │ Submit API          │  │
-                              │  └────────────────────┘  │
-                              └──────────────────────────┘
+┌──────────────────────┐             ┌──────────────────────────┐
+│  Claude / GPT / etc. │◄───────────►│  vector-mcp-server       │
+│  (any MCP client)    │ /sse + /mcp │                          │
+└──────────────────────┘             │  ┌────────────────────┐  │
+                                     │  │ Rate Limiter        │  │
+                                     │  │ (60 calls/min)      │  │
+                                     │  └────────┬───────────┘  │
+                                     │           │               │
+                                     │  ┌────────▼───────────┐  │
+                                     │  │ Lucid + Ogmios     │  │
+                                     │  │ Provider            │  │
+                                     │  └────────┬───────────┘  │
+                                     │           │               │
+                                     │  ┌────────▼───────────┐  │
+                                     │  │ Ogmios / Koios /   │  │
+                                     │  │ Submit API          │  │
+                                     │  └────────────────────┘  │
+                                     └──────────────────────────┘
 ```
 
 No safety layer sits between the rate limiter and the provider: this server holds no key
