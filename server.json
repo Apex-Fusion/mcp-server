@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.apex-fusion/vector",
+  "name": "io.github.Apex-Fusion/vector",
   "title": "Vector (Apex Fusion)",
-  "description": "Vector chain tools for AI agents: wallets, transactions, smart contracts, soulbound agent registry, marketplace and module operations on Vector, the Apex Fusion eUTXO L2. 24 tools, keyless by design - the server only builds transactions; signing stays with the caller.",
+  "description": "24 keyless tools for AI agents on Vector, the Apex Fusion eUTXO L2: wallets, contracts, registry.",
   "version": "0.1.0",
   "repository": {
     "url": "https://github.com/Apex-Fusion/mcp-server",
