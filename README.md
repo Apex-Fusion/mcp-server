@@ -12,51 +12,41 @@ Hosted instances run on both networks, exposing all 24 tools:
 
 | Network | Endpoint |
 |---------|----------|
-| Mainnet | `https://mcp.vector.mainnet.apexfusion.org/sse` |
-| Testnet | `https://mcp.vector.testnet.apexfusion.org/sse` |
+| Mainnet | `https://mcp.vector.mainnet.apexfusion.org/mcp` |
+| Testnet | `https://mcp.vector.testnet.apexfusion.org/mcp` |
 
 > **Deployment status: both networks are current.** Both hosted instances run today's
 > completed migration: testnet since the 2026-07-31 morning merges (auto-deployed from
 > `main`), mainnet since a deliberate cutover deploy the same day (see
 > [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md), section
-> 11, "Rollout", for the full history). **Both hosted instances currently require a bearer
-> token from the operators to connect** - that is an access control, not a custody one:
-> neither instance accepts a mnemonic from any caller, token or not. Open public access
-> (per-IP rate limiting, no token required) is a planned follow-up, not yet enabled on the
-> hosted instances - the per-IP rate-limiting code ships in this release; only the ops action
-> of unsetting `MCP_AUTH_TOKENS` remains, coordinated separately after this deploys. Self-host
-> this release for tokenless access today.
+> 11, "Rollout", for the full history). **Both hosted instances are open access - no bearer
+> token is required to connect.** Callers are admitted anonymously with per-IP rate limiting.
+> That is an access-control property, and it is separate from custody: neither instance
+> accepts a mnemonic from any caller, with or without a token. Self-hosted deployments can
+> still gate access with `MCP_AUTH_TOKENS` - see [Configuration](#configuration).
 
-> **Transport: the hosted URLs above still answer on `/sse` only.** This codebase now serves
-> a modern Streamable HTTP endpoint, `/mcp`, alongside `/sse` + `/messages` - the legacy SSE
-> transport, deprecated by the MCP spec (2026-07-28 revision), retained for compatibility.
-> `/mcp` becomes each hosted instance's primary endpoint once this release merges and deploys
-> - testnet automatically on the next push to `main`, mainnet on the next deliberate cutover
-> dispatch, the same split the migration above went through. Until then,
-> `https://mcp.vector.mainnet.apexfusion.org/mcp` and its testnet twin are not reachable;
-> self-host this release (below) to use `/mcp` today.
+> **Transport: both hosted instances serve `/mcp`, the modern Streamable HTTP endpoint.**
+> It is the recommended transport and the endpoint listed in the table above. The legacy SSE
+> pair (`/sse` + `/messages`) remains available on both hosted instances for clients that need
+> it, deprecated by the MCP spec (2026-07-28 revision) and retained for compatibility.
 
-Connect from Claude Code in one command. Both hosted instances require a bearer token from the
-operators (contact the Apex Fusion team for one).
+Connect from Claude Code in one command. No token needed for the hosted instances.
 
-Modern transport (Streamable HTTP) - works today against a self-hosted instance (below); against
-the hosted URLs above it goes live once each instance deploys this release (see the transport
-note above):
+Modern transport (Streamable HTTP) - recommended:
 
 ```bash
-claude mcp add --transport http vector-mcp <url>/mcp \
-  --header "Authorization: Bearer <your-token>"
+claude mcp add --transport http vector-mcp https://mcp.vector.mainnet.apexfusion.org/mcp
 ```
 
-Legacy SSE transport - what the hosted URLs above actually answer on today:
+Legacy SSE transport - still answered by both hosted instances:
 
 ```bash
-claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse \
-  --header "Authorization: Bearer <your-token>"
+claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse
 ```
 
-Self-hosting (below) needs no token, gives every caller open access to your own instance, and
-serves `/mcp` today.
+Swap in the testnet host for either command to connect to testnet instead. Self-hosting (below)
+serves both transports too, and gives every caller open access to your own instance unless you
+set `MCP_AUTH_TOKENS`.
 
 > **Security notice: the non-custodial migration is complete, in this codebase and on both
 > hosted instances, as of the 2026-07-31 cutover deploy.** No tool in this repository accepts a
