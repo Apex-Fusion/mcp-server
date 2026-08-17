@@ -206,7 +206,7 @@ TDD throughout: failing test before implementation, every PR.
 | C | Submission error handling |
 | D | `min(1)` APEX floor → real dust floor |
 | E | Endpoint URLs in error text |
-| F | SSE → Streamable HTTP |
+| F | SSE → Streamable HTTP (done in 2.0.0: `/mcp` is the only transport; the deprecated `/sse` + `/messages` pair was removed outright) |
 | G | Float → bigint amount math |
 | H | Dependency updates |
 

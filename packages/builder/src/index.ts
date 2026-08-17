@@ -25,17 +25,20 @@ if (existsSync(envPath)) {
 }
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { registerVectorTools } from "./vector/index.js";
 import { loadAuthConfig, resolveIdentity, clientIpOf } from "./auth.js";
 import { intEnv } from "./env.js";
 import { RATE_LIMIT_PER_MINUTE } from "./vector/rate-limiter.js";
+// Single source of truth for the advertised server version. tsup/esbuild
+// resolves this named JSON import at build time and inlines only the field,
+// so the built artifact has no runtime dependency on package.json's location.
+import { version as PKG_VERSION } from "../package.json";
 
 function createMcpServer(identity: string) {
   const server = new McpServer({
     name: "vector-mcp-server",
-    version: "1.0.0",
+    version: PKG_VERSION,
   });
   registerVectorTools(server, identity);
   return server;
@@ -52,18 +55,15 @@ if (authConfig.enabled) {
 }
 
 const PORT = parseInt(process.env.PORT || '3000');
-const transports = new Map<string, SSEServerTransport>();
-const sessionIdentities = new Map<string, string>();
 const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
 const streamableIdentities = new Map<string, string>();
 // Last activity per /mcp session, bumped on every request that resolves to a
-// session (initialize, and every subsequent handleRequest). The SSE pair
-// self-limits - a dropped socket fires res.on('close') and drains its maps
-// with no help from us. /mcp has no such signal: a caller can POST
-// initialize, take the session id, and drop the connection without ever
-// sending DELETE. Nothing in the SDK notices - the transport, its McpServer,
-// and its 24 registered tools sit in memory until process exit. This map
-// plus the reaper below is what bounds that.
+// session (initialize, and every subsequent handleRequest). /mcp has no
+// disconnect signal: a caller can POST initialize, take the session id, and
+// drop the connection without ever sending DELETE. Nothing in the SDK
+// notices - the transport, its McpServer, and its 24 registered tools sit in
+// memory until process exit. This map plus the reaper below is what bounds
+// that.
 const streamableLastSeen = new Map<string, number>();
 
 // Upper bound on concurrent /mcp sessions per identity. A caller that forgets
@@ -151,55 +151,45 @@ const streamableReapInterval = setInterval(() => {
 }, STREAMABLE_SESSION_SWEEP_MS);
 streamableReapInterval.unref();
 
+// Any-origin CORS by design: browser-based MCP clients are first-class
+// callers, and Origin carries no security signal for a public server -
+// authorization is the bearer token alone. Applied via setHeader at the top
+// of the handler because Node merges prior setHeader() values into any later
+// writeHead(status, obj): that one insertion point covers the 401/403/404
+// branches below AND the responses the SDK transport writes itself inside
+// handleRequest.
+const CORS_HEADERS: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type, mcp-session-id, mcp-protocol-version, last-event-id',
+  'Access-Control-Expose-Headers': 'mcp-session-id',
+};
+
 const httpServer = createServer(async (req, res) => {
   const url = new URL(req.url!, `http://localhost:${PORT}`);
+  for (const [name, value] of Object.entries(CORS_HEADERS)) res.setHeader(name, value);
 
-  if (req.method === 'GET' && url.pathname === '/sse') {
-    const auth = resolveIdentity(req.headers.authorization, authConfig, clientIpOf(req));
-    if (!auth.ok) {
-      res.writeHead(401, { 'Content-Type': 'text/plain', 'WWW-Authenticate': 'Bearer' });
-      res.end(auth.reason);
-      return;
-    }
-    const transport = new SSEServerTransport('/messages', res);
-    const session = createMcpServer(auth.identity);
-    sessionIdentities.set(transport.sessionId, auth.identity);
-    transports.set(transport.sessionId, transport);
-    res.on('close', () => {
-      transports.delete(transport.sessionId);
-      sessionIdentities.delete(transport.sessionId);
-    });
-    await session.connect(transport);
-  } else if (req.method === 'POST' && url.pathname === '/messages') {
-    const auth = resolveIdentity(req.headers.authorization, authConfig, clientIpOf(req));
-    if (!auth.ok) {
-      res.writeHead(401, { 'Content-Type': 'text/plain', 'WWW-Authenticate': 'Bearer' });
-      res.end(auth.reason);
-      return;
-    }
-    const sessionId = url.searchParams.get('sessionId');
-    if (!sessionId) {
-      res.writeHead(400);
-      res.end('Missing sessionId');
-      return;
-    }
-    const transport = transports.get(sessionId);
-    if (!transport) {
-      res.writeHead(404);
-      res.end('Session not found');
-      return;
-    }
-    // A valid token for identity A must not be able to drive identity B's session.
-    if (sessionIdentities.get(sessionId) !== auth.identity) {
-      res.writeHead(403, { 'Content-Type': 'text/plain' });
-      res.end('This session belongs to a different identity.');
-      return;
-    }
-    await transport.handlePostMessage(req, res);
-  } else if (url.pathname === '/mcp') {
-    // Modern Streamable HTTP transport (MCP spec: SSE is deprecated). Same auth
-    // gate and the same invariant as the SSE pair: a valid token for identity A
-    // must not be able to drive identity B's session.
+  // Preflight, before the auth gate: browsers never attach Authorization to
+  // an OPTIONS request, so a preflight inside the authed branch would 401.
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // Unauthenticated liveness probe. Creates no session and touches no rate
+  // limit (the per-identity limiter lives inside the tool handlers, which
+  // this never reaches).
+  if (req.method === 'GET' && url.pathname === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', version: PKG_VERSION }));
+    return;
+  }
+
+  if (url.pathname === '/mcp') {
+    // Streamable HTTP transport - the only MCP transport since 2.0.0 (the
+    // deprecated SSE pair /sse + /messages was removed). A valid token for
+    // identity A must not be able to drive identity B's session.
     const auth = resolveIdentity(req.headers.authorization, authConfig, clientIpOf(req));
     if (!auth.ok) {
       res.writeHead(401, { 'Content-Type': 'text/plain', 'WWW-Authenticate': 'Bearer' });

@@ -7,46 +7,45 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { spawnServer, stopRawServer } from '../setup.ts';
 import type { RawServerHandle } from '../setup.ts';
 
-// Covers the /mcp Streamable HTTP route in packages/builder/src/index.ts - the
-// modern, dual-stack sibling of the deprecated /sse + /messages pair that
-// auth-gating.test.ts covers. Same two things at stake, same reason no unit
-// test can see them: the exact status-code/header wiring against a real
-// spawned server (401 checked before session lookup, 404 on an unknown
-// session, 403 on cross-identity - on both POST and GET), and whether
+// Covers the /mcp Streamable HTTP route in packages/builder/src/index.ts -
+// the server's only MCP transport since 2.0.0 removed the deprecated
+// /sse + /messages pair. Two things at stake, and no unit test can see
+// either: the exact status-code/header wiring against a real spawned server
+// (401 checked before session lookup, 404 on an unknown session, 403 on
+// cross-identity - on both POST and GET), and whether
 // streamableTransports/streamableIdentities/streamableLastSeen actually
 // drain on every teardown path: DELETE (onsessionclosed, then
 // transport.onclose - redundant with each other on that one path), the idle
 // reaper, and the per-identity session cap's eviction (the latter two only
 // ever go through transport.onclose - see index.ts's own comment on that
 // callback for why onsessionclosed does not cover them). The reaper and the
-// cap exist because the SSE pair self-limits on an abrupt disconnect
-// (res.on('close') drains its maps with no help from us) and /mcp does not:
-// nothing tells the server a caller dropped its socket without DELETE, so an
-// un-reaped session - transport, McpServer, and its 24 tools - would
-// otherwise sit in memory until process exit. Both bounds are exercised
-// below with env-shrunk thresholds (VECTOR_MCP_SESSION_IDLE_MS /
-// VECTOR_MCP_SESSION_SWEEP_MS / VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY), never
-// the real multi-minute defaults.
+// cap exist because /mcp has no disconnect signal: nothing tells the server
+// a caller dropped its socket without DELETE, so an un-reaped session -
+// transport, McpServer, and its 24 tools - would otherwise sit in memory
+// until process exit. Both bounds are exercised below with env-shrunk
+// thresholds (VECTOR_MCP_SESSION_IDLE_MS / VECTOR_MCP_SESSION_SWEEP_MS /
+// VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY), never the real multi-minute
+// defaults.
 //
 // Mixed transport strategy, deliberately:
 // - Case 1 uses the real SDK Client + StreamableHTTPClientTransport, to prove
 //   a real client can drive this route end to end (not just that our own raw
 //   assertions are self-consistent).
-// - Every other case uses raw node:http, for the same reason auth-gating.test.ts
-//   does: this file's point is exact status codes and exact headers, plus -
-//   for the cross-identity case - presenting a *different* Authorization
-//   header than the one that opened the session, and reusing one session's id
-//   under another identity's headers. StreamableHTTPClientTransport fixes its
-//   Authorization header per transport instance and manages mcp-session-id
-//   internally, so it cannot express either scenario.
+// - Every other case uses raw node:http: this file's point is exact status
+//   codes and exact headers, plus - for the cross-identity case - presenting
+//   a *different* Authorization header than the one that opened the session,
+//   and reusing one session's id under another identity's headers.
+//   StreamableHTTPClientTransport fixes its Authorization header per
+//   transport instance and manages mcp-session-id internally, so it cannot
+//   express either scenario.
 //
-// One wrinkle the SSE pair never had: the route does not set
-// enableJsonResponse, so a POST that carries a JSON-RPC *request* (as opposed
-// to a bare notification) gets back a 200 with Content-Type: text/event-stream
-// and the JSON-RPC response embedded in a single "data: ..." line, not a
-// plain application/json body. extractJsonRpc() below unwraps that. Responses
-// this route writes itself - 401/403/404/400 - are always short plain-text
-// bodies (res.end(literal) before the transport is ever touched), never SSE.
+// One wrinkle: the route does not set enableJsonResponse, so a POST that
+// carries a JSON-RPC *request* (as opposed to a bare notification) gets back
+// a 200 with Content-Type: text/event-stream and the JSON-RPC response
+// embedded in a single "data: ..." line, not a plain application/json body.
+// extractJsonRpc() below unwraps that. Responses this route writes itself -
+// 401/403/404/400 - are always short plain-text bodies (res.end(literal)
+// before the transport is ever touched), never SSE.
 
 const TOKEN_ALICE = 'tok-alice-shttp-3f8b21ec';
 const TOKEN_BOB = 'tok-bob-shttp-9a06d4c7';
@@ -345,6 +344,22 @@ describe('streamable HTTP gating - MCP_AUTH_TOKENS set', () => {
     }
     assert.ok(!stderr.includes(TOKEN_ALICE), 'server stderr must never contain the alice token');
     assert.ok(!stderr.includes(TOKEN_BOB), 'server stderr must never contain the bob token');
+  });
+
+  test('the server process is still alive and accepting new sessions after all of the above', async () => {
+    // Ported from the retired SSE auth-gating suite; the regression class is
+    // transport-independent: a missing early `return` after a 401 falls
+    // through into a second writeHead() on an already-ended response, throws
+    // ERR_HTTP_HEADERS_SENT as an unhandled rejection inside the request
+    // handler, and takes the whole process down with it - every other
+    // in-flight and future connection drops. A per-request status-code
+    // assertion can pass even when this happened to a *different* request,
+    // so this checks the process itself, then proves liveness by actually
+    // using it.
+    assert.equal(ctx.process.exitCode, null, 'server process must not have exited');
+    assert.equal(ctx.process.killed, false, 'server process must not have been killed');
+    const r = await postMcp(ctx.port, { Authorization: `Bearer ${TOKEN_ALICE}` }, initializeRequest());
+    assert.equal(r.status, 200, 'server must still accept a fresh initialize');
   });
 });
 

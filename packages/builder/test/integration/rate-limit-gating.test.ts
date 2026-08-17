@@ -1,7 +1,7 @@
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { spawnServer, stopRawServer } from '../setup.ts';
 import type { RawServerHandle } from '../setup.ts';
 
@@ -54,7 +54,7 @@ const RATE_LIMIT_ENV = {
 const RATE_LIMIT_PATTERN = /^Rate limit exceeded\. Retry after \d+ms\.$/;
 
 async function connect(port: number, token: string): Promise<Client> {
-  const transport = new SSEClientTransport(new URL(`http://localhost:${port}/sse`), {
+  const transport = new StreamableHTTPClientTransport(new URL(`http://localhost:${port}/mcp`), {
     requestInit: { headers: { Authorization: `Bearer ${token}` } },
   });
   const client = new Client({ name: 'rate-limit-integration-test', version: '1.0.0' });

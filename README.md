@@ -25,28 +25,23 @@ Hosted instances run on both networks, exposing all 24 tools:
 > accepts a mnemonic from any caller, with or without a token. Self-hosted deployments can
 > still gate access with `MCP_AUTH_TOKENS` - see [Configuration](#configuration).
 
-> **Transport: both hosted instances serve `/mcp`, the modern Streamable HTTP endpoint.**
-> It is the recommended transport and the endpoint listed in the table above. The legacy SSE
-> pair (`/sse` + `/messages`) remains available on both hosted instances for clients that need
-> it, deprecated by the MCP spec (2026-07-28 revision) and retained for compatibility.
+> **Transport: Streamable HTTP only, as of 2.0.0.** The legacy SSE pair (`/sse` +
+> `/messages`), deprecated by the MCP spec (2026-07-28 revision), was removed in this release -
+> those paths now answer 404. Every client connects to `/mcp`, the endpoint the table above
+> lists. This is a breaking change for SSE clients: reconnect with `--transport http` and the
+> `/mcp` URL (below). The server also answers any-origin CORS (browser MCP clients are
+> first-class callers) and exposes an unauthenticated `GET /health` liveness probe.
+> **This describes the code** - each hosted instance serves it once this release deploys there
+> (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch).
 
 Connect from Claude Code in one command. No token needed for the hosted instances.
-
-Modern transport (Streamable HTTP) - recommended:
 
 ```bash
 claude mcp add --transport http vector-mcp https://mcp.vector.mainnet.apexfusion.org/mcp
 ```
 
-Legacy SSE transport - still answered by both hosted instances:
-
-```bash
-claude mcp add --transport sse vector-mcp https://mcp.vector.mainnet.apexfusion.org/sse
-```
-
-Swap in the testnet host for either command to connect to testnet instead. Self-hosting (below)
-serves both transports too, and gives every caller open access to your own instance unless you
-set `MCP_AUTH_TOKENS`.
+Swap in the testnet host to connect to testnet instead. Self-hosting (below) gives every
+caller open access to your own instance unless you set `MCP_AUTH_TOKENS`.
 
 > **Security notice: the non-custodial migration is complete, in this codebase and on both
 > hosted instances, as of the 2026-07-31 cutover deploy.** No tool in this repository accepts a
@@ -98,7 +93,7 @@ limitations.
 - **Agent messaging** - send on-chain messages between agents via TX metadata (keyless)
 - **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals; the on-chain module is live on Vector mainnet, and every write tool is keyless in this codebase
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
-- **Dual transport** - modern Streamable HTTP (`/mcp`) plus legacy SSE (`/sse` + `/messages`, deprecated by the MCP spec (2026-07-28 revision), retained for compatibility)
+- **Streamable HTTP transport** - the modern MCP transport at `/mcp`, with any-origin CORS for browser clients and an unauthenticated `GET /health` probe (the legacy SSE pair was removed in 2.0.0)
 
 ## MCP Tools (24)
 
@@ -199,15 +194,14 @@ npm start
 # Server listens on port 3000 (configurable via PORT env var)
 ```
 
-Connect with the modern transport:
+Connect:
 
 ```bash
 claude mcp add --transport http vector-mcp http://localhost:3000/mcp
 ```
 
-Add `--header "Authorization: Bearer <your-token>"` if you set `MCP_AUTH_TOKENS`. The legacy
-SSE pair (`/sse` + `/messages`, deprecated by the MCP spec, retained for compatibility) is
-still available at `http://localhost:3000/sse` for clients that need it.
+Add `--header "Authorization: Bearer <your-token>"` if you set `MCP_AUTH_TOKENS`. A liveness
+probe is at `GET /health` - unauthenticated, returns `{"status":"ok","version":"<version>"}`.
 
 If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` first - see [Configuration](#configuration) below.
 
@@ -271,7 +265,10 @@ it, lives in your local signer instead - see `VECTOR_SIGNER_SPEND_LIMIT_PER_TX` 
 [`packages/signer/README.md`](packages/signer/README.md#configuration).
 
 > **Running a public instance?** Set `MCP_AUTH_TOKENS` to gate access to known callers, each
-> with its own rate-limit budget. With `MCP_AUTH_TOKENS` unset, callers are admitted
+> with its own rate-limit budget. Note that the server answers any-origin CORS by design: with
+> auth unset, any web page a browser user visits can drive your instance from JavaScript,
+> sharing that user's per-IP rate-limit bucket - one more reason a public instance should set
+> `MCP_AUTH_TOKENS`. With `MCP_AUTH_TOKENS` unset, callers are admitted
 > anonymously with per-client-IP rate limits; the deployment's reverse proxy supplies the
 > client address via the rightmost X-Forwarded-For entry. Tracked identities are capped (LRU);
 > eviction resets a bucket's budget - a memory bound, not a security boundary, since an
@@ -367,7 +364,7 @@ against live chain data. **Never submits.** Never runs in CI. See
 ```
 ┌──────────────────────┐             ┌──────────────────────────┐
 │  Claude / GPT / etc. │◄───────────►│  vector-mcp-server       │
-│  (any MCP client)    │ /sse + /mcp │                          │
+│  (any MCP client)    │    /mcp     │                          │
 └──────────────────────┘             │  ┌────────────────────┐  │
                                      │  │ Rate Limiter        │  │
                                      │  │ (60 calls/min)      │  │

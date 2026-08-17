@@ -6,10 +6,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { loadConfig } from './config.js';
 import { registerSignerTools } from './tools.js';
+// Single source of truth for the advertised version; inlined at build time.
+import { version as PKG_VERSION } from '../package.json';
 
 const config = loadConfig();
 
-const server = new McpServer({ name: 'vector-mcp-signer', version: '0.1.0' });
+const server = new McpServer({ name: 'vector-mcp-signer', version: PKG_VERSION });
 registerSignerTools(server, config);
 
 // stdout is the MCP channel - every diagnostic must go to stderr.

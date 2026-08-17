@@ -2,7 +2,7 @@ import { spawn, ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 const PROJECT_ROOT = resolve(import.meta.dirname!, '..');
 
@@ -42,7 +42,7 @@ export async function startServer(): Promise<ServerContext> {
     child.on('exit', (code) => { clearTimeout(timeout); reject(new Error(`Server exited with code ${code}`)); });
   });
 
-  const transport = new SSEClientTransport(new URL(`http://localhost:${port}/sse`));
+  const transport = new StreamableHTTPClientTransport(new URL(`http://localhost:${port}/mcp`));
   const client = new Client({ name: 'integration-test', version: '1.0.0' });
   await client.connect(transport);
 

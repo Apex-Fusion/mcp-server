@@ -3,7 +3,7 @@
   "name": "io.github.Apex-Fusion/vector",
   "title": "Vector (Apex Fusion)",
   "description": "24 keyless tools for AI agents on Vector, the Apex Fusion eUTXO L2: wallets, contracts, registry.",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "repository": {
     "url": "https://github.com/Apex-Fusion/mcp-server",
     "source": "github"
@@ -13,21 +13,6 @@
     {
       "type": "streamable-http",
       "url": "https://mcp.vector.{network}.apexfusion.org/mcp",
-      "variables": {
-        "network": {
-          "description": "Vector network to target",
-          "isRequired": true,
-          "choices": [
-            "mainnet",
-            "testnet"
-          ],
-          "default": "mainnet"
-        }
-      }
-    },
-    {
-      "type": "sse",
-      "url": "https://mcp.vector.{network}.apexfusion.org/sse",
       "variables": {
         "network": {
           "description": "Vector network to target",
