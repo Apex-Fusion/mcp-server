@@ -35,6 +35,7 @@ coverage/
 mnemonic.txt
 .secrets/
 *.mnemonic
+keys/
 
 # Runtime state (contains transaction history)
 vector-audit-log.json
@@ -42,3 +43,4 @@ vector-signer-audit-log.json
 
 # Incremental typecheck cache (npm run typecheck uses --incremental)
 *.tsbuildinfo
+

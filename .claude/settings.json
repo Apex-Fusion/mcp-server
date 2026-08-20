@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__vector-mcp-mainnet__vector_discover_agents",
+      "mcp__vector-mcp-mainnet__vector_get_balance",
+      "mcp__vector-mcp-mainnet__vector_get_transaction_history"
+    ]
+  }
+}
