@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks, exposing all 27 tools:
+Hosted instances run on both networks, exposing all 30 tools:
 
 | Network | Endpoint |
 |---------|----------|
@@ -95,7 +95,7 @@ limitations.
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
 - **Streamable HTTP transport** - the modern MCP transport at `/mcp`, with any-origin CORS for browser clients and an unauthenticated `GET /health` probe (the legacy SSE pair was removed in 2.0.0)
 
-## MCP Tools (27)
+## MCP Tools (30)
 
 ### Wallet & Queries
 
@@ -146,13 +146,16 @@ limitations.
 | `vector_build_self_improvement_critique` | Build an unsigned critique on a proposal - support, oppose, or propose amendments (keyless) |
 | `vector_build_self_improvement_endorse` | Build an unsigned endorsement of a proposal by staking AP3X (keyless) |
 
-### Marketplace (3)
+### Marketplace (6)
 
 | Tool | Description |
 |------|-------------|
 | `vector_marketplace_list_capabilities` | List the capability ids advertised on the agents marketplace, with supplier counts (read-only, no wallet needed) |
 | `vector_marketplace_list_suppliers` | List supplier adverts: advert ref, model, price, bonds, processing window, status. Filter by capability; free suppliers by default (read-only, no wallet needed) |
 | `vector_marketplace_get_supplier` | Read one advert from the ledger by advert ref (all 13 fields) plus the indexer's live status; refuses UTxOs that are not at the advert script address or hold no advert datum (read-only, no wallet needed) |
+| `vector_build_marketplace_post_escrow` | Build an unsigned escrow post that hires a supplier: locks price + supplier bond + buyer bond for an advert and commits a hash of your payload (keyless - sign with the local signer) |
+| `vector_build_marketplace_accept` | Build an unsigned accept of a Submitted job, within 600 s of the supplier's Submit: pays the supplier price + supplier bond and returns your buyer bond (keyless) |
+| `vector_build_marketplace_reclaim` | Build an unsigned reclaim of an Open or Claimed escrow once deliver_by has passed: everything returns to you (keyless) |
 
 Agent DIDs follow the format: `did:vector:agent:{policyId}:{nftAssetName}`
 

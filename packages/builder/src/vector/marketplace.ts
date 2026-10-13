@@ -1,16 +1,30 @@
 // packages/builder/src/vector/marketplace.ts
-// Marketplace family. PR 1: read tools (indexer + Koios only). PR 2 adds build tools,
+// Marketplace family. PR 1: read tools (indexer + Koios only). PR 2: keyless build tools (escrow post, accept, reclaim).
 // PR 3 adds job transport. Same conventions as agent-network.ts.
 import { z } from "zod/v4";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Provider } from '@lucid-evolution/lucid';
+import { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
+import { VECTOR_OGMIOS_URL, VECTOR_SUBMIT_URL, VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
 import { limiterFor } from './rate-limiter.js';
+import { lucidForAddress } from './build.js';
 import { fetchCapabilities, fetchSuppliers, fetchSupplier, readAdvert, withJson } from './marketplace-indexer.js';
 import { formatOutRef } from './marketplace-datum.js';
+import { buildPostEscrow, buildAccept, buildReclaim } from './marketplace-build.js';
+
+const SIGN_COPY = 'Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.';
+function newProvider() { return new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL }); }
+
+/** What a test can replace. Production passes nothing and the build tools talk to the configured Ogmios node. */
+export interface MarketplaceToolOptions { provider?: () => Provider }
 
 function text(t: string) { return { content: [{ type: "text" as const, text: t }] }; }
+/** Long enough for the longest refusal a builder writes (a list of five refs and its explanation), short enough to bound what an error can say. */
+const ERROR_TEXT_MAX = 800;
 function fail(what: string, err: unknown, tips: string[]) {
-  return text(`Failed to ${what}: ${err instanceof Error ? err.message : String(err)}\n\n**Troubleshooting Tips:**\n${tips.map((t, i) => `${i + 1}. ${t}`).join('\n')}`);
+  // The message can carry text out of a datum or an advert, which anyone can write: it is shown flattened to one escaped line.
+  return text(`Failed to ${what}: ${cell(err instanceof Error ? err.message : String(err), ERROR_TEXT_MAX)}\n\n**Troubleshooting Tips:**\n${tips.map((t, i) => `${i + 1}. ${t}`).join('\n')}`);
 }
 function host(url: string): string { try { return new URL(url).host; } catch { return url; } }
 /**
@@ -25,8 +39,9 @@ function cell(s: unknown, max = 80): string {
 }
 function isoOrRaw(ms: number): string { const d = new Date(ms); return Number.isNaN(d.getTime()) ? String(ms) : d.toISOString(); }
 
-export function registerMarketplaceTools(server: McpServer, identity: string) {
+export function registerMarketplaceTools(server: McpServer, identity: string, options: MarketplaceToolOptions = {}) {
   const rateLimiter = limiterFor(identity);
+  const providerFor = options.provider ?? newProvider;
   function checkRateLimit() {
     const r = rateLimiter.check();
     return r.allowed ? null : text(`Rate limit exceeded. Retry after ${r.retryAfterMs}ms.`);
@@ -48,7 +63,7 @@ export function registerMarketplaceTools(server: McpServer, identity: string) {
 
   server.tool(
     "vector_marketplace_list_suppliers",
-    "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only.",
+    "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only. Pick an advert_ref here, then hire it with vector_build_marketplace_post_escrow.",
     {
       capability_id: z.string().optional().describe("Filter by capability id, e.g. 'identity.history.report.v1'"),
       only_free: z.boolean().optional().default(true).describe("Only suppliers currently reporting status 'free' (default true)"),
@@ -92,6 +107,74 @@ export function registerMarketplaceTools(server: McpServer, identity: string) {
           `- **Indexer status:** ${live ? `${cell(live.status)}, last seen ${cell(live.last_seen_iso ?? '-')}` : 'not confirmed by the indexer for this advert'}`;
         return text(withJson(md, { advert_ref: ref, ...advert, is_spent: utxo.is_spent ?? null, indexer_status: live?.status ?? null, last_seen_iso: live?.last_seen_iso ?? null }));
       } catch (err) { return fail('read advert', err, ['Koios may be unreachable; retry in a minute']); }
+    },
+  );
+
+  server.tool(
+    "vector_build_marketplace_post_escrow",
+    "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref and the same payload. " + SIGN_COPY,
+    {
+      changeAddress: z.string().describe("Your wallet address (pays the lock and fees; receives the bond back on Accept). Get it from vector_signer_get_address."),
+      advert_ref: z.string().describe("Advert '<txid>#<index>' from vector_marketplace_list_suppliers"),
+      payload: z.string().min(1).describe("The job payload string exactly as you will send it (for JSON, pass the JSON text)"),
+      deliver_by_ms: z.number().int().optional().describe("Optional POSIX ms deadline; default now + advert window + 180 s"),
+    },
+    async ({ changeAddress, advert_ref, payload, deliver_by_ms }) => {
+      const limited = checkRateLimit(); if (limited) return limited;
+      try {
+        const provider = providerFor();
+        const lucid = await lucidForAddress(provider, changeAddress);
+        const r = await buildPostEscrow(lucid, provider, { changeAddress, advertRef: advert_ref, payload, deliverByMs: deliver_by_ms });
+        const deliverBy = isoOrRaw(r.deliverBy);
+        // supplierPkh, endpointHost and capabilityId come out of an advert, which anyone can write: all three go through cell().
+        const warning = r.collateralKept ? '' : '\n**Warning:** no pure 5-unit output was kept aside for the Accept/Reclaim script spends; make sure your wallet still has one afterwards (the change of this Post counts if it is a pure output of at least 5 units).';
+        const md = `# Unsigned Escrow Post Built (Not Submitted)\n\n` +
+          `**Hiring:** \`${cell(r.capabilityId)}\` from supplier key \`${cell(r.supplierPkh)}\`, endpoint host \`${cell(r.endpointHost)}\`\n` +
+          `**Escrow ref (after submit):** \`${r.escrowRef}\`\n` +
+          `**Locked:** ${lovelaceToAda(r.lockLovelace)} = price ${lovelaceToAda(r.priceLovelace)} + supplier bond ${lovelaceToAda(r.supplierBondLovelace)} + buyer bond ${lovelaceToAda(r.buyerBondLovelace)} (floored to the min-UTxO of the Submitted datum). On Accept the supplier receives price + supplier bond and your buyer bond returns. Reclaim after ${deliverBy} returns everything.\n` +
+          `**Deliver by:** ${deliverBy}\n**Payload hash:** \`${r.promptHash}\`\n**Estimated fee:** ${r.feeAda}\n**Collateral kept aside:** ${r.collateralKept ? 'yes' : 'no'}${warning}\n\n` +
+          `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\nKeep the payload byte-identical for vector_marketplace_send_job. ${SIGN_COPY}`;
+        return text(withJson(md, { escrow_ref: r.escrowRef, lock_lovelace: r.lockLovelace, deliver_by: r.deliverBy, prompt_hash: r.promptHash, tx_hash: r.txHash, fee: r.fee, collateral_kept: r.collateralKept }));
+      } catch (err) { return fail('build escrow post', err, ['The wallet needs the lock plus about 1 unit for fees, and one pure 5-unit output kept as collateral', 'Check the advert is still Active with vector_marketplace_get_supplier']); }
+    },
+  );
+
+  server.tool(
+    "vector_build_marketplace_accept",
+    "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. Verify the receipt first with vector_marketplace_verify_receipt. " + SIGN_COPY,
+    {
+      changeAddress: z.string().describe("The buyer wallet address that posted the escrow"),
+      escrow_ref: z.string().describe("The escrow_ref returned by vector_build_marketplace_post_escrow"),
+    },
+    async ({ changeAddress, escrow_ref }) => {
+      const limited = checkRateLimit(); if (limited) return limited;
+      try {
+        const provider = providerFor();
+        const lucid = await lucidForAddress(provider, changeAddress);
+        const r = await buildAccept(lucid, provider, VECTOR_KOIOS_URL, { changeAddress, escrowRef: escrow_ref });
+        const warn = r.secondsLeft < 120 ? `\n\n**Hurry:** only ${r.secondsLeft} s remain in the accept window.` : '';
+        const md = `# Unsigned Accept Built (Not Submitted)\n\n**Supplier receives:** ${lovelaceToAda(r.supplierLovelace)}\n**Your bond back:** ${lovelaceToAda(r.buyerLovelace)}\n**Estimated fee:** ${r.feeAda}${warn}\n\n**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\n${SIGN_COPY}`;
+        return text(withJson(md, { escrow_ref, tx_hash: r.txHash, supplier_lovelace: r.supplierLovelace, buyer_lovelace: r.buyerLovelace, seconds_left: r.secondsLeft }));
+      } catch (err) { return fail('build accept', err, ['The job must be in Submitted state: poll vector_marketplace_get_job first', 'Accept must land within 600 s of Submit; after that the supplier may Release', 'The wallet needs one pure 5-unit output as collateral']); }
+    },
+  );
+
+  server.tool(
+    "vector_build_marketplace_reclaim",
+    "Build an UNSIGNED transaction that reclaims your escrow after deliver_by when the supplier never submitted (state Open or Claimed): everything returns to you. " + SIGN_COPY,
+    {
+      changeAddress: z.string().describe("The buyer wallet address that posted the escrow"),
+      escrow_ref: z.string().describe("The escrow_ref returned by vector_build_marketplace_post_escrow"),
+    },
+    async ({ changeAddress, escrow_ref }) => {
+      const limited = checkRateLimit(); if (limited) return limited;
+      try {
+        const provider = providerFor();
+        const lucid = await lucidForAddress(provider, changeAddress);
+        const r = await buildReclaim(lucid, provider, VECTOR_KOIOS_URL, { changeAddress, escrowRef: escrow_ref });
+        const md = `# Unsigned Reclaim Built (Not Submitted)\n\n**Returned to you:** ${lovelaceToAda(r.buyerLovelace)} (price + supplier bond + buyer bond), and whatever else the escrow holds, as change\n**Estimated fee:** ${r.feeAda}\n\n**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\n${SIGN_COPY}`;
+        return text(withJson(md, { escrow_ref, tx_hash: r.txHash, buyer_lovelace: r.buyerLovelace }));
+      } catch (err) { return fail('build reclaim', err, ['Reclaim opens only after deliver_by', 'A Submitted escrow cannot be reclaimed: accept it or wait for the supplier to Release']); }
     },
   );
 }

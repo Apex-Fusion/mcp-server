@@ -1,25 +1,45 @@
 // packages/builder/test/marketplace-tools.test.ts
-// Handler-level tests for the three read tools: a minimal fake server captures the handlers and global fetch is
-// stubbed, so no network is touched. (Registration and schemas are covered by the smoke suite.)
+// Handler-level tests for the marketplace tools: a minimal fake server captures the handlers, global fetch is stubbed (the indexer,
+// and Koios either as the advert reads or as the escrow world of fixtures/escrow-koios.fixture.ts), and the node the build tools
+// talk to is a FixtureProvider handed in through the provider seam of registerMarketplaceTools. No network is touched.
+// (Registration and schemas are covered by the smoke suite.)
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { Constr, Data, fromText } from '@lucid-evolution/lucid';
+import { CML, Constr, Data, fromText, getAddressDetails } from '@lucid-evolution/lucid';
+import type { Provider, UTxO } from '@lucid-evolution/lucid';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { registerMarketplaceTools } from '../src/vector/marketplace.ts';
-import { ADVERT_ADDRESS, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
-import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF } from './fixtures/marketplace.fixture.ts';
+import { limiterFor, RATE_LIMIT_PER_MINUTE } from '../src/vector/rate-limiter.ts';
+import { ADVERT_ADDRESS, ESCROW_ADDRESS, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
+import { decodeEscrowDatum, encodeEscrowDatum, promptHashForPayload } from '../src/vector/marketplace-datum.ts';
+import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
+import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
+import { FixtureProvider, FIXTURE_UTXOS, FIXTURE_TXHASH, OWN_ADDRESS } from './fixtures/fixture-provider.ts';
+import { REF_SCRIPT_UTXO, evaluatingProvider } from './fixtures/escrow-node.fixture.ts';
+import { koiosFor, escrowAt, ESCROW_TX, SUBMIT_TX, SUPPLIER_ADDRESS } from './fixtures/escrow-koios.fixture.ts';
+import type { KoiosOptions } from './fixtures/escrow-koios.fixture.ts';
 
 type Handler = (args: Record<string, unknown>) => Promise<{ content: { type: string; text: string }[] }>;
+const serverOf = (into: Map<string, Handler>) => ({ tool: (name: string, _description: string, _shape: unknown, handler: Handler) => { into.set(name, handler); } }) as unknown as McpServer;
+// The node the build tools talk to is whatever the running test put in `node`.
+let node: Provider | undefined;
+const providerSeam = { provider: () => { if (!node) throw new Error('this test set no node'); return node; } };
+// The read tools and the build tools are registered apart, each under its own identity, so each has its own budget of calls per minute.
 const handlers = new Map<string, Handler>();
-registerMarketplaceTools({ tool: (name: string, _description: string, _shape: unknown, handler: Handler) => { handlers.set(name, handler); } } as unknown as McpServer, 'marketplace-tools-test');
-const call = async (name: string, args: Record<string, unknown> = {}): Promise<string> => {
-  const h = handlers.get(name);
+registerMarketplaceTools(serverOf(handlers), 'marketplace-tools-test', providerSeam);
+const buildHandlers = new Map<string, Handler>();
+registerMarketplaceTools(serverOf(buildHandlers), 'marketplace-build-tools-test', providerSeam);
+const callOn = (registered: Map<string, Handler>) => async (name: string, args: Record<string, unknown> = {}): Promise<string> => {
+  const h = registered.get(name);
   assert.ok(h, `${name} is registered`);
   const out = await h(args);
   assert.equal(out.content.length, 1);
   assert.equal(out.content[0].type, 'text');
   return out.content[0].text;
 };
+const call = callOn(handlers);
+const callBuild = callOn(buildHandlers);
 const JSON_FENCE = '\n```json\n';
 const jsonOf = (t: string) => JSON.parse(t.slice(t.lastIndexOf(JSON_FENCE) + JSON_FENCE.length, t.lastIndexOf('\n```')));
 const markdownOf = (t: string) => t.slice(0, t.lastIndexOf('\n\n' + JSON_FENCE.slice(1)));
@@ -28,7 +48,11 @@ const markdownOf = (t: string) => t.slice(0, t.lastIndexOf('\n\n' + JSON_FENCE.s
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 const supplierRow = (over: Record<string, unknown> = {}) => ({ utxo_ref: ADVERT_REF, supplier_pkh: ADVERT_EXPECTED.supplier_pkh, capability_id: ADVERT_EXPECTED.capability_id, model: 'm', max_output_tokens: 1, max_processing_ms: 300000, price_lovelace: '200000', supplier_bond_lovelace: '1000000', buyer_bond_lovelace: '1000000', endpoint_url: 'https://s.example', detail_uri: '', detail_hash: '', advertised_at: 1, status: 'free', advert_status: 'Active', current_escrow_ref: null, last_seen_iso: '2026-10-13T09:00:00.000Z', created_slot: 1, ...over });
 const advertUtxo = (datumHex: string, over: Record<string, unknown> = {}) => ({ tx_hash: ADVERT_REF.slice(0, 64), tx_index: 0, address: ADVERT_ADDRESS, value: '2000000', is_spent: false, inline_datum: { bytes: datumHex }, ...over });
-interface Net { utxos?: unknown[]; capabilities?: unknown[]; suppliers?: unknown[]; supplier?: { status: number; body?: unknown }; koiosStatus?: number }
+interface Net {
+  utxos?: unknown[]; capabilities?: unknown[]; suppliers?: unknown[]; supplier?: { status: number; body?: unknown }; koiosStatus?: number;
+  /** Payment credentials of the inputs of the transaction that created the advert (default: the supplier's own key). */
+  authorCreds?: string[];
+}
 let requested: string[] = [];
 const realFetch = globalThis.fetch;
 const stub = (net: Net) => {
@@ -37,6 +61,9 @@ const stub = (net: Net) => {
     const url = String(input);
     requested.push(url);
     if (url.endsWith('/api/v1/utxo_info')) return reply(net.utxos ?? [], net.koiosStatus ?? 200);
+    if (url.endsWith('/api/v1/tx_info')) {
+      return reply([{ tx_hash: ADVERT_REF.slice(0, 64), inputs: (net.authorCreds ?? [ADVERT_EXPECTED.supplier_pkh]).map((cred, i) => ({ tx_hash: 'cc'.repeat(32), tx_index: i, payment_addr: { bech32: SUPPLIER_ADDRESS, cred }, stake_addr: null })) }]);
+    }
     if (url === `${INDEXER_URL}/capabilities`) return reply(net.capabilities ?? []);
     if (url === `${INDEXER_URL}/suppliers`) return reply(net.suppliers ?? []);
     if (url.startsWith(`${INDEXER_URL}/suppliers/`)) return net.supplier ? reply(net.supplier.body ?? {}, net.supplier.status) : reply({}, 404);
@@ -44,11 +71,12 @@ const stub = (net: Net) => {
   }) as typeof fetch;
 };
 beforeEach(() => { requested = []; });
-afterEach(() => { globalThis.fetch = realFetch; });
+afterEach(() => { globalThis.fetch = realFetch; node = undefined; });
 
 // A real advert datum with chosen supplier-controlled fields (indexes follow AdvertDatum's on-chain field order).
-const advertDatumWith = (fields: { model?: string; endpoint_url?: string; advertised_at?: bigint }): string => {
+const advertDatumWith = (fields: { capability_id?: string; model?: string; endpoint_url?: string; advertised_at?: bigint }): string => {
   const c = Data.from(ADVERT_DATUM_HEX) as Constr<Data>;
+  if (fields.capability_id !== undefined) c.fields[1] = fromText(fields.capability_id);
   if (fields.model !== undefined) c.fields[2] = fromText(fields.model);
   if (fields.endpoint_url !== undefined) c.fields[8] = fromText(fields.endpoint_url);
   if (fields.advertised_at !== undefined) c.fields[11] = fields.advertised_at;
@@ -186,8 +214,254 @@ describe('vector_marketplace_list_capabilities', () => {
   });
 });
 
+// --- the build tools ---------------------------------------------------------------------------------------------
+// They are handed a FixtureProvider for the node. The advert is read through the stubbed Koios (stub(), above); an escrow is read
+// through the escrow world of fixtures/escrow-koios.fixture.ts: the node and the Koios that describes the same chain.
+const OWN_PKH = getAddressDetails(OWN_ADDRESS).paymentCredential!.hash;
+const POST_TOOL = 'vector_build_marketplace_post_escrow';
+const ACCEPT_TOOL = 'vector_build_marketplace_accept';
+const RECLAIM_TOOL = 'vector_build_marketplace_reclaim';
+const cborOf = (t: string): string => {
+  const m = /\*\*Unsigned TX CBOR:\*\*\n```\n([0-9a-f]+)\n```/.exec(t);
+  assert.ok(m, 'the text carries the unsigned CBOR in its own fence');
+  return m[1];
+};
+const outputsOf = (cborHex: string) => {
+  const outs = CML.Transaction.from_cbor_hex(cborHex).body().outputs();
+  return Array.from({ length: outs.len() }, (_, i) => ({ address: outs.get(i).address().to_bech32(), lovelace: BigInt(outs.get(i).amount().coin().toString()) }));
+};
+const lineOf = (t: string, label: string): string => {
+  const lines = t.split('\n').filter((l) => l.startsWith(label));
+  assert.equal(lines.length, 1, `exactly one "${label}" line`);
+  return lines[0];
+};
+const onlyLinesWith = (t: string, needle: string) => t.split('\n').filter((l) => l.includes(needle));
+/** Every Koios request went to the server's configured Koios, and there was at least one. */
+const askedConfiguredKoios = (urls: string[]) => {
+  const koios = urls.filter((u) => u.includes('/api/v1/'));
+  assert.ok(koios.length > 0, 'Koios was asked');
+  for (const u of koios) assert.ok(u.startsWith(`${VECTOR_KOIOS_URL.replace(/\/+$/, '')}/api/v1/`), `${u} is not under ${VECTOR_KOIOS_URL}`);
+};
+const SIGN_FLOW = 'Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.';
+
+describe('vector_build_marketplace_post_escrow', () => {
+  beforeEach(() => { node = new FixtureProvider(FIXTURE_UTXOS); stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)] }); });
+
+  test('builds the unsigned post and shows the signer who is paid, what is locked and what comes back, truthfully', async () => {
+    const before = Date.now();
+    const t = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+    const after = Date.now();
+    const j = jsonOf(t);
+    assert.ok(t.startsWith('# Unsigned Escrow Post Built (Not Submitted)\n'));
+    // the lock, itemised, and who gets what: the supplier bond is paid to the supplier on Accept, it does not come back
+    assert.equal(lineOf(t, '**Locked:**').replace(/ Reclaim after .*$/, ''),
+      '**Locked:** 2.261030 = price 0.200000 + supplier bond 1.000000 + buyer bond 1.000000 (floored to the min-UTxO of the Submitted datum). On Accept the supplier receives price + supplier bond and your buyer bond returns.');
+    assert.match(lineOf(t, '**Locked:**'), / Reclaim after \d{4}-\d\d-\d\dT[\d:.]+Z returns everything\.$/);
+    assert.ok(!/both bonds/i.test(t), 'never says that both bonds return');
+    // the escrow, the payee, the deadline, the payload
+    assert.equal(j.escrow_ref, `${j.tx_hash}#0`);
+    assert.equal(lineOf(t, '**Escrow ref (after submit):**'), `**Escrow ref (after submit):** \`${j.escrow_ref}\``);
+    assert.equal(lineOf(t, '**Hiring:**'), `**Hiring:** \`${ADVERT_EXPECTED.capability_id}\` from supplier key \`${ADVERT_EXPECTED.supplier_pkh}\`, endpoint host \`mp-suppliers-chandra.hal8.ai\``);
+    const window = ADVERT_EXPECTED.max_processing_ms + 180_000;
+    assert.ok(j.deliver_by >= before + window && j.deliver_by <= after + window, `deliver_by ${j.deliver_by} is the window plus the buffer from now`);
+    assert.equal(lineOf(t, '**Deliver by:**'), `**Deliver by:** ${new Date(j.deliver_by).toISOString()}`);
+    assert.ok(lineOf(t, '**Locked:**').includes(`Reclaim after ${new Date(j.deliver_by).toISOString()} returns`));
+    assert.equal(j.prompt_hash, promptHashForPayload('hello'));
+    assert.equal(lineOf(t, '**Payload hash:**'), `**Payload hash:** \`${j.prompt_hash}\``);
+    assert.equal(j.lock_lovelace, '2261030');
+    assert.match(j.fee, /^\d+$/);
+    assert.equal(lineOf(t, '**Estimated fee:**'), `**Estimated fee:** ${(Number(j.fee) / 1e6).toFixed(6)}`);
+    // the CBOR in the fence is the escrow post: the escrow is output 0
+    assert.deepEqual(outputsOf(cborOf(t))[0], { address: ESCROW_ADDRESS, lovelace: ESCROW_LOCKED_LOVELACE });
+    askedConfiguredKoios(requested);
+    assert.ok(markdownOf(t).endsWith(`Keep the payload byte-identical for vector_marketplace_send_job. ${SIGN_FLOW}`));
+    // the wallet kept an output aside for the script spends, so there is nothing to warn about
+    assert.equal(j.collateral_kept, true);
+    assert.equal(lineOf(t, '**Collateral kept aside:**'), '**Collateral kept aside:** yes');
+    assert.ok(!t.includes('Warning'));
+    assert.deepEqual(Object.keys(j).sort(), ['collateral_kept', 'deliver_by', 'escrow_ref', 'fee', 'lock_lovelace', 'prompt_hash', 'tx_hash']);
+  });
+  test('warns, in one line, when no pure 5-unit output could be kept aside for Accept and Reclaim', async () => {
+    node = new FixtureProvider([{ txHash: FIXTURE_TXHASH, outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 900_000_000n } }]); // the only output is the only collateral candidate
+    const t = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+    assert.equal(jsonOf(t).collateral_kept, false);
+    assert.equal(lineOf(t, '**Collateral kept aside:**'), '**Collateral kept aside:** no');
+    const warning = onlyLinesWith(t, 'no pure 5-unit output was kept aside');
+    assert.equal(warning.length, 1);
+    assert.match(warning[0], /^\*\*Warning:\*\* .*Accept\/Reclaim script spends/);
+    assert.ok(t.indexOf('**Warning:**') < t.indexOf('**Unsigned TX CBOR:**'), 'the warning comes before the transaction the signer is asked to sign');
+  });
+  test('keeps what the supplier wrote on its own line: the capability is escaped, a very long host is capped', async () => {
+    // a Plutus datum holds at most 64 bytes in a bytestring, so a capability id that can be posted is short
+    const hostile = 'evil | cap\n## Inj `x`\r\n- **F:** l';
+    const longHost = `${'h'.repeat(100)}.example:8443`;
+    stub({ utxos: [advertUtxo(advertDatumWith({ capability_id: hostile, endpoint_url: `https://${longHost}/x?a=1` }))] });
+    const t = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+    assert.ok(t.startsWith('# Unsigned Escrow Post Built'), t.slice(0, 600));
+    assert.equal(lineOf(t, '**Hiring:**'), `**Hiring:** \`evil ¦ cap ## Inj 'x' - **F:** l\` from supplier key \`${ADVERT_EXPECTED.supplier_pkh}\`, endpoint host \`${'h'.repeat(79)}…\``);
+    assert.equal(markdownOf(t).split('\n').filter((l) => /^(## |- )/.test(l)).length, 0, 'no heading or bullet was smuggled in');
+  });
+
+  test('a spent advert is a text refusal with troubleshooting tips, not a thrown error', async () => {
+    stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX, { is_spent: true })] });
+    const t = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+    assert.ok(t.startsWith(`Failed to build escrow post: Advert ${ADVERT_REF} has been spent (its supplier retired or replaced it); pick another advert.\n\n**Troubleshooting Tips:**\n1. The wallet needs the lock plus about 1 unit for fees`), t);
+    assert.ok(t.includes('2. Check the advert is still Active with vector_marketplace_get_supplier'));
+    assert.ok(!t.includes('Unsigned'));
+  });
+  test('refuses, as text, an advert its supplier key did not create, a retired one, and a buyer who is the supplier', async () => {
+    stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)], authorCreds: ['bb'.repeat(28)] });
+    assert.match(await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* was not created by its supplier key/);
+    const retired = Data.from(ADVERT_DATUM_HEX) as Constr<Data>;
+    retired.fields[12] = new Constr(1, []);
+    stub({ utxos: [advertUtxo(Data.to(retired))] });
+    assert.match(await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* is retired; pick another supplier\./);
+    stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)] });
+    assert.match(await callBuild(POST_TOOL, { changeAddress: SUPPLIER_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: /);
+  });
+  test('a deliver_by past the 24 h ceiling (a unit slip) reaches the caller as text; deliver_by_ms stays optional', async () => {
+    const micro = Date.now() * 1000;
+    const t = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello', deliver_by_ms: micro });
+    assert.match(t, /^Failed to build escrow post: deliver_by is \d+ ms from now, more than the 86580000 ms \(24 h plus the buffer\) a Post will lock funds for; deliver_by is POSIX milliseconds, check the unit\./);
+    const ok = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello', deliver_by_ms: Date.now() + 3_600_000 });
+    assert.ok(ok.startsWith('# Unsigned Escrow Post Built'));
+    assert.ok(Math.abs(jsonOf(ok).deliver_by - (Date.now() + 3_600_000)) < 5_000, 'an explicit deadline is the one built');
+  });
+  test('a wallet that cannot pay the lock is a text refusal too', async () => {
+    node = new FixtureProvider([{ txHash: FIXTURE_TXHASH, outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 1_500_000n } }]);
+    const t = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+    assert.ok(t.startsWith('Failed to build escrow post: '), t);
+    assert.ok(t.includes('**Troubleshooting Tips:**'));
+  });
+});
+
+// The escrow world: a node that can evaluate scripts and the Koios that describes the same chain. Times are taken from the clock the
+// tools read (they build against "now"), so each test states its escrow relative to it.
+const BASE: EscrowDatum = { ...decodeEscrowDatum(ESCROW_OPEN_DATUM_HEX), buyer_pkh: OWN_PKH };
+const postedAround = (now: number, over: Partial<EscrowDatum> = {}): EscrowDatum => ({ ...BASE, posted_at: now - 600_000, deliver_by: now + 3_600_000, ...over });
+const submittedAt = (d: EscrowDatum, submitted_at: number): EscrowDatum => ({ ...d, submitted_at, result_receipt_hash: 'cd'.repeat(32), state: 'Submitted' });
+/** `posted` is the Post output of ESCROW_REF as Koios describes it (`spent` or not); `chain` is what else sits on the node besides the wallet and the reference script. */
+function escrowWorld(chain: UTxO[], posted: EscrowDatum, spent: boolean, koios: KoiosOptions = {}) {
+  const utxos = [...FIXTURE_UTXOS, REF_SCRIPT_UTXO, ...chain];
+  node = evaluatingProvider(utxos);
+  const k = koiosFor(utxos, { datumHex: encodeEscrowDatum(posted), spent, ...koios });
+  globalThis.fetch = k.f;
+  return k;
+}
+
+describe('vector_build_marketplace_accept', () => {
+  test('builds the unsigned accept inside the window and says who gets what', async () => {
+    const now = Date.now();
+    const posted = postedAround(now);
+    const koios = escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 60_000))], posted, true);
+    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const j = jsonOf(t);
+    askedConfiguredKoios(koios.calls.map((c) => c.url!));
+    assert.ok(t.startsWith('# Unsigned Accept Built (Not Submitted)\n'));
+    assert.equal(lineOf(t, '**Supplier receives:**'), '**Supplier receives:** 1.200000');
+    assert.equal(lineOf(t, '**Your bond back:**'), '**Your bond back:** 1.000000');
+    assert.ok(!/both bonds/i.test(t));
+    assert.deepEqual([j.supplier_lovelace, j.buyer_lovelace], ['1200000', '1000000']);
+    assert.ok(j.seconds_left > 530 && j.seconds_left <= 540, `seconds_left ${j.seconds_left}: 600 s from the Submit, which was 60 s ago`);
+    assert.ok(!t.includes('Hurry'));
+    const outs = outputsOf(cborOf(t));
+    assert.ok(outs.some((o) => o.address === SUPPLIER_ADDRESS && o.lovelace === 1_200_000n), 'the supplier is paid price + supplier bond');
+    assert.ok(outs.some((o) => o.address === OWN_ADDRESS && o.lovelace === 1_000_000n), 'the buyer bond comes back');
+    assert.equal(j.tx_hash.length, 64);
+    assert.ok(markdownOf(t).endsWith(SIGN_FLOW));
+  });
+  test('hurries the caller when less than two minutes of the window are left', async () => {
+    const now = Date.now();
+    const posted = postedAround(now);
+    escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 520_000))], posted, true);
+    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const left = jsonOf(t).seconds_left;
+    assert.ok(left > 70 && left <= 80, `seconds_left ${left}`);
+    assert.equal(lineOf(t, '**Hurry:**'), `**Hurry:** only ${left} s remain in the accept window.`);
+  });
+  test('an accept after the window has closed is a text refusal that names when it closed', async () => {
+    const submitted = submittedAt(BASE, BASE.posted_at + 60_000); // the live August escrow: its window closed long ago
+    escrowWorld([escrowAt(SUBMIT_TX, submitted)], BASE, true);
+    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    assert.ok(t.startsWith(`Failed to build accept: Accept window closed at ${new Date(submitted.submitted_at! + 600_000).toISOString()}; the supplier may now Release. (escrow ${ESCROW_REF})\n\n**Troubleshooting Tips:**\n1. The job must be in Submitted state`), t);
+    assert.ok(!t.includes('Unsigned'));
+  });
+  test('a ref that is not an escrow ref, or an escrow of another buyer, is a text refusal', async () => {
+    const now = Date.now();
+    const posted = postedAround(now);
+    escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 60_000))], posted, true);
+    assert.match(await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: 'nope#1' }), /^Failed to build accept: Invalid out ref/);
+    escrowWorld([escrowAt(SUBMIT_TX, submittedAt({ ...posted, buyer_pkh: 'aa'.repeat(28) }, now - 60_000))], { ...posted, buyer_pkh: 'aa'.repeat(28) }, true);
+    assert.match(await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF }), /^Failed to build accept: This escrow was posted by another key; you are not the buyer\. \(escrow /);
+  });
+});
+
+describe('vector_build_marketplace_reclaim', () => {
+  test('builds the unsigned reclaim once deliver_by has passed and says everything comes back', async () => {
+    const now = Date.now();
+    const posted = postedAround(now, { deliver_by: now - 300_000 });
+    const koios = escrowWorld([escrowAt(ESCROW_TX, posted)], posted, false);
+    const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    assert.ok(t.startsWith('# Unsigned Reclaim Built (Not Submitted)\n'));
+    askedConfiguredKoios(koios.calls.map((c) => c.url!));
+    assert.equal(lineOf(t, '**Returned to you:**'), '**Returned to you:** 2.200000 (price + supplier bond + buyer bond), and whatever else the escrow holds, as change');
+    assert.equal(jsonOf(t).buyer_lovelace, '2200000');
+    assert.ok(outputsOf(cborOf(t)).some((o) => o.address === OWN_ADDRESS && o.lovelace === 2_200_000n));
+    assert.ok(markdownOf(t).endsWith(SIGN_FLOW));
+  });
+  test('a reclaim before deliver_by has passed is a text refusal that names when it opens', async () => {
+    const now = Date.now();
+    const posted = postedAround(now); // deliver_by an hour from now
+    escrowWorld([escrowAt(ESCROW_TX, posted)], posted, false);
+    const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const opens = Math.ceil((posted.deliver_by + 1) / 1000) * 1000;
+    assert.ok(t.startsWith(`Failed to build reclaim: Reclaim opens at ${new Date(opens).toISOString()}: deliver_by is ${new Date(posted.deliver_by).toISOString()}, and the validity range may start only on a whole second after it. (escrow ${ESCROW_REF})\n\n**Troubleshooting Tips:**\n1. Reclaim opens only after deliver_by`), t);
+    assert.ok(!t.includes('Unsigned'));
+  });
+  test('a Submitted escrow cannot be reclaimed: the refusal says so, as text', async () => {
+    const now = Date.now();
+    const posted = postedAround(now, { deliver_by: now - 300_000 });
+    escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 60_000))], posted, true);
+    const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    assert.match(t, /^Failed to build reclaim: Escrow state is Submitted; Reclaim needs Open or Claimed\. \(escrow /);
+  });
+});
+
+describe('the build tools\' error text and rate limit', () => {
+  test('error text that carries markdown is flattened to one escaped line before it is shown', async () => {
+    node = Object.assign(new FixtureProvider([]), { getUtxos: async () => { throw new Error('boom | `x`\n## Injected\r\n- **Fake:** line'); } });
+    for (const [tool, args, what] of [
+      [POST_TOOL, { advert_ref: ADVERT_REF, payload: 'x' }, 'build escrow post'],
+      [ACCEPT_TOOL, { escrow_ref: ESCROW_REF }, 'build accept'],
+      [RECLAIM_TOOL, { escrow_ref: ESCROW_REF }, 'build reclaim'],
+    ] as const) {
+      const t = await callBuild(tool, { changeAddress: OWN_ADDRESS, ...args });
+      assert.ok(t.startsWith(`Failed to ${what}: boom ¦ 'x' ## Injected - **Fake:** line\n\n**Troubleshooting Tips:**\n1. `), `${tool}: ${t}`);
+    }
+  });
+  test('a caller over budget is turned away by every build tool before the node or the network is touched', async () => {
+    const identity = 'marketplace-over-budget-test';
+    const over = new Map<string, Handler>();
+    let nodeAsked = 0, fetched = 0;
+    registerMarketplaceTools(serverOf(over), identity, { provider: () => { nodeAsked++; throw new Error('the node must not be asked'); } });
+    globalThis.fetch = (async () => { fetched++; return reply([]); }) as typeof fetch;
+    const bucket = limiterFor(identity);
+    for (let i = 0; i < RATE_LIMIT_PER_MINUTE; i++) assert.equal(bucket.check().allowed, true);
+    for (const [tool, args] of [
+      [POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'x' }],
+      [ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF }],
+      [RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF }],
+    ] as const) {
+      assert.match(await callOn(over)(tool, args), /^Rate limit exceeded\. Retry after \d+ms\.$/, tool);
+    }
+    assert.deepEqual([nodeAsked, fetched], [0, 0]);
+  });
+});
+
 describe('registration', () => {
-  test('registers exactly the three read tools', () => {
-    assert.deepEqual([...handlers.keys()].sort(), ['vector_marketplace_get_supplier', 'vector_marketplace_list_capabilities', 'vector_marketplace_list_suppliers']);
+  test('registers exactly the three read tools and the three build tools', () => {
+    const six = ['vector_build_marketplace_accept', 'vector_build_marketplace_post_escrow', 'vector_build_marketplace_reclaim', 'vector_marketplace_get_supplier', 'vector_marketplace_list_capabilities', 'vector_marketplace_list_suppliers'];
+    assert.deepEqual([...handlers.keys()].sort(), six);
+    assert.deepEqual([...buildHandlers.keys()].sort(), six);
   });
 });

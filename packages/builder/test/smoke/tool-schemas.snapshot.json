@@ -159,6 +159,81 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
+  "vector_build_marketplace_accept": {
+    "description": "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. Verify the receipt first with vector_marketplace_verify_receipt. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "The buyer wallet address that posted the escrow",
+          "type": "string"
+        },
+        "escrow_ref": {
+          "description": "The escrow_ref returned by vector_build_marketplace_post_escrow",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeAddress",
+        "escrow_ref"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_marketplace_post_escrow": {
+    "description": "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref and the same payload. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address (pays the lock and fees; receives the bond back on Accept). Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "advert_ref": {
+          "description": "Advert '<txid>#<index>' from vector_marketplace_list_suppliers",
+          "type": "string"
+        },
+        "payload": {
+          "description": "The job payload string exactly as you will send it (for JSON, pass the JSON text)",
+          "type": "string",
+          "minLength": 1
+        },
+        "deliver_by_ms": {
+          "description": "Optional POSIX ms deadline; default now + advert window + 180 s",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "changeAddress",
+        "advert_ref",
+        "payload"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_marketplace_reclaim": {
+    "description": "Build an UNSIGNED transaction that reclaims your escrow after deliver_by when the supplier never submitted (state Open or Claimed): everything returns to you. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "The buyer wallet address that posted the escrow",
+          "type": "string"
+        },
+        "escrow_ref": {
+          "description": "The escrow_ref returned by vector_build_marketplace_post_escrow",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeAddress",
+        "escrow_ref"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
   "vector_build_message_agent": {
     "description": "Build an UNSIGNED transaction that sends an on-chain message to a registered agent via TX metadata (label 674), delivering 2 AP3X to the agent's owner address. Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
     "inputSchema": {
@@ -827,7 +902,7 @@
     }
   },
   "vector_marketplace_list_suppliers": {
-    "description": "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only.",
+    "description": "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only. Pick an advert_ref here, then hire it with vector_build_marketplace_post_escrow.",
     "inputSchema": {
       "type": "object",
       "properties": {
