@@ -181,7 +181,7 @@
     }
   },
   "vector_build_marketplace_post_escrow": {
-    "description": "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Takes no key material. After it confirms, send the job through the marketplace transport tool with the returned escrow_ref and the same payload. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Takes no key material. After it confirms, send the job through the marketplace transport tool (PR 3) with the returned escrow_ref and the same payload. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
     "inputSchema": {
       "type": "object",
       "properties": {

@@ -438,6 +438,25 @@ describe('koiosCredentialUtxos', () => {
     const { f } = paging([lower, upper, sibling]);
     assert.deepEqual((await koiosCredentialUtxos(KOIOS, CRED, f)).map((r) => [r.tx_hash, r.tx_index]), [[lower.tx_hash, 0], [lower.tx_hash, 1]]);
   });
+  test('maxRows is honoured to the entry: the last page asked for is cut to what is left, so no more than maxRows are read', async () => {
+    const { f, calls } = paging(Array.from({ length: 1000 }, (_, i) => rowN(i + 1)));
+    await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, f, { pageSize: 100, maxRows: 150 }), safeMessage(/^Koios credential_utxos: 150 or more outputs matched; refusing to read them all$/));
+    assert.deepEqual(calls.map((c) => [c.offset, c.limit]), [[0, 100], [100, 50]]);
+    const small = paging(Array.from({ length: 10 }, (_, i) => rowN(i + 1)));
+    await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, small.f, { pageSize: 100, maxRows: 7 }), /7 or more outputs/);
+    assert.deepEqual(small.calls.map((c) => [c.offset, c.limit]), [[0, 7]], 'a cap below the page size cuts the first page too');
+  });
+  test('fewer entries than maxRows are all returned; exactly maxRows are refused, as a full last page cannot say there is no more', async () => {
+    const four = paging([1, 2, 3, 4].map(rowN));
+    assert.equal((await koiosCredentialUtxos(KOIOS, CRED, four.f, { pageSize: 2, maxRows: 5 })).length, 4);
+    assert.deepEqual(four.calls.map((c) => [c.offset, c.limit]), [[0, 2], [2, 2], [4, 1]]);
+    await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, paging([1, 2, 3, 4].map(rowN)).f, { pageSize: 2, maxRows: 4 }), /4 or more outputs matched/);
+  });
+  test('maxRows must be a positive whole number, checked before anything is asked', async () => {
+    const none = runaway(() => []);
+    for (const maxRows of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, none.f, { maxRows }), /row limit/, String(maxRows));
+    assert.equal(none.calls(), 0);
+  });
   test('a page size that is not a positive whole number is refused before anything is asked', async () => {
     const none = runaway(() => []);
     for (const pageSize of [0, -1, 1.5, Number.NaN]) await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, none.f, { pageSize }), /page size/, String(pageSize));

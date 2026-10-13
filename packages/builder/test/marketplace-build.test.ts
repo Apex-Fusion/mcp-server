@@ -512,6 +512,8 @@ describe('planAccept / planReclaim', () => {
     const p = planAccept(base, ESCROW_EXPECTED.buyer_pkh, 1_786_530_200_000);
     assert.equal(p.supplierLovelace, 1_200_000n);
     assert.equal(p.buyerLovelace, 1_000_000n);
+    assert.equal(p.supplierPkh, ESCROW_EXPECTED.supplier_pkh, 'the plan names the key it pays');
+    assert.deepEqual([p.supplierRaised, p.buyerRaised], [false, false]);
     assert.equal(p.validTo, base.submitted_at + ACCEPT_WINDOW_MS);
     assert.equal(p.redeemerHex, 'd87b80');
   });
@@ -525,6 +527,15 @@ describe('planAccept / planReclaim', () => {
     const p = planAccept({ ...base, payment_lovelace: 1n, supplier_bond_lovelace: 1n, buyer_bond_lovelace: 1n }, ESCROW_EXPECTED.buyer_pkh, base.submitted_at);
     assert.equal(p.supplierLovelace, 1_000_000n);
     assert.equal(p.buyerLovelace, 1_000_000n);
+    assert.deepEqual([p.supplierRaised, p.buyerRaised], [true, true], 'the caller is told which payouts are more than the datum says');
+  });
+  test('accept says which payout it raised: exactly the minimum is not raised, one lovelace under is, and the two are judged apart', () => {
+    const at = (payment_lovelace: bigint, supplier_bond_lovelace: bigint, buyer_bond_lovelace: bigint) =>
+      planAccept({ ...base, payment_lovelace, supplier_bond_lovelace, buyer_bond_lovelace }, ESCROW_EXPECTED.buyer_pkh, base.submitted_at);
+    assert.deepEqual([at(600_000n, 400_000n, 1_000_000n).supplierRaised, at(600_000n, 400_000n, 1_000_000n).buyerRaised], [false, false]);
+    assert.deepEqual([at(600_000n, 399_999n, 999_999n).supplierRaised, at(600_000n, 399_999n, 999_999n).buyerRaised], [true, true]);
+    assert.deepEqual([at(5_000_000n, 1n, 999_999n).supplierRaised, at(5_000_000n, 1n, 999_999n).buyerRaised], [false, true]);
+    assert.deepEqual([at(1n, 1n, 5_000_000n).supplierRaised, at(1n, 1n, 5_000_000n).buyerRaised], [true, false]);
   });
   test('accept refuses the wrong buyer, the wrong state and a closed window', () => {
     assert.throws(() => planAccept(base, 'cc'.repeat(28), 1_786_530_200_000), /not the buyer/);
@@ -538,9 +549,20 @@ describe('planAccept / planReclaim', () => {
     const open = { ...ESCROW_EXPECTED };
     const p = planReclaim(open, ESCROW_EXPECTED.buyer_pkh, open.deliver_by + 1000);
     assert.equal(p.buyerLovelace, 2_200_000n);
+    assert.equal(p.buyerRaised, false);
+    assert.equal(p.supplierPkh, ESCROW_EXPECTED.supplier_pkh);
     assert.equal(p.redeemerHex, 'd87c80');
     assert.throws(() => planReclaim(open, ESCROW_EXPECTED.buyer_pkh, open.deliver_by - 1), /deliver_by/);
     assert.throws(() => planReclaim(base, ESCROW_EXPECTED.buyer_pkh, base.deliver_by + 1), /Open or Claimed/);
+  });
+  test('reclaim lifts a payout below the minimum output to the minimum and says so', () => {
+    const at = (payment_lovelace: bigint, supplier_bond_lovelace: bigint, buyer_bond_lovelace: bigint) => {
+      const open = { ...ESCROW_EXPECTED, payment_lovelace, supplier_bond_lovelace, buyer_bond_lovelace };
+      return planReclaim(open, ESCROW_EXPECTED.buyer_pkh, open.deliver_by + 1000);
+    };
+    assert.deepEqual([at(400_000n, 300_000n, 300_000n).buyerLovelace, at(400_000n, 300_000n, 300_000n).buyerRaised], [1_000_000n, false]);
+    assert.deepEqual([at(400_000n, 300_000n, 299_999n).buyerLovelace, at(400_000n, 300_000n, 299_999n).buyerRaised], [1_000_000n, true]);
+    assert.deepEqual([at(1n, 1n, 1n).buyerLovelace, at(1n, 1n, 1n).buyerRaised], [1_000_000n, true]);
   });
   test('reclaim also covers a Claimed escrow, and only for the buyer', () => {
     const claimed = { ...ESCROW_EXPECTED, state: 'Claimed' as const };
@@ -700,6 +722,20 @@ describe('buildAccept / buildReclaim (offline)', () => {
       assert.deepEqual([r.supplierLovelace, r.buyerLovelace], [1_200_000n, 1_000_000n]);
       assert.equal(r.secondsLeft, Math.floor((SUBMITTED_AT + ACCEPT_WINDOW_MS - ACCEPT_NOW) / 1000));
     });
+    test('names the escrow by its canonical ref and the supplier it pays, as the lineage resolved them', async () => {
+      const r = await accept(await afterSubmit(), { escrowRef: ` ${ESCROW_TX.toUpperCase()}#0 ` });
+      assert.equal(r.escrowRef, ESCROW_REF, 'the ref the caller gave, in canonical form');
+      assert.equal(r.supplierPkh, SUBMITTED.supplier_pkh, 'the key the datum names, which the supplier output is paid to');
+      assert.ok(outputs(r.txCbor).some((o) => getAddressDetails(o.address).paymentCredential?.hash === r.supplierPkh));
+      assert.deepEqual([r.supplierRaised, r.buyerRaised], [false, false]);
+    });
+    test('says when a payout had to be raised to the minimum output', async () => {
+      const posted = { ...POSTED, buyer_bond_lovelace: 500_000n };
+      const w = await setup([REF_SCRIPT_UTXO, escrowAt(SUBMIT_TX, { ...SUBMITTED, buyer_bond_lovelace: 500_000n })]);
+      const r = await accept(w, {}, koiosFor(w.utxos, { datumHex: encodeEscrowDatum(posted), spent: true }));
+      assert.deepEqual([r.supplierLovelace, r.supplierRaised], [1_200_000n, false]);
+      assert.deepEqual([r.buyerLovelace, r.buyerRaised], [1_000_000n, true]);
+    });
     test('needs the buyer key, and its validity range is the plan\'s, which ends inside the accept window', async () => {
       const r = await accept(await afterSubmit());
       const body = CML.Transaction.from_cbor_hex(r.txCbor).body();
@@ -857,6 +893,18 @@ describe('buildAccept / buildReclaim (offline)', () => {
       assert.equal(r.buyerLovelace, 2_200_000n);
       assert.ok(w.provider.evaluations.length > 0);
       assert.ok(BigInt(r.fee) >= MARKETPLACE_MIN_FEE);
+    });
+    test('names the escrow by its canonical ref and the supplier it was posted for', async () => {
+      const r = await reclaim(await untouched(), { escrowRef: ` ${ESCROW_TX.toUpperCase()}#0 ` });
+      assert.equal(r.escrowRef, ESCROW_REF);
+      assert.equal(r.supplierPkh, POSTED.supplier_pkh);
+      assert.equal(r.buyerRaised, false);
+    });
+    test('says when the payout had to be raised to the minimum output', async () => {
+      const low = { ...POSTED, payment_lovelace: 100_000n, buyer_bond_lovelace: 100_000n, supplier_bond_lovelace: 100_000n };
+      const w = await setup([REF_SCRIPT_UTXO, escrowAt(ESCROW_TX, low)]);
+      const r = await reclaim(w, {}, koiosFor(w.utxos, { datumHex: encodeEscrowDatum(low), spent: false }));
+      assert.deepEqual([r.buyerLovelace, r.buyerRaised], [1_000_000n, true]);
     });
     test('needs the buyer key and names collateral from the wallet', async () => {
       const r = await reclaim(await untouched());

@@ -12,9 +12,14 @@ import { lucidForAddress } from './build.js';
 import { fetchCapabilities, fetchSuppliers, fetchSupplier, readAdvert, withJson } from './marketplace-indexer.js';
 import { formatOutRef } from './marketplace-datum.js';
 import { buildPostEscrow, buildAccept, buildReclaim } from './marketplace-build.js';
+import { ACCEPT_WINDOW_MS } from './marketplace-constants.js';
 
 const SIGN_COPY = 'Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.';
 function newProvider() { return new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL }); }
+
+const ACCEPT_WINDOW_S = ACCEPT_WINDOW_MS / 1000;
+/** A payout below the minimum output is raised to it (planAccept, planReclaim); the signer is told, as it is shown more than the datum owes. */
+const raised = (flag: boolean): string => (flag ? ' (raised to the 1-unit minimum)' : '');
 
 /** What a test can replace. Production passes nothing and the build tools talk to the configured Ogmios node. */
 export interface MarketplaceToolOptions { provider?: () => Provider }
@@ -112,7 +117,7 @@ export function registerMarketplaceTools(server: McpServer, identity: string, op
 
   server.tool(
     "vector_build_marketplace_post_escrow",
-    "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Takes no key material. After it confirms, send the job through the marketplace transport tool with the returned escrow_ref and the same payload. " + SIGN_COPY,
+    "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Takes no key material. After it confirms, send the job through the marketplace transport tool (PR 3) with the returned escrow_ref and the same payload. " + SIGN_COPY,
     {
       changeAddress: z.string().describe("Your wallet address (pays the lock and fees; receives the bond back on Accept). Get it from vector_signer_get_address."),
       advert_ref: z.string().describe("Advert '<txid>#<index>' from vector_marketplace_list_suppliers"),
@@ -131,9 +136,13 @@ export function registerMarketplaceTools(server: McpServer, identity: string, op
         const md = `# Unsigned Escrow Post Built (Not Submitted)\n\n` +
           `**Hiring:** \`${cell(r.capabilityId)}\` from supplier key \`${cell(r.supplierPkh)}\`, endpoint host \`${cell(r.endpointHost)}\`\n` +
           `**Escrow ref (after submit):** \`${r.escrowRef}\`\n` +
-          `**Locked:** ${lovelaceToAda(r.lockLovelace)} = price ${lovelaceToAda(r.priceLovelace)} + supplier bond ${lovelaceToAda(r.supplierBondLovelace)} + buyer bond ${lovelaceToAda(r.buyerBondLovelace)} (floored to the min-UTxO of the Submitted datum). On Accept the supplier receives price + supplier bond and your buyer bond returns. Reclaim after ${deliverBy} returns everything.\n` +
+          `**Locked:** ${lovelaceToAda(r.lockLovelace)} = price ${lovelaceToAda(r.priceLovelace)} + supplier bond ${lovelaceToAda(r.supplierBondLovelace)} + buyer bond ${lovelaceToAda(r.buyerBondLovelace)} (floored to the min-UTxO of the Submitted datum). ` +
+          // escrow.ak: Accept pays the supplier price + supplier bond and the buyer its bond; once the window has passed, Release pays the supplier all three
+          `If the supplier submits, accept within ${ACCEPT_WINDOW_S} s: it receives price + supplier bond and your buyer bond (plus any floor excess) returns. ` +
+          `Miss that window and the supplier may Release and keep price + both bonds. ` +
+          `If it never submits, Reclaim after ${deliverBy} returns everything.\n` +
           `**Deliver by:** ${deliverBy}\n**Payload hash:** \`${r.promptHash}\`\n**Estimated fee:** ${r.feeAda}\n**Collateral kept aside:** ${r.collateralKept ? 'yes' : 'no'}${warning}\n\n` +
-          `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\nKeep the payload byte-identical when you send the job through the marketplace transport tool. ${SIGN_COPY}`;
+          `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\nKeep the payload byte-identical when you send the job through the marketplace transport tool (PR 3). ${SIGN_COPY}`;
         return text(withJson(md, { escrow_ref: r.escrowRef, lock_lovelace: r.lockLovelace, deliver_by: r.deliverBy, prompt_hash: r.promptHash, tx_hash: r.txHash, fee: r.fee, collateral_kept: r.collateralKept }));
       } catch (err) { return fail('build escrow post', err, ['The wallet needs the lock plus about 1 unit for fees, and one pure 5-unit output kept as collateral', 'Check the advert is still Active with vector_marketplace_get_supplier']); }
     },
@@ -153,9 +162,19 @@ export function registerMarketplaceTools(server: McpServer, identity: string, op
         const lucid = await lucidForAddress(provider, changeAddress);
         const r = await buildAccept(lucid, provider, VECTOR_KOIOS_URL, { changeAddress, escrowRef: escrow_ref });
         const warn = r.secondsLeft < 120 ? `\n\n**Hurry:** only ${r.secondsLeft} s remain in the accept window.` : '';
-        const md = `# Unsigned Accept Built (Not Submitted)\n\n**Supplier receives:** ${lovelaceToAda(r.supplierLovelace)}\n**Your bond back:** ${lovelaceToAda(r.buyerLovelace)}\n**Estimated fee:** ${r.feeAda}${warn}\n\n**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\n${SIGN_COPY}`;
-        return text(withJson(md, { escrow_ref, tx_hash: r.txHash, supplier_lovelace: r.supplierLovelace, buyer_lovelace: r.buyerLovelace, seconds_left: r.secondsLeft }));
-      } catch (err) { return fail('build accept', err, ['The job must be in Submitted state: check its progress through the marketplace transport tool first', 'Accept must land within 600 s of Submit; after that the supplier may Release', 'The wallet needs one pure 5-unit output as collateral']); }
+        // The escrow is named by its canonical ref, and the key the Accept pays by the datum the lineage resolved (not by what the caller typed).
+        const md = `# Unsigned Accept Built (Not Submitted)\n\n**Escrow:** \`${r.escrowRef}\`\n` +
+          `**Supplier receives:** ${lovelaceToAda(r.supplierLovelace)}${raised(r.supplierRaised)} at supplier key \`${cell(r.supplierPkh)}\`\n` +
+          `**Your bond back:** ${lovelaceToAda(r.buyerLovelace)}${raised(r.buyerRaised)}\n**Estimated fee:** ${r.feeAda}${warn}\n\n` +
+          `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\n${SIGN_COPY}`;
+        return text(withJson(md, { escrow_ref: r.escrowRef, tx_hash: r.txHash, supplier_pkh: r.supplierPkh, supplier_lovelace: r.supplierLovelace, buyer_lovelace: r.buyerLovelace, seconds_left: r.secondsLeft }));
+      } catch (err) {
+        return fail('build accept', err, [
+          'The job must be in Submitted state: check its progress through the marketplace transport tool (PR 3) first',
+          `Accept must land within ${ACCEPT_WINDOW_S} s of Submit; after that the supplier may Release and keep price + both bonds`,
+          'The wallet needs one pure 5-unit output as collateral',
+        ]);
+      }
     },
   );
 
@@ -172,9 +191,16 @@ export function registerMarketplaceTools(server: McpServer, identity: string, op
         const provider = providerFor();
         const lucid = await lucidForAddress(provider, changeAddress);
         const r = await buildReclaim(lucid, provider, VECTOR_KOIOS_URL, { changeAddress, escrowRef: escrow_ref });
-        const md = `# Unsigned Reclaim Built (Not Submitted)\n\n**Returned to you:** ${lovelaceToAda(r.buyerLovelace)} (price + supplier bond + buyer bond), and whatever else the escrow holds, as change\n**Estimated fee:** ${r.feeAda}\n\n**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\n${SIGN_COPY}`;
-        return text(withJson(md, { escrow_ref, tx_hash: r.txHash, buyer_lovelace: r.buyerLovelace }));
-      } catch (err) { return fail('build reclaim', err, ['Reclaim opens only after deliver_by', 'A Submitted escrow cannot be reclaimed: accept it or wait for the supplier to Release']); }
+        const md = `# Unsigned Reclaim Built (Not Submitted)\n\n**Escrow:** \`${r.escrowRef}\`\n` +
+          `**Returned to you:** ${lovelaceToAda(r.buyerLovelace)}${raised(r.buyerRaised)} (price + supplier bond + buyer bond), and whatever else the escrow holds, as change\n` +
+          `**Estimated fee:** ${r.feeAda}\n\n**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\n${SIGN_COPY}`;
+        return text(withJson(md, { escrow_ref: r.escrowRef, tx_hash: r.txHash, buyer_lovelace: r.buyerLovelace }));
+      } catch (err) {
+        return fail('build reclaim', err, [
+          'Reclaim opens only after deliver_by',
+          `A Submitted escrow cannot be reclaimed: accept within ${ACCEPT_WINDOW_S} s of Submit; after that the supplier may Release and keep your buyer bond`,
+        ]);
+      }
     },
   );
 }

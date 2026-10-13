@@ -7,7 +7,7 @@ import type { LucidEvolution, Provider, TxSignBuilder, UTxO } from '@lucid-evolu
 import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import type { VectorUnsignedBuildResult } from '@apexfusion/vector-mcp-shared/types';
 import { toBuildResult } from './build.js';
-import { ensureSlotConfig, paymentKeyHashOf } from './gov-build.js';
+import { ensureSlotConfig, paymentKeyHashOf, ChainClockError } from './gov-build.js';
 import type { SlotClockProvider } from './gov-build.js';
 import {
   ESCROW_ADDRESS, ESCROW_REF_UTXO, ACCEPT_WINDOW_MS, DELIVER_BY_BUFFER_MS, MAX_PROCESSING_MS_CEILING, MARKETPLACE_MIN_FEE,
@@ -212,16 +212,21 @@ export async function buildPostEscrow(
 }
 
 // ─── Accept / Reclaim plans (pure) ──────────────────────────────────────────
+// A payout below the minimum output cannot exist, so it is raised to MIN_UTXO_LOVELACE and the plan says so (`...Raised`): the
+// signer is shown more than the datum owes, and the difference is not free. `supplierPkh` is the key the datum names.
 export function planAccept(datum: EscrowDatum, callerPkh: string, nowMs: number) {
   if (datum.buyer_pkh !== callerPkh) throw new Error('This escrow was posted by another key; you are not the buyer.');
   if (datum.state !== 'Submitted' || datum.submitted_at === null) throw new Error(`Escrow state is ${datum.state}; Accept needs Submitted.`);
   const validTo = datum.submitted_at + ACCEPT_WINDOW_MS;
   if (nowMs > validTo) throw new Error(`Accept window closed at ${iso(validTo)}; the supplier may now Release.`);
   const supplierDue = datum.payment_lovelace + datum.supplier_bond_lovelace;
+  const supplierRaised = supplierDue < MIN_UTXO_LOVELACE;
+  const buyerRaised = datum.buyer_bond_lovelace < MIN_UTXO_LOVELACE;
   return {
+    supplierPkh: datum.supplier_pkh,
     supplierAddress: enterpriseAddressOf(datum.supplier_pkh),
-    supplierLovelace: supplierDue < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : supplierDue,
-    buyerLovelace: datum.buyer_bond_lovelace < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : datum.buyer_bond_lovelace,
+    supplierLovelace: supplierRaised ? MIN_UTXO_LOVELACE : supplierDue, supplierRaised,
+    buyerLovelace: buyerRaised ? MIN_UTXO_LOVELACE : datum.buyer_bond_lovelace, buyerRaised,
     validFrom: nowMs - 60_000, validTo, redeemerHex: redeemerHex(REDEEMER.Accept), secondsLeft: Math.floor((validTo - nowMs) / 1000),
   };
 }
@@ -239,7 +244,12 @@ export function planReclaim(datum: EscrowDatum, callerPkh: string, nowMs: number
   const opens = Math.ceil((datum.deliver_by + 1) / 1000) * 1000;
   if (nowMs < opens) throw new Error(`Reclaim opens at ${iso(opens)}: deliver_by is ${iso(datum.deliver_by)}, and the validity range may start only on a whole second after it.`);
   const due = datum.payment_lovelace + datum.buyer_bond_lovelace + datum.supplier_bond_lovelace;
-  return { buyerLovelace: due < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : due, validFrom: Math.max(opens, nowMs - 60_000), validTo: nowMs + 600_000, redeemerHex: redeemerHex(REDEEMER.Reclaim) };
+  const buyerRaised = due < MIN_UTXO_LOVELACE;
+  return {
+    supplierPkh: datum.supplier_pkh,
+    buyerLovelace: buyerRaised ? MIN_UTXO_LOVELACE : due, buyerRaised,
+    validFrom: Math.max(opens, nowMs - 60_000), validTo: nowMs + 600_000, redeemerHex: redeemerHex(REDEEMER.Reclaim),
+  };
 }
 
 // ─── Accept / Reclaim builders ──────────────────────────────────────────────
@@ -292,7 +302,7 @@ type SpendPlan = { redeemerHex: string; validFrom: number; validTo: number };
 async function buildEscrowSpend<P extends SpendPlan>(
   lucid: LucidEvolution, provider: Provider, koiosUrl: string, p: { changeAddress: string; escrowRef: string; nowMs?: number }, fetchImpl: typeof fetch,
   how: { plan: (datum: EscrowDatum, callerPkh: string, nowMs: number) => P; pay: (tx: NewTx, plan: P) => NewTx },
-): Promise<{ completed: TxSignBuilder; plan: P }> {
+): Promise<{ completed: TxSignBuilder; plan: P; escrowRef: string }> {
   const callerPkh = paymentKeyHashOf(p.changeAddress);
   const lineage = await resolveEscrowLineage(provider, koiosUrl, p.escrowRef, fetchImpl);
   const parsed = parseOutRef(p.escrowRef);
@@ -301,7 +311,10 @@ async function buildEscrowSpend<P extends SpendPlan>(
   let plan: P;
   try { plan = how.plan(lineage.current.datum, callerPkh, p.nowMs ?? Date.now()); } catch (err) { throw new Error(`${errorText(err)} (escrow ${escrow})`); }
   let zeroTime: number;
-  try { zeroTime = await ensureSlotConfig(provider as unknown as SlotClockProvider); } catch (err) { throw new Error(`Could not read the chain clock from the node: ${nodeFailure(err)}`); }
+  // A clock that is not a number is said as what it is (ChainClockError carries nothing the node said); any other failure is a node failure.
+  try { zeroTime = await ensureSlotConfig(provider as unknown as SlotClockProvider); } catch (err) {
+    throw err instanceof ChainClockError ? err : new Error(`Could not read the chain clock from the node: ${nodeFailure(err)}`);
+  }
   assertWholeSecondSlots(zeroTime);
   await assertWalletIs(lucid, p.changeAddress);
   assertCollateral(await lucid.wallet().getUtxos());
@@ -312,8 +325,17 @@ async function buildEscrowSpend<P extends SpendPlan>(
     .validTo(plan.validTo)
     .setMinFee(MARKETPLACE_MIN_FEE)
     .complete({ localUPLCEval: false });
-  return { completed, plan };
+  return { completed, plan, escrowRef: escrow };
 }
+
+/** What an Accept pays, for the signer: `escrowRef` is the caller's ref in canonical form; the key is the supplier the datum names. */
+export interface AcceptTerms {
+  escrowRef: string; supplierPkh: string;
+  supplierLovelace: bigint; supplierRaised: boolean; buyerLovelace: bigint; buyerRaised: boolean;
+  secondsLeft: number;
+}
+/** What a Reclaim returns, for the signer; `supplierPkh` is the supplier the escrow was posted for. */
+export interface ReclaimTerms { escrowRef: string; supplierPkh: string; buyerLovelace: bigint; buyerRaised: boolean }
 
 /**
  * Builds the unsigned Accept of a Submitted escrow: pays the supplier price + supplier bond, returns the buyer bond to the
@@ -327,12 +349,16 @@ async function buildEscrowSpend<P extends SpendPlan>(
  * and nothing is signed or submitted. `fetchImpl` stands in for fetch in the Koios calls (tests).
  */
 export async function buildAccept(lucid: LucidEvolution, provider: Provider, koiosUrl: string, p: { changeAddress: string; escrowRef: string; nowMs?: number }, fetchImpl: typeof fetch = fetch)
-  : Promise<VectorUnsignedBuildResult & { supplierLovelace: bigint; buyerLovelace: bigint; secondsLeft: number }> {
-  const { completed, plan } = await buildEscrowSpend(lucid, provider, koiosUrl, p, fetchImpl, {
+  : Promise<VectorUnsignedBuildResult & AcceptTerms> {
+  const { completed, plan, escrowRef } = await buildEscrowSpend(lucid, provider, koiosUrl, p, fetchImpl, {
     plan: planAccept,
     pay: (tx, plan) => tx.pay.ToAddress(plan.supplierAddress, { lovelace: plan.supplierLovelace }).pay.ToAddress(p.changeAddress, { lovelace: plan.buyerLovelace }),
   });
-  return { ...toBuildResult(completed), supplierLovelace: plan.supplierLovelace, buyerLovelace: plan.buyerLovelace, secondsLeft: plan.secondsLeft };
+  return {
+    ...toBuildResult(completed), escrowRef, supplierPkh: plan.supplierPkh,
+    supplierLovelace: plan.supplierLovelace, supplierRaised: plan.supplierRaised, buyerLovelace: plan.buyerLovelace, buyerRaised: plan.buyerRaised,
+    secondsLeft: plan.secondsLeft,
+  };
 }
 
 /**
@@ -342,10 +368,10 @@ export async function buildAccept(lucid: LucidEvolution, provider: Provider, koi
  * pure-lovelace output of at least 5 units must exist in the wallet, and `fetchImpl` is for tests.
  */
 export async function buildReclaim(lucid: LucidEvolution, provider: Provider, koiosUrl: string, p: { changeAddress: string; escrowRef: string; nowMs?: number }, fetchImpl: typeof fetch = fetch)
-  : Promise<VectorUnsignedBuildResult & { buyerLovelace: bigint }> {
-  const { completed, plan } = await buildEscrowSpend(lucid, provider, koiosUrl, p, fetchImpl, {
+  : Promise<VectorUnsignedBuildResult & ReclaimTerms> {
+  const { completed, plan, escrowRef } = await buildEscrowSpend(lucid, provider, koiosUrl, p, fetchImpl, {
     plan: planReclaim,
     pay: (tx, plan) => tx.pay.ToAddress(p.changeAddress, { lovelace: plan.buyerLovelace }),
   });
-  return { ...toBuildResult(completed), buyerLovelace: plan.buyerLovelace };
+  return { ...toBuildResult(completed), escrowRef, supplierPkh: plan.supplierPkh, buyerLovelace: plan.buyerLovelace, buyerRaised: plan.buyerRaised };
 }

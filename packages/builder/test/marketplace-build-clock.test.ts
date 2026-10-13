@@ -54,6 +54,25 @@ describe('Accept and Reclaim on a chain whose slot zero time is not a whole numb
       assert.equal(asked, 2, `${String(bad)}: the second read must reach the node, so the first answer was not cached`);
     }
   });
+  test('Accept and Reclaim on a node whose clock is not a number say that, and not that a request failed', async () => {
+    // the guard's words name the kind of answer and carry nothing the node said, so they are shown as they are
+    const reason = 'The node did not report a usable chain start time (got NaN), so the slot clock was not set.';
+    const withoutClock = <T extends { getSystemStartMs: () => Promise<number> }>(node: T) => Object.assign(node, { getSystemStartMs: async () => Number.NaN });
+    const reclaiming = onThisClock([posted], false);
+    const reclaimNode = withoutClock(reclaiming.provider);
+    await assert.rejects(async () => buildReclaim(await lucidForAddress(reclaimNode, OWN_ADDRESS), reclaimNode, 'https://koios.example', { changeAddress: OWN_ADDRESS, escrowRef: ESCROW_REF, nowMs: OPENS + 5_000 }, reclaiming.koios), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal(err.message, reason);
+      return true;
+    });
+    const accepting = onThisClock([submitted], true);
+    const acceptNode = withoutClock(accepting.provider);
+    await assert.rejects(async () => buildAccept(await lucidForAddress(acceptNode, OWN_ADDRESS), acceptNode, 'https://koios.example', { changeAddress: OWN_ADDRESS, escrowRef: ESCROW_REF, nowMs: SUBMITTED.submitted_at! + 120_000 }, accepting.koios), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal(err.message, reason);
+      return true;
+    });
+  });
   test('Reclaim is refused, saying so, before any transaction is built', async () => {
     const { provider, koios } = onThisClock([posted], false);
     const lucid = await lucidForAddress(provider, OWN_ADDRESS);

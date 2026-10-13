@@ -106,7 +106,7 @@ describe('resolveEscrowLineage', () => {
     for (const [field, change] of changes) {
       // one step down (the Claimed output) and two steps down (the Submitted output)
       for (const [stateName, decoy] of [['Claimed', at(CLAIM_TX, { ...claimedDatum, ...change })], ['Submitted', at(SUBMIT_TX, { ...submitted, ...change })]] as const) {
-        await assert.rejects(() => lineage([decoy]), refusal(new RegExp(`but its datum differs from that escrow's in ${field}, which Claim and Submit leave unchanged; refusing to build on it\.$`), `${decoy.txHash}#0`), `${field}, ${stateName}`);
+        await assert.rejects(() => lineage([decoy]), refusal(new RegExp(`but its datum differs from that escrow's in ${field}, which Claim and Submit leave unchanged; refusing to build on it[.]$`), `${decoy.txHash}#0`), `${field}, ${stateName}`);
       }
     }
     // every changed field is named

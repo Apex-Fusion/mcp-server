@@ -253,11 +253,14 @@ describe('vector_build_marketplace_post_escrow', () => {
     const after = Date.now();
     const j = jsonOf(t);
     assert.ok(t.startsWith('# Unsigned Escrow Post Built (Not Submitted)\n'));
-    // the lock, itemised, and who gets what: the supplier bond is paid to the supplier on Accept, it does not come back
-    assert.equal(lineOf(t, '**Locked:**').replace(/ Reclaim after .*$/, ''),
-      '**Locked:** 2.261030 = price 0.200000 + supplier bond 1.000000 + buyer bond 1.000000 (floored to the min-UTxO of the Submitted datum). On Accept the supplier receives price + supplier bond and your buyer bond returns.');
-    assert.match(lineOf(t, '**Locked:**'), / Reclaim after \d{4}-\d\d-\d\dT[\d:.]+Z returns everything\.$/);
-    assert.ok(!/both bonds/i.test(t), 'never says that both bonds return');
+    // the lock, itemised, and what each ending costs: Accept pays the supplier its bond and returns only the buyer bond; missing
+    // the 600 s window lets the supplier Release and keep price + both bonds (escrow.ak handle_release); Reclaim returns everything
+    assert.equal(lineOf(t, '**Locked:**'),
+      '**Locked:** 2.261030 = price 0.200000 + supplier bond 1.000000 + buyer bond 1.000000 (floored to the min-UTxO of the Submitted datum). ' +
+      'If the supplier submits, accept within 600 s: it receives price + supplier bond and your buyer bond (plus any floor excess) returns. ' +
+      'Miss that window and the supplier may Release and keep price + both bonds. ' +
+      `If it never submits, Reclaim after ${new Date(j.deliver_by).toISOString()} returns everything.`);
+    assert.ok(!/both bonds return/i.test(t), 'never says that both bonds return');
     // the escrow, the payee, the deadline, the payload
     assert.equal(j.escrow_ref, `${j.tx_hash}#0`);
     assert.equal(lineOf(t, '**Escrow ref (after submit):**'), `**Escrow ref (after submit):** \`${j.escrow_ref}\``);
@@ -265,7 +268,6 @@ describe('vector_build_marketplace_post_escrow', () => {
     const window = ADVERT_EXPECTED.max_processing_ms + 180_000;
     assert.ok(j.deliver_by >= before + window && j.deliver_by <= after + window, `deliver_by ${j.deliver_by} is the window plus the buffer from now`);
     assert.equal(lineOf(t, '**Deliver by:**'), `**Deliver by:** ${new Date(j.deliver_by).toISOString()}`);
-    assert.ok(lineOf(t, '**Locked:**').includes(`Reclaim after ${new Date(j.deliver_by).toISOString()} returns`));
     assert.equal(j.prompt_hash, promptHashForPayload('hello'));
     assert.equal(lineOf(t, '**Payload hash:**'), `**Payload hash:** \`${j.prompt_hash}\``);
     assert.equal(j.lock_lovelace, '2261030');
@@ -274,7 +276,7 @@ describe('vector_build_marketplace_post_escrow', () => {
     // the CBOR in the fence is the escrow post: the escrow is output 0
     assert.deepEqual(outputsOf(cborOf(t))[0], { address: ESCROW_ADDRESS, lovelace: ESCROW_LOCKED_LOVELACE });
     askedConfiguredKoios(requested);
-    assert.ok(markdownOf(t).endsWith(`Keep the payload byte-identical when you send the job through the marketplace transport tool. ${SIGN_FLOW}`));
+    assert.ok(markdownOf(t).endsWith(`Keep the payload byte-identical when you send the job through the marketplace transport tool (PR 3). ${SIGN_FLOW}`));
     // the wallet kept an output aside for the script spends, so there is nothing to warn about
     assert.equal(j.collateral_kept, true);
     assert.equal(lineOf(t, '**Collateral kept aside:**'), '**Collateral kept aside:** yes');
@@ -316,8 +318,10 @@ describe('vector_build_marketplace_post_escrow', () => {
     retired.fields[12] = new Constr(1, []);
     stub({ utxos: [advertUtxo(Data.to(retired))] });
     assert.match(await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* is retired; pick another supplier\./);
+    // The supplier's own wallet must hold something on the node, or building stops at "no UTxOs found" before the check is reached.
+    node = new FixtureProvider([{ txHash: FIXTURE_TXHASH, outputIndex: 7, address: SUPPLIER_ADDRESS, assets: { lovelace: 900_000_000n } }]);
     stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)] });
-    assert.match(await callBuild(POST_TOOL, { changeAddress: SUPPLIER_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: /);
+    assert.match(await callBuild(POST_TOOL, { changeAddress: SUPPLIER_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: The buyer cannot be the supplier of the same advert\./);
   });
   test('a deliver_by past the 24 h ceiling (a unit slip) reaches the caller as text; deliver_by_ms stays optional', async () => {
     const micro = Date.now() * 1000;
@@ -349,18 +353,32 @@ function escrowWorld(chain: UTxO[], posted: EscrowDatum, spent: boolean, koios: 
   return k;
 }
 
+// The troubleshooting tips, whole: they name what a missed accept window costs (escrow.ak handle_release: the supplier takes
+// price + supplier bond + buyer bond), and the transport tool by what it will be called in PR 3.
+const ACCEPT_TIPS = '\n\n**Troubleshooting Tips:**\n1. The job must be in Submitted state: check its progress through the marketplace transport tool (PR 3) first\n' +
+  '2. Accept must land within 600 s of Submit; after that the supplier may Release and keep price + both bonds\n3. The wallet needs one pure 5-unit output as collateral';
+const RECLAIM_TIPS = '\n\n**Troubleshooting Tips:**\n1. Reclaim opens only after deliver_by\n' +
+  '2. A Submitted escrow cannot be reclaimed: accept within 600 s of Submit; after that the supplier may Release and keep your buyer bond';
+/** A refusal about where the escrow is must never claim the escrow is over: nothing found is not the same as finished. */
+const ENDED_WORDING = /accepted|released|reclaimed|finished/i;
+/** The refusal itself, without the fixed troubleshooting tips (those say a Submitted escrow "cannot be reclaimed": guidance, not a claim about this escrow). */
+const refusalOf = (t: string): string => { const at = t.indexOf('\n\n**Troubleshooting Tips:**'); return at < 0 ? t : t.slice(0, at); };
+const RAISED = ' (raised to the 1-unit minimum)';
+
 describe('vector_build_marketplace_accept', () => {
-  test('builds the unsigned accept inside the window and says who gets what', async () => {
+  test('builds the unsigned accept inside the window and says which escrow, who gets what and at which key', async () => {
     const now = Date.now();
     const posted = postedAround(now);
     const koios = escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 60_000))], posted, true);
-    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ` ${ESCROW_TX.toUpperCase()}#0 ` });
     const j = jsonOf(t);
     askedConfiguredKoios(koios.calls.map((c) => c.url!));
     assert.ok(t.startsWith('# Unsigned Accept Built (Not Submitted)\n'));
-    assert.equal(lineOf(t, '**Supplier receives:**'), '**Supplier receives:** 1.200000');
+    assert.equal(lineOf(t, '**Escrow:**'), `**Escrow:** \`${ESCROW_REF}\``, 'the canonical ref, whatever case and spacing the caller used');
+    assert.equal(lineOf(t, '**Supplier receives:**'), `**Supplier receives:** 1.200000 at supplier key \`${BASE.supplier_pkh}\``);
     assert.equal(lineOf(t, '**Your bond back:**'), '**Your bond back:** 1.000000');
-    assert.ok(!/both bonds/i.test(t));
+    assert.ok(!/both bonds return/i.test(t) && !t.includes('raised'));
+    assert.deepEqual([j.escrow_ref, j.supplier_pkh], [ESCROW_REF, BASE.supplier_pkh]);
     assert.deepEqual([j.supplier_lovelace, j.buyer_lovelace], ['1200000', '1000000']);
     assert.ok(j.seconds_left > 530 && j.seconds_left <= 540, `seconds_left ${j.seconds_left}: 600 s from the Submit, which was 60 s ago`);
     assert.ok(!t.includes('Hurry'));
@@ -383,8 +401,31 @@ describe('vector_build_marketplace_accept', () => {
     const submitted = submittedAt(BASE, BASE.posted_at + 60_000); // the live August escrow: its window closed long ago
     escrowWorld([escrowAt(SUBMIT_TX, submitted)], BASE, true);
     const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
-    assert.ok(t.startsWith(`Failed to build accept: Accept window closed at ${new Date(submitted.submitted_at! + 600_000).toISOString()}; the supplier may now Release. (escrow ${ESCROW_REF})\n\n**Troubleshooting Tips:**\n1. The job must be in Submitted state`), t);
-    assert.ok(!t.includes('Unsigned'));
+    assert.equal(t, `Failed to build accept: Accept window closed at ${new Date(submitted.submitted_at! + 600_000).toISOString()}; the supplier may now Release. (escrow ${ESCROW_REF})${ACCEPT_TIPS}`);
+  });
+  test('says when a payout was raised to the 1-unit minimum: the supplier\'s, and the buyer bond', async () => {
+    const now = Date.now();
+    const low = postedAround(now, { payment_lovelace: 100_000n, supplier_bond_lovelace: 100_000n, buyer_bond_lovelace: 500_000n });
+    escrowWorld([escrowAt(SUBMIT_TX, submittedAt(low, now - 60_000))], low, true);
+    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    assert.equal(lineOf(t, '**Supplier receives:**'), `**Supplier receives:** 1.000000${RAISED} at supplier key \`${BASE.supplier_pkh}\``);
+    assert.equal(lineOf(t, '**Your bond back:**'), `**Your bond back:** 1.000000${RAISED}`);
+    assert.deepEqual([jsonOf(t).supplier_lovelace, jsonOf(t).buyer_lovelace], ['1000000', '1000000']);
+  });
+  test('an escrow with no live continuation is a text refusal that does not call the escrow over', async () => {
+    escrowWorld([], postedAround(Date.now()), true); // Koios says the Post output is spent, and nothing carries the escrow on
+    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    assert.equal(t, `Failed to build accept: No live continuation of escrow ${ESCROW_REF} found (spent, or not yet indexed); retry or check the explorer.${ACCEPT_TIPS}`);
+    assert.doesNotMatch(refusalOf(t), ENDED_WORDING);
+  });
+  test('a continuation that follows the spend chain but changes what Claim and Submit keep is refused as text, naming the field', async () => {
+    const now = Date.now();
+    const posted = postedAround(now);
+    const inflated = { ...submittedAt(posted, now - 60_000), payment_lovelace: posted.payment_lovelace + 1_000_000n };
+    escrowWorld([escrowAt(SUBMIT_TX, inflated)], posted, true);
+    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    assert.equal(t, `Failed to build accept: UTxO ${SUBMIT_TX}#0 follows escrow ${ESCROW_REF} along the spend chain, but its datum differs from that escrow's in payment_lovelace, which Claim and Submit leave unchanged; refusing to build on it.${ACCEPT_TIPS}`);
+    assert.doesNotMatch(refusalOf(t), ENDED_WORDING);
   });
   test('a ref that is not an escrow ref, or an escrow of another buyer, is a text refusal', async () => {
     const now = Date.now();
@@ -401,11 +442,13 @@ describe('vector_build_marketplace_reclaim', () => {
     const now = Date.now();
     const posted = postedAround(now, { deliver_by: now - 300_000 });
     const koios = escrowWorld([escrowAt(ESCROW_TX, posted)], posted, false);
-    const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ` ${ESCROW_TX.toUpperCase()}#0 ` });
     assert.ok(t.startsWith('# Unsigned Reclaim Built (Not Submitted)\n'));
     askedConfiguredKoios(koios.calls.map((c) => c.url!));
+    assert.equal(lineOf(t, '**Escrow:**'), `**Escrow:** \`${ESCROW_REF}\``, 'the canonical ref, whatever case and spacing the caller used');
     assert.equal(lineOf(t, '**Returned to you:**'), '**Returned to you:** 2.200000 (price + supplier bond + buyer bond), and whatever else the escrow holds, as change');
     assert.equal(jsonOf(t).buyer_lovelace, '2200000');
+    assert.equal(jsonOf(t).escrow_ref, ESCROW_REF);
     assert.ok(outputsOf(cborOf(t)).some((o) => o.address === OWN_ADDRESS && o.lovelace === 2_200_000n));
     assert.ok(markdownOf(t).endsWith(SIGN_FLOW));
   });
@@ -415,15 +458,28 @@ describe('vector_build_marketplace_reclaim', () => {
     escrowWorld([escrowAt(ESCROW_TX, posted)], posted, false);
     const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
     const opens = Math.ceil((posted.deliver_by + 1) / 1000) * 1000;
-    assert.ok(t.startsWith(`Failed to build reclaim: Reclaim opens at ${new Date(opens).toISOString()}: deliver_by is ${new Date(posted.deliver_by).toISOString()}, and the validity range may start only on a whole second after it. (escrow ${ESCROW_REF})\n\n**Troubleshooting Tips:**\n1. Reclaim opens only after deliver_by`), t);
-    assert.ok(!t.includes('Unsigned'));
+    assert.equal(t, `Failed to build reclaim: Reclaim opens at ${new Date(opens).toISOString()}: deliver_by is ${new Date(posted.deliver_by).toISOString()}, and the validity range may start only on a whole second after it. (escrow ${ESCROW_REF})${RECLAIM_TIPS}`);
+  });
+  test('says when the payout was raised to the 1-unit minimum', async () => {
+    const now = Date.now();
+    const low = postedAround(now, { deliver_by: now - 300_000, payment_lovelace: 100_000n, supplier_bond_lovelace: 100_000n, buyer_bond_lovelace: 100_000n });
+    escrowWorld([escrowAt(ESCROW_TX, low)], low, false);
+    const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    assert.equal(lineOf(t, '**Returned to you:**'), `**Returned to you:** 1.000000${RAISED} (price + supplier bond + buyer bond), and whatever else the escrow holds, as change`);
+    assert.equal(jsonOf(t).buyer_lovelace, '1000000');
+  });
+  test('an escrow with no live continuation is a text refusal that does not call the escrow over', async () => {
+    escrowWorld([], postedAround(Date.now(), { deliver_by: Date.now() - 300_000 }), true);
+    const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    assert.equal(t, `Failed to build reclaim: No live continuation of escrow ${ESCROW_REF} found (spent, or not yet indexed); retry or check the explorer.${RECLAIM_TIPS}`);
+    assert.doesNotMatch(refusalOf(t), ENDED_WORDING);
   });
   test('a Submitted escrow cannot be reclaimed: the refusal says so, as text', async () => {
     const now = Date.now();
     const posted = postedAround(now, { deliver_by: now - 300_000 });
     escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 60_000))], posted, true);
     const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
-    assert.match(t, /^Failed to build reclaim: Escrow state is Submitted; Reclaim needs Open or Claimed\. \(escrow /);
+    assert.equal(t, `Failed to build reclaim: Escrow state is Submitted; Reclaim needs Open or Claimed. (escrow ${ESCROW_REF})${RECLAIM_TIPS}`);
   });
 });
 

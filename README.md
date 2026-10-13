@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks, exposing all 30 tools:
+Hosted instances run on both networks. The 30 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
 
 | Network | Endpoint |
 |---------|----------|

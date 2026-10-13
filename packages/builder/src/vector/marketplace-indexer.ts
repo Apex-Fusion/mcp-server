@@ -103,8 +103,10 @@ export async function koiosUtxoInfo(koiosUrl: string, refs: string[], fetchImpl:
  * the server's own cap or a capped page would be taken for the last one. `datumContains` (hex) narrows the read on the server to
  * outputs whose inline datum contains it, which keeps a call small however many outputs the credential holds; the caller still
  * checks every row it gets. A row listed on two pages (the set can shift while it is read) is returned once. At most `maxRows`
- * entries are read, counting everything Koios sent whether or not it is a usable row, and past that the read is refused: a Koios
- * that sends full pages of junk, or the same page again and again, cannot keep it going. Errors name the operation and the status only.
+ * entries are read, counting everything Koios sent whether or not it is a usable row: the last page asked for is cut to what the
+ * cap leaves, and a full page that reaches the cap is refused, as it cannot say there is no more. A Koios that sends full pages
+ * of junk, or the same page again and again, cannot keep the read going. `pageSize` and `maxRows` must be positive whole numbers.
+ * Errors name the operation and the status only.
  */
 export async function koiosCredentialUtxos(
   koiosUrl: string, paymentCredential: string, fetchImpl: typeof fetch = fetch,
@@ -119,12 +121,15 @@ export async function koiosCredentialUtxos(
   }
   const pageSize = opts.pageSize ?? 100;
   const maxRows = opts.maxRows ?? 5_000;
-  // With a page size below one every page would count as full and add nothing to `read`: the loop below could not end.
+  // With a page size below one every page would count as full and add nothing to `read`: the loop below could not end. A cap
+  // that is not a finite whole number of at least one is no cap.
   if (!Number.isInteger(pageSize) || pageSize < 1) throw new Error('The page size must be a positive whole number.');
+  if (!Number.isInteger(maxRows) || maxRows < 1) throw new Error('The row limit must be a positive whole number.');
   const rows = new Map<string, KoiosUtxo>(); // by ref, in the order first seen
-  let read = 0;
-  for (let offset = 0; ; offset += pageSize) {
-    const page = await koiosPostList(koiosUrl, 'credential_utxos', { _payment_credentials: [credential], _extended: true }, fetchImpl, `?order=tx_hash.asc,tx_index.asc&offset=${offset}&limit=${pageSize}${filter}`);
+  let read = 0; // entries Koios has sent so far, which is also where the next page starts
+  for (;;) {
+    const limit = Math.min(pageSize, maxRows - read); // never ask for more than the cap leaves
+    const page = await koiosPostList(koiosUrl, 'credential_utxos', { _payment_credentials: [credential], _extended: true }, fetchImpl, `?order=tx_hash.asc,tx_index.asc&offset=${read}&limit=${limit}${filter}`);
     read += page.length;
     for (const entry of page) {
       const row = entry as Partial<KoiosUtxo> | null;
@@ -132,7 +137,7 @@ export async function koiosCredentialUtxos(
       const ref = `${row.tx_hash.toLowerCase()}#${row.tx_index}`;
       if (!rows.has(ref)) rows.set(ref, row as KoiosUtxo);
     }
-    if (page.length < pageSize) return [...rows.values()];
+    if (page.length < limit) return [...rows.values()];
     if (read >= maxRows) throw new Error(`Koios credential_utxos: ${maxRows} or more outputs matched; refusing to read them all`);
   }
 }
