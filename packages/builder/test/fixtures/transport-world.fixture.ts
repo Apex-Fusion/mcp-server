@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { CML, Constr, Data, fromText, getAddressDetails } from '@lucid-evolution/lucid';
 import type { UTxO } from '@lucid-evolution/lucid';
-import { ADVERT_ADDRESS, ESCROW_ADDRESS } from '../../src/vector/marketplace-constants.ts';
+import { ADVERT_ADDRESS, ESCROW_ADDRESS, INDEXER_URL } from '../../src/vector/marketplace-constants.ts';
 import { canonicalize, decodeEscrowDatum, encodeEscrowDatum, promptHashForPayload } from '../../src/vector/marketplace-datum.ts';
 import type { EscrowDatum } from '../../src/vector/marketplace-datum.ts';
 import { sendJob, getJob, verifyJob } from '../../src/vector/marketplace-transport.ts';
@@ -60,6 +60,17 @@ function advertDatum(over: { capability_id?: string; endpoint_url?: string; stat
   return Data.to(c);
 }
 
+/** What the indexer lists for an escrow output: the row of its datum, as `GET /escrows?buyer=` shapes it. */
+export const indexerRowOf = (utxoRef: string, d: EscrowDatum, over: Record<string, unknown> = {}) => ({
+  utxo_ref: utxoRef, buyer_pkh: d.buyer_pkh, supplier_pkh: d.supplier_pkh, advert_ref: `${d.advert_ref.txHash}#${d.advert_ref.index}`, capability_id: d.capability_id,
+  request_spec_hash: d.request_spec_hash, prompt_hash: d.prompt_hash, payment_lovelace: String(d.payment_lovelace), buyer_bond_lovelace: String(d.buyer_bond_lovelace),
+  supplier_bond_lovelace: String(d.supplier_bond_lovelace), deliver_by: d.deliver_by, posted_at: d.posted_at, submitted_at: d.submitted_at, result_receipt_hash: d.result_receipt_hash,
+  state: d.state, created_slot: 1, ...over,
+});
+/** The receipt hash of the decoy Submitted output, and where it is. */
+export const DECOY_SUBMITTED_HASH = 'dc'.repeat(32);
+export const DECOY_SUBMITTED_REF = `${DECOY_TX}#0`;
+
 export interface Scenario {
   capability?: string; endpoint?: string; escrow?: 'open' | 'claimed' | 'submitted' | 'finished';
   /**
@@ -77,6 +88,19 @@ export interface Scenario {
   receiptHash?: string;
   /** Koios reports the Submitted output as spent when it is read by its ref (the Accept landed after the lineage was resolved). */
   submittedSpent?: boolean;
+  /**
+   * The marketplace indexer: the rows `GET /escrows?buyer=` answers with (default: a row for each state the escrow reached, as the
+   * real one lists them, kept after the output is spent, and a row for the decoy when there is one), the rows a function makes of the
+   * honest ones and the decoy's, or a failing answer: a status, a body that is no JSON, a failed connection.
+   */
+  indexer?: { rows?: unknown[] | ((honest: unknown[], decoy: unknown) => unknown[]); status?: number; raw?: string; fails?: Error };
+  /**
+   * A copy of the escrow's Submitted output with a receipt hash of its own (DECOY_SUBMITTED_HASH), locked at the escrow credential by
+   * a transaction that spent no escrow output (DECOY_TX): Koios knows it, the indexer lists it, and nothing links it to the escrow.
+   */
+  decoySubmitted?: boolean;
+  /** The receipt hash that decoy carries (default DECOY_SUBMITTED_HASH): a test makes it the hash of a receipt it forged. */
+  decoyHash?: string;
   /**
    * Who funded the Post transaction, as Koios tx_info reports its inputs: the buyer (default), a stranger only, a stranger and the
    * buyer, nobody Koios knows (the transaction is unknown to it), or Koios failing to answer ('koios-error' needs escrow: 'open'
@@ -101,16 +125,22 @@ export function scenario(o: Scenario = {}) {
   const own: UTxO[] = o.names === 'accepted-output'
     ? [escrowAt(CLAIM_TX, accepted)]
     : { open: [escrowAt(ESCROW_TX, posted)], claimed: [escrowAt(CLAIM_TX, claimed)], submitted: [escrowAt(SUBMIT_TX, submitted)], finished: [] }[state];
-  const chain: UTxO[] = [...own, ...(o.decoy ? [escrowAt(DECOY_TX, claimed)] : [])];
+  const decoySubmitted: EscrowDatum = { ...submitted, result_receipt_hash: o.decoyHash ?? DECOY_SUBMITTED_HASH };
+  const chain: UTxO[] = [...own, ...(o.decoy ? [escrowAt(DECOY_TX, claimed)] : []), ...(o.decoySubmitted ? [escrowAt(DECOY_TX, decoySubmitted)] : [])];
   const funder = o.funder ?? 'buyer';
   const postInputs = POST_INPUTS[funder]; // undefined: Koios does not know the Post transaction
-  const koiosOptions = { txs: { ...GENUINE_TXS, ...(o.decoy ? DECOY_TXS : {}), ...(postInputs ? { [ESCROW_TX]: postInputs } : {}) }, ...(funder === 'koios-error' ? { txStatus: 502 } : {}) };
+  const koiosOptions = { txs: { ...GENUINE_TXS, ...(o.decoy || o.decoySubmitted ? DECOY_TXS : {}), ...(postInputs ? { [ESCROW_TX]: postInputs } : {}) }, ...(funder === 'koios-error' ? { txStatus: 502 } : {}) };
   const laterOutputRow = (datum: EscrowDatum) => ({ tx_hash: CLAIM_TX, tx_index: 0, address: ESCROW_ADDRESS, value: String(ESCROW_LOCKED_LOVELACE), is_spent: false, inline_datum: { bytes: encodeEscrowDatum(datum) } });
   // utxo_info answers with these rows for any ref and each reader picks its own: the Post output, and the Submitted one when there is one
   const outputRow = (txHash: string, datum: EscrowDatum, spent: boolean) => ({ tx_hash: txHash, tx_index: 0, address: ESCROW_ADDRESS, value: String(ESCROW_LOCKED_LOVELACE), is_spent: spent, inline_datum: { bytes: encodeEscrowDatum(datum) } });
   const w = o.names === 'claimed-output' ? world(chain, { ...koiosOptions, rows: [laterOutputRow(claimed)] })
     : o.names === 'accepted-output' ? world(chain, { ...koiosOptions, rows: [laterOutputRow(accepted)] })
-    : world(chain, { ...koiosOptions, rows: [outputRow(ESCROW_TX, posted, state !== 'open'), ...(state === 'submitted' ? [outputRow(SUBMIT_TX, submitted, o.submittedSpent ?? false)] : [])] });
+    : world(chain, { ...koiosOptions, rows: [
+      outputRow(ESCROW_TX, posted, state !== 'open'),
+      ...(state === 'submitted' ? [outputRow(SUBMIT_TX, submitted, o.submittedSpent ?? false)] : []),
+      ...(state === 'finished' ? [outputRow(SUBMIT_TX, submitted, true)] : []), // the Accept spent it, and Koios keeps its datum
+      ...(o.decoySubmitted ? [outputRow(DECOY_TX, decoySubmitted, false)] : []),
+    ] });
   const advert = o.advert ?? {};
   const advertRow: Record<string, unknown> = {
     tx_hash: ADVERT_TX, tx_index: 0, address: advert.address ?? ADVERT_ADDRESS, value: '2000000', is_spent: advert.spent ?? false,
@@ -119,6 +149,12 @@ export function scenario(o: Scenario = {}) {
   if (advert.spentUnreported) delete advertRow.is_spent; // Koios leaves the field out when it does not know
   const sup = supplier(o.answer);
   const advertUrls: string[] = [];
+  const indexerUrls: string[] = [];
+  const reached: Array<[string, EscrowDatum]> = [[ESCROW_REF, posted], ...(state === 'open' ? [] : [[`${CLAIM_TX}#0`, claimed] as [string, EscrowDatum]]), ...(state === 'submitted' || state === 'finished' ? [[`${SUBMIT_TX}#0`, submitted] as [string, EscrowDatum]] : [])];
+  const honestRows = reached.map(([ref, d]) => indexerRowOf(ref, d));
+  const decoyRow = indexerRowOf(DECOY_SUBMITTED_REF, decoySubmitted);
+  const indexer = o.indexer ?? {};
+  const indexerRows = typeof indexer.rows === 'function' ? indexer.rows(honestRows, decoyRow) : indexer.rows ?? [...honestRows, ...(o.decoySubmitted ? [decoyRow] : [])];
   const fetchImpl = (async (url: string, init: { body: string }) => {
     const u = String(url);
     if (u.endsWith('/api/v1/utxo_info') && (JSON.parse(init.body)._utxo_refs as string[]).includes(ADVERT_REF)) {
@@ -126,6 +162,12 @@ export function scenario(o: Scenario = {}) {
       if (advert.unreachable) throw new TypeError('fetch failed: connect ECONNREFUSED internal.koios.example:443 password=hunter2');
       if (advert.httpStatus) return new Response(HOSTILE, { status: advert.httpStatus });
       return new Response(JSON.stringify(advert.missing ? [] : [advertRow]), { status: 200 });
+    }
+    if (u.startsWith(`${INDEXER_URL}/escrows`)) {
+      indexerUrls.push(u);
+      if (indexer.fails) throw indexer.fails;
+      if (indexer.status) return new Response(HOSTILE, { status: indexer.status });
+      return new Response(indexer.raw ?? JSON.stringify(indexerRows), { status: 200 });
     }
     if (u.endsWith('/api/v1/tx_info') && funder === 'unreachable' && (JSON.parse(init.body)._tx_hashes as string[]).includes(ESCROW_TX)) {
       throw new TypeError('fetch failed: connect ECONNREFUSED internal.koios.example:443 password=hunter2');
@@ -136,6 +178,8 @@ export function scenario(o: Scenario = {}) {
   const named = o.names === 'claimed-output' || o.names === 'accepted-output' ? `${CLAIM_TX}#0` : ESCROW_REF;
   return {
     sup, koios: w.koios, posted, named, advertUrls: () => advertUrls, advertReads: () => advertUrls.length,
+    /** The URLs asked of the marketplace indexer. */
+    indexerCalls: () => indexerUrls,
     /** The tx_info questions asked about the Post transaction (who funded it). */
     fundingChecks: () => w.koios.calls.filter((c) => c.path === '/api/v1/tx_info' && (c.body._tx_hashes as string[]).includes(ESCROW_TX)).map((c) => c.body),
     send: (over: Partial<Parameters<typeof sendJob>[2]> = {}) => sendJob(w.node, KOIOS, { escrowRef: named, payload: PAYLOAD, buyerAddress: OWN_ADDRESS, ...over }, fetchImpl),

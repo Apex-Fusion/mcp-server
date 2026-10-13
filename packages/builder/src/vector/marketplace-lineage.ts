@@ -165,6 +165,69 @@ export async function readEscrowOutput(koiosUrl: string, escrowRef: string, fetc
   return { datum, spent: row.is_spent, lovelace };
 }
 
+// ─── The Submitted output of an escrow that may be settled ──────────────────────────────────────────────────────────────────────
+// resolveEscrowLineage finds the live output of an escrow, and a settled escrow has none: its Submitted output was spent by the
+// Accept or the Release. The marketplace indexer keeps a row for every state an escrow reached, so it can say where that output was;
+// but it is a third party's list, and anyone can lock a copy of an escrow's fields at the escrow address. So an output named by the
+// indexer (or by a caller) is used only after readSubmittedOutput has read it from Koios and proven it the escrow's own.
+
+const lowerText = (v: unknown): string | undefined => (typeof v === 'string' ? v.toLowerCase() : undefined);
+
+/**
+ * Which of the rows the indexer lists for an escrow's buyer put forward a Submitted output of the escrow whose Post datum is
+ * `posted`? A row counts when its state is Submitted and it agrees with the Post datum on every field escrow.ak keeps across Claim and
+ * Submit: buyer, supplier, advert, capability, request spec hash, prompt hash, the three amounts, deliver_by and posted_at. The same
+ * buyer hiring the same supplier with the same payload again differs from an earlier escrow in posted_at and deliver_by alone, and
+ * does it often. The refs come back canonical, sorted and once each; an entry that is no row, or has no usable utxo_ref, is skipped.
+ */
+export function submittedRefsOf(rows: unknown[], posted: EscrowDatum): string[] {
+  const advert = formatOutRef(posted.advert_ref.txHash, posted.advert_ref.index);
+  const refs = new Set<string>();
+  for (const entry of rows) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const r = entry as Record<string, unknown>;
+    if (r.state !== 'Submitted' || typeof r.utxo_ref !== 'string') continue;
+    let ref: string;
+    try { const parsed = parseOutRef(r.utxo_ref); ref = formatOutRef(parsed.txHash, parsed.outputIndex); } catch { continue; }
+    const agrees = lowerText(r.buyer_pkh) === posted.buyer_pkh && lowerText(r.supplier_pkh) === posted.supplier_pkh
+      && lowerText(r.advert_ref) === advert && r.capability_id === posted.capability_id
+      && lowerText(r.request_spec_hash) === posted.request_spec_hash && lowerText(r.prompt_hash) === posted.prompt_hash
+      && lovelaceOf(r.payment_lovelace) === posted.payment_lovelace && lovelaceOf(r.buyer_bond_lovelace) === posted.buyer_bond_lovelace
+      && lovelaceOf(r.supplier_bond_lovelace) === posted.supplier_bond_lovelace
+      && r.deliver_by === posted.deliver_by && r.posted_at === posted.posted_at;
+    if (agrees) refs.add(ref);
+  }
+  return [...refs].sort();
+}
+
+/**
+ * The output `submittedRef` as the Submitted output of the escrow whose Post output is `post`, live or spent. It is read from Koios
+ * utxo_info (readEscrowOutput: at the escrow credential, an escrow datum, funded; Koios keeps the datum of an output after the Accept
+ * or the Release, so nothing here needs it unspent) and used only if it is provably the escrow's own. The datum is not enough: its
+ * fields are public and anyone can lock a copy. What a copy cannot fake is how it came to be, so it must also (1) be in state
+ * Submitted with a receipt hash, (2) agree with the Post datum on every field Claim and Submit keep, (3) hold what the Post output
+ * held, and (4) descend from the Post output by the spend chain (descendantsOf: its transaction spent a Claimed output that the
+ * escrow's Claim made, two calls to tx_info). Whoever named the ref, the indexer or a caller, these checks are the same. Throws, naming
+ * the output and the escrow, when any fails or Koios cannot say.
+ */
+export async function readSubmittedOutput(
+  koiosUrl: string, post: { ref: string; datum: EscrowDatum; lovelace: bigint }, submittedRef: string, fetchImpl: typeof fetch = fetch,
+): Promise<{ datum: EscrowDatum; receiptHash: string; spent: boolean; ref: string }> {
+  const parsed = parseOutRef(submittedRef);
+  const at = formatOutRef(parsed.txHash, parsed.outputIndex);
+  const out = await readEscrowOutput(koiosUrl, at, fetchImpl);
+  const { datum } = out;
+  if (datum.state !== 'Submitted') throw new Error(`UTxO ${at} is not a Submitted output: its datum is in state ${datum.state}.`);
+  if (datum.result_receipt_hash === null) throw new Error(`UTxO ${at} is a Submitted output without a receipt hash.`);
+  const changed = changedFieldsOf(post.datum, datum);
+  if (changed.length > 0) throw new Error(`UTxO ${at} does not belong to escrow ${post.ref}: its datum differs from that escrow's in ${changed.join(', ')}, which Claim and Submit leave unchanged.`);
+  if (out.lovelace !== post.lovelace) throw new Error(`UTxO ${at} does not belong to escrow ${post.ref}: it holds ${out.lovelace} lovelace where the Post output held ${post.lovelace}.`);
+  const { genuine, unknown } = await descendantsOf(post.ref, post.datum, [{ txHash: parsed.txHash, outputIndex: parsed.outputIndex, datum }], koiosUrl, fetchImpl);
+  if (unknown.length > 0) throw new Error(`Cannot tell whether UTxO ${at} belongs to escrow ${post.ref}: Koios does not know the transaction behind it yet; retry in a few seconds.`);
+  if (genuine.length === 0) throw new Error(`UTxO ${at} does not belong to escrow ${post.ref}: it carries the escrow's fields, but it does not descend from that escrow by the spend chain.`);
+  return { datum, receiptHash: datum.result_receipt_hash, spent: out.spent, ref: at };
+}
+
 /**
  * Where is this escrow now? `escrowRef` names the Post output (`<txHash>#0`, as buildPostEscrow returns it); a later output of
  * the same escrow works too. While that output is unspent it is the live escrow. Once it is spent, the live one is the UTxO

@@ -163,7 +163,7 @@ limitations.
 | `vector_build_marketplace_reclaim` | Build an unsigned reclaim of an Open or Claimed escrow once deliver_by has passed: everything returns to you (keyless) |
 | `vector_marketplace_send_job` | Send your payload to the supplier of a posted escrow and get a job id. Template-contract suppliers only; the wallet must have posted and funded the escrow; waits up to 90 s for the supplier to answer |
 | `vector_marketplace_get_job` | Poll a job: pending, failed, or done with the result and the supplier's signed receipt. Template-contract suppliers only; works after the escrow is accepted or released; waits up to 20 s |
-| `vector_marketplace_verify_receipt` | Check a receipt without trusting the supplier: the escrow, the result's hash, the supplier's key, the Ed25519 signature and the hash the supplier committed on chain. Run it before accepting (read-only; the supplier's key is read from its `/capability` unless you pass it) |
+| `vector_marketplace_verify_receipt` | Check a receipt without trusting the supplier: the escrow, the result's hash, the supplier's key, the Ed25519 signature and the hash the supplier committed on chain, plus an extra row for the request the receipt was made for. Works before and after the Accept: a settled escrow's Submitted output is located through the marketplace indexer and proven by the spend chain (read-only; the supplier's key is read from its `/capability` unless you pass it) |
 
 Agent DIDs follow the format: `did:vector:agent:{policyId}:{nftAssetName}`
 

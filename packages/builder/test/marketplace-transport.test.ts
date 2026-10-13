@@ -29,15 +29,17 @@
 import { describe, test, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { ESCROW_ADDRESS } from '../src/vector/marketplace-constants.ts';
+import { ADVERT_ADDRESS, ESCROW_ADDRESS, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
+import { ESCROWS_MAX_BYTES } from '../src/vector/marketplace-indexer.ts';
 import { canonicalize, decodeEscrowDatum, encodeEscrowDatum, promptHashForPayload, wirePayloadFor } from '../src/vector/marketplace-datum.ts';
+import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
 import { enterpriseAddressOf } from '../src/vector/marketplace-build.ts';
 import { ROUTES, routeFor, parseJobResponse, sendJob, getJob, verifyReceipt, verifyJob, fetchManifest } from '../src/vector/marketplace-transport.ts';
 import type { Route, VerifyInput, ReceiptVerdict } from '../src/vector/marketplace-transport.ts';
 import { ADVERT_EXPECTED, ADVERT_REF, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
 import { OWN_ADDRESS } from './fixtures/fixture-provider.ts';
-import { world, credentialRequests, ESCROW_TX, CLAIM_TX, SUBMIT_TX, SUPPLIER_ADDRESS } from './fixtures/escrow-koios.fixture.ts';
-import { KOIOS, PAYLOAD, SUPPLIER, JOB_ID, HOSTILE, reply, accepted, BUYER_PKH, MAY_HAVE_CLAIMED, scenario, SUPPLIER_KEY, OTHER_KEY, pkhOf, pubHexOf, RESULT, receiptOf, signWith, committedHash } from './fixtures/transport-world.fixture.ts';
+import { world, credentialRequests, txInfoRequests, ESCROW_TX, CLAIM_TX, SUBMIT_TX, SUPPLIER_ADDRESS } from './fixtures/escrow-koios.fixture.ts';
+import { KOIOS, PAYLOAD, SUPPLIER, JOB_ID, HOSTILE, reply, accepted, BUYER_PKH, MAY_HAVE_CLAIMED, scenario, DECOY_SUBMITTED_REF, SUPPLIER_KEY, OTHER_KEY, pkhOf, pubHexOf, RESULT, receiptOf, signWith, committedHash } from './fixtures/transport-world.fixture.ts';
 import type { Call, Scenario } from './fixtures/transport-world.fixture.ts';
 
 const SUBMITTED_REF = `${'ee'.repeat(32)}#0`;
@@ -910,22 +912,25 @@ describe('a supplier that never answers', () => {
 });
 
 // ─── verifying a receipt ─────────────────────────────────────────────────────────────────────────────────────────────────────────
-// A receipt is checked five ways, and "verified" is said only when all five pass. The signed receipts here are made the way the
-// template's supplier makes them: the eight fields, Ed25519 over canonicalize(receipt), and a result_receipt_hash on chain that is
-// sha256(canonicalize({receipt, signature})).
+// A receipt is checked five ways and one more, and "verified" is said only when every row passes. The signed receipts here are made the
+// way the template's supplier makes them: the eight fields, Ed25519 over canonicalize(receipt), and a result_receipt_hash on chain that
+// is sha256(canonicalize({receipt, signature})).
 const statesOf = (v: ReceiptVerdict) => Object.fromEntries(Object.entries(v.checks).map(([name, c]) => [name, c.state]));
-const PASSING = { escrow_ref_matches: 'pass', response_hash_matches: 'pass', supplier_key_matches: 'pass', signature_valid: 'pass', on_chain_hash_matches: 'pass' };
+const PASSING = { escrow_ref_matches: 'pass', response_hash_matches: 'pass', supplier_key_matches: 'pass', signature_valid: 'pass', on_chain_hash_matches: 'pass', prompt_hash_matches: 'pass' };
 
 describe('verifyReceipt', () => {
   const receipt = receiptOf(SUPPLIER_KEY, ESCROW_REF);
   const signature = signWith(SUPPLIER_KEY, receipt);
   const onChain = committedHash(receipt, signature);
-  const good: VerifyInput = { receipt, signature, escrowRef: ESCROW_REF, result: RESULT, supplierPubKeyHex: pubHexOf(SUPPLIER_KEY), escrowSupplierPkh: pkhOf(SUPPLIER_KEY), resultReceiptHashOnChain: onChain };
+  const good: VerifyInput = {
+    receipt, signature, escrowRef: ESCROW_REF, result: RESULT, supplierPubKeyHex: pubHexOf(SUPPLIER_KEY), escrowSupplierPkh: pkhOf(SUPPLIER_KEY),
+    escrowPromptHash: promptHashForPayload(PAYLOAD), resultReceiptHashOnChain: onChain,
+  };
 
-  test('a good receipt passes the five checks, in the design\'s order, and is verified', () => {
+  test('a good receipt passes the five checks, in the design\'s order, and the extra row, and is verified', () => {
     const v = verifyReceipt(good);
     assert.equal(v.verdict, 'verified');
-    assert.deepEqual(Object.keys(v.checks), ['escrow_ref_matches', 'response_hash_matches', 'supplier_key_matches', 'signature_valid', 'on_chain_hash_matches']);
+    assert.deepEqual(Object.keys(v.checks), ['escrow_ref_matches', 'response_hash_matches', 'supplier_key_matches', 'signature_valid', 'on_chain_hash_matches', 'prompt_hash_matches']);
     assert.deepEqual(statesOf(v), PASSING);
     for (const c of Object.values(v.checks)) assert.equal(c.note, '');
   });
@@ -1062,7 +1067,7 @@ describe('verifyReceipt', () => {
     test('no hash to compare is a skipped check, with the reason it is given or a plain one, and never "verified"', () => {
       const plain = verifyReceipt({ ...good, resultReceiptHashOnChain: null });
       assert.deepEqual(statesOf(plain), { ...PASSING, on_chain_hash_matches: 'skipped' });
-      assert.equal(plain.checks.on_chain_hash_matches.note, 'no Submitted escrow output was found');
+      assert.equal(plain.checks.on_chain_hash_matches.note, 'Submitted output not locatable');
       assert.equal(plain.verdict, 'incomplete');
       const told = verifyReceipt({ ...good, resultReceiptHashOnChain: null, onChainNote: 'the escrow is Claimed' });
       assert.equal(told.checks.on_chain_hash_matches.note, 'the escrow is Claimed');
@@ -1079,10 +1084,11 @@ describe('verifyReceipt', () => {
       const v = verifyReceipt({ ...good, result: undefined, resultReceiptHashOnChain: null });
       assert.equal(v.verdict, 'incomplete');
     });
-    test('"verified" is the verdict of a receipt only when every one of the five passed', () => {
+    test('"verified" is the verdict of a receipt only when every row passed, the extra one included', () => {
       const breaks: Array<[string, Partial<VerifyInput>]> = [
         ['escrow', { escrowRef: `${'b'.repeat(64)}#0` }], ['result', { result: 'x' }], ['no result', { result: undefined }], ['key', { supplierPubKeyHex: pubHexOf(OTHER_KEY) }],
         ['escrow supplier', { escrowSupplierPkh: pkhOf(OTHER_KEY) }], ['signature', { signature: signWith(OTHER_KEY, receipt) }], ['chain', { resultReceiptHashOnChain: 'cd'.repeat(32) }], ['no chain', { resultReceiptHashOnChain: null }],
+        ['prompt', { escrowPromptHash: 'ab'.repeat(32) }],
       ];
       for (const [name, change] of breaks) assert.notEqual(verifyReceipt({ ...good, ...change }).verdict, 'verified', name);
     });
@@ -1097,7 +1103,30 @@ describe('verifyReceipt', () => {
     }
     // with no report text and nothing on chain, those two checks have nothing to read it for
     const v = verifyReceipt({ ...good, receipt: null, result: undefined, resultReceiptHashOnChain: null });
-    assert.deepEqual(statesOf(v), { escrow_ref_matches: 'fail', response_hash_matches: 'skipped', supplier_key_matches: 'fail', signature_valid: 'fail', on_chain_hash_matches: 'skipped' });
+    assert.deepEqual(statesOf(v), { escrow_ref_matches: 'fail', response_hash_matches: 'skipped', supplier_key_matches: 'fail', signature_valid: 'fail', on_chain_hash_matches: 'skipped', prompt_hash_matches: 'fail' });
+  });
+
+  // Not one of the design's five, and it counts all the same: a receipt made for another request is not a good one. The template
+  // checks the request against the escrow's prompt_hash before it claims, so for a template supplier the two always agree.
+  describe('extra: the receipt prompt_hash equals the escrow prompt_hash', () => {
+    test('a receipt made for another request fails that row only, and the verdict with it', () => {
+      const r = receiptOf(SUPPLIER_KEY, ESCROW_REF, RESULT, { prompt_hash: promptHashForPayload('another request') });
+      const sig = signWith(SUPPLIER_KEY, r);
+      const v = verifyReceipt({ ...good, receipt: r, signature: sig, resultReceiptHashOnChain: committedHash(r, sig) });
+      assert.deepEqual(statesOf(v), { ...PASSING, prompt_hash_matches: 'fail' });
+      assert.equal(v.checks.prompt_hash_matches.note, "the receipt's prompt_hash is not the escrow's prompt_hash: it was made for another request");
+      assert.equal(v.verdict, 'failed');
+    });
+    test('the hashes are compared in lower case, and a receipt without a prompt_hash fails', () => {
+      const upper = receiptOf(SUPPLIER_KEY, ESCROW_REF, RESULT, { prompt_hash: promptHashForPayload(PAYLOAD).toUpperCase() });
+      const sig = signWith(SUPPLIER_KEY, upper);
+      assert.equal(verifyReceipt({ ...good, receipt: upper, signature: sig, resultReceiptHashOnChain: committedHash(upper, sig) }).verdict, 'verified');
+      for (const prompt_hash of [undefined, 7, null, '', ['x']]) {
+        const r = receiptOf(SUPPLIER_KEY, ESCROW_REF, RESULT, { prompt_hash });
+        const s = signWith(SUPPLIER_KEY, r);
+        assert.equal(verifyReceipt({ ...good, receipt: r, signature: s, resultReceiptHashOnChain: committedHash(r, s) }).checks.prompt_hash_matches.state, 'fail', String(prompt_hash));
+      }
+    });
   });
 });
 
@@ -1166,6 +1195,18 @@ describe('verifyJob', () => {
     const v2 = await submitted().verify({ ...input, result: 'something else' });
     assert.deepEqual(statesOf(v2), { ...PASSING, response_hash_matches: 'fail' });
   });
+  test('a receipt made for another request than the one the escrow committed to fails the extra row, whatever else it passes', async () => {
+    const other = receiptOf(SUPPLIER_KEY, ESCROW_REF, RESULT, { prompt_hash: promptHashForPayload('another request') });
+    const sig = signWith(SUPPLIER_KEY, other);
+    const s = submitted({ receiptHash: committedHash(other, sig) });
+    const v = await s.verify({ receipt: other, signature: sig, result: RESULT });
+    assert.deepEqual(statesOf(v), { ...PASSING, prompt_hash_matches: 'fail' });
+    assert.equal(v.verdict, 'failed');
+    assert.equal(s.posted.prompt_hash, promptHashForPayload(PAYLOAD), 'the escrow committed to the payload it was posted with');
+    // and an escrow posted with another payload takes a receipt for that one
+    const posted = submitted({ committed: 'another request', receiptHash: committedHash(other, sig) });
+    assert.equal((await posted.verify({ receipt: other, signature: sig, result: RESULT })).verdict, 'verified');
+  });
   test('the escrow ref may be spelled in any case with spaces around it: the receipt is checked against the canonical ref', async () => {
     const v = await submitted().verify({ ...input, escrowRef: ` ${ESCROW_REF.toUpperCase()} ` });
     assert.equal(v.verdict, 'verified');
@@ -1212,28 +1253,169 @@ describe('verifyJob', () => {
     assert.ok(!v.checks.on_chain_hash_matches.note.includes('hunter2'));
   });
 
-  // (5) can only be checked while the Submitted output is live; the other four never depend on it.
-  test('an escrow the supplier has not submitted has no hash on chain: the check is skipped, with the state, and the others run', async () => {
+  // (5) needs the Submitted output of the escrow, and the escrow can be in any state: not submitted yet, live and Submitted, or settled
+  // (its Submitted output spent by the Accept or the Release). The other rows never depend on it.
+  test('an escrow the supplier has not submitted has no hash on chain: the check is skipped, with the state, and the indexer is not asked', async () => {
     for (const escrow of ['open', 'claimed'] as const) {
-      const v = await submitted({ escrow }).verify(input);
+      const s = submitted({ escrow });
+      const v = await s.verify(input);
       assert.equal(v.verdict, 'incomplete', escrow);
       assert.deepEqual(statesOf(v), { ...PASSING, on_chain_hash_matches: 'skipped' }, escrow);
       assert.equal(v.checks.on_chain_hash_matches.note, `the escrow is ${escrow === 'open' ? 'Open' : 'Claimed'}: the supplier has not put a receipt hash on chain`, escrow);
-      assert.equal(v.submittedRef, null);
+      assert.deepEqual([v.submittedRef, v.submittedSpent, v.submittedVia], [null, null, null]);
+      assert.deepEqual(s.indexerCalls(), [], `${escrow}: a live output that is not Submitted leaves nothing for the indexer to find`);
     }
   });
-  test('an escrow with no live output - settled, or not indexed yet - skips the check and does not call the escrow finished', async () => {
-    const v = await submitted({ escrow: 'finished' }).verify(input);
-    assert.equal(v.verdict, 'incomplete');
-    assert.deepEqual(statesOf(v), { ...PASSING, on_chain_hash_matches: 'skipped' });
-    assert.equal(v.checks.on_chain_hash_matches.note, 'no live Submitted output was found for the escrow (it may be settled, or its Submit may not be indexed yet); check before vector_build_marketplace_accept, while it is live');
-    assert.doesNotMatch(v.checks.on_chain_hash_matches.note, /finished|accepted|released/i);
+
+  describe('a settled escrow: the Submitted output is located through the marketplace indexer', () => {
+    test('the indexer says where it was, Koios supplies the bytes, the spend chain proves it is the escrow\'s, and the receipt is verified', async () => {
+      const s = submitted({ escrow: 'finished' });
+      const v = await s.verify(input);
+      assert.equal(v.verdict, 'verified');
+      assert.deepEqual(statesOf(v), PASSING);
+      assert.deepEqual([v.submittedRef, v.submittedVia, v.submittedSpent], [`${SUBMIT_TX}#0`, 'indexer', true]);
+      // asked once, for the buyer's escrows, and only after the lineage found nothing live
+      assert.deepEqual(s.indexerCalls(), [`${INDEXER_URL}/escrows?buyer=${BUYER_PKH}`]);
+      // the bytes the hash is compared with are Koios's, read by ref, spent as the output is
+      const reads = s.koios.calls.filter((c) => c.path === '/api/v1/utxo_info').flatMap((c) => c.body._utxo_refs as string[]);
+      assert.equal(reads.filter((ref) => ref === `${SUBMIT_TX}#0`).length, 1);
+      // and the proof asks Koios about the transaction that made the output, then about the one that made the output it spent
+      assert.deepEqual(txInfoRequests(s.koios).map((c) => c.body._tx_hashes), [[SUBMIT_TX], [CLAIM_TX]]);
+    });
+    test('the rows of other escrows of the same buyer, with the same supplier, advert and payload, are other escrows', async () => {
+      // the same hire made again differs from this one in posted_at and deliver_by only: that is a different escrow, not a second match
+      const again = (ref: string, over: Record<string, unknown>) => (honest: unknown[]) => [...honest, { ...(honest.at(-1) as object), utxo_ref: ref, ...over }];
+      for (const [name, over] of [['posted_at', { posted_at: 1 }], ['deliver_by', { deliver_by: 2 }], ['prompt_hash', { prompt_hash: 'ab'.repeat(32) }], ['payment', { payment_lovelace: '1' }]] as const) {
+        const v = await submitted({ escrow: 'finished', indexer: { rows: again(`${'f1'.repeat(32)}#0`, over) } }).verify(input);
+        assert.equal(v.verdict, 'verified', name);
+        assert.equal(v.submittedRef, `${SUBMIT_TX}#0`, name);
+      }
+    });
+    test('rows that are not rows, rows in other states and rows with no usable ref are passed over', async () => {
+      const junk = (honest: unknown[]) => [null, 7, 'row', [], {}, { state: 'Submitted' }, { ...(honest.at(-1) as object), utxo_ref: 'nope' }, { ...(honest.at(-1) as object), utxo_ref: 7 }, ...honest];
+      const v = await submitted({ escrow: 'finished', indexer: { rows: junk } }).verify(input);
+      assert.equal(v.verdict, 'verified');
+      assert.equal(v.submittedRef, `${SUBMIT_TX}#0`);
+    });
+    test('no Submitted row of the escrow is no answer: the check is skipped, with the reason', async () => {
+      for (const rows of [[], (honest: unknown[]) => honest.slice(0, 2)]) {
+        const v = await submitted({ escrow: 'finished', indexer: { rows } }).verify(input);
+        assert.equal(v.verdict, 'incomplete');
+        assert.deepEqual(statesOf(v), { ...PASSING, on_chain_hash_matches: 'skipped' });
+        assert.equal(v.checks.on_chain_hash_matches.note, 'Submitted output not locatable: the escrow has no live output, and the indexer lists no Submitted output of it');
+        assert.deepEqual([v.submittedRef, v.submittedSpent, v.submittedVia], [null, null, null]);
+      }
+    });
+    test('two Submitted outputs that match are no answer either: the check is skipped, and the one the caller names decides', async () => {
+      const s = submitted({ escrow: 'finished', decoySubmitted: true });
+      const v = await s.verify(input);
+      assert.equal(v.verdict, 'incomplete');
+      assert.equal(v.checks.on_chain_hash_matches.note, 'Submitted output not locatable: the indexer lists 2 Submitted outputs that match this escrow; pass submitted_ref to name the one');
+      assert.equal(v.submittedRef, null);
+      // naming the escrow's own output settles it, and naming the copy does not: the copy does not descend from the escrow
+      const own = await submitted({ escrow: 'finished', decoySubmitted: true }).verify({ ...input, submittedRef: `${SUBMIT_TX}#0` });
+      assert.equal(own.verdict, 'verified');
+      const copy = await submitted({ escrow: 'finished', decoySubmitted: true }).verify({ ...input, submittedRef: DECOY_SUBMITTED_REF });
+      assert.equal(copy.verdict, 'incomplete');
+      assert.match(copy.checks.on_chain_hash_matches.note, new RegExp(`^Submitted output not locatable: the one you gave was refused: UTxO ${DECOY_SUBMITTED_REF} does not belong to escrow ${ESCROW_REF}: it carries the escrow's fields, but it does not descend from that escrow by the spend chain\\.$`));
+    });
+    test('a copy that the indexer names alone is refused by the spend chain, and the hash it carries is never used', async () => {
+      // the copy carries a receipt hash of its own: a receipt made to match it would pass if the indexer's word were enough
+      const forged = receiptOf(SUPPLIER_KEY, ESCROW_REF, RESULT, { model: 'forged' });
+      const sig = signWith(SUPPLIER_KEY, forged);
+      const s = submitted({ escrow: 'finished', decoySubmitted: true, decoyHash: committedHash(forged, sig), indexer: { rows: (_honest, decoy) => [decoy] } });
+      const v = await verifyJob(s.node, KOIOS, { escrowRef: ESCROW_REF, receipt: forged, signature: sig, result: RESULT }, s.fetchImpl);
+      assert.equal(v.verdict, 'incomplete');
+      assert.match(v.checks.on_chain_hash_matches.note, new RegExp(`^Submitted output not locatable: the indexer lists ${DECOY_SUBMITTED_REF}, which was refused: UTxO ${DECOY_SUBMITTED_REF} does not belong to escrow ${ESCROW_REF}: it carries the escrow's fields, but it does not descend`));
+      assert.equal(v.submittedRef, null);
+    });
+    test('a copy that stops the lineage does not stop the located check, and says so when the indexer finds nothing either', async () => {
+      const found = await submitted({ escrow: 'finished', decoy: true }).verify(input);
+      assert.equal(found.verdict, 'verified');
+      assert.equal(found.submittedVia, 'indexer');
+      const lost = await submitted({ escrow: 'finished', decoy: true, indexer: { rows: [] } }).verify(input);
+      assert.equal(lost.verdict, 'incomplete');
+      assert.match(lost.checks.on_chain_hash_matches.note, /^Submitted output not locatable: the escrow's live output could not be resolved \(None of .* descends from escrow .* by the spend chain.*\), and the indexer lists no Submitted output of it$/);
+    });
+    test('an indexer that cannot be asked, or answers with something else than a list, skips the check in words that carry nothing it said', async () => {
+      const cases: Array<[NonNullable<Scenario['indexer']>, string]> = [
+        [{ status: 502 }, 'list escrows: indexer answered 502'],
+        [{ raw: `["${'x'.repeat(ESCROWS_MAX_BYTES)}"]` }, `list escrows: the answer is over the ${ESCROWS_MAX_BYTES} byte limit`],
+        [{ raw: '<html>Bad gateway password=hunter2</html>' }, 'list escrows: response was not valid JSON'],
+        [{ raw: '{"rows":[]}' }, 'list escrows: indexer returned a non-list response'],
+        [{ fails: new TypeError('fetch failed: connect ECONNREFUSED internal.koios.example:443 password=hunter2') }, 'the request failed (network error or timeout)'],
+      ];
+      for (const [indexer, why] of cases) {
+        const v = await submitted({ escrow: 'finished', indexer }).verify(input);
+        assert.equal(v.verdict, 'incomplete', why);
+        assert.equal(v.checks.on_chain_hash_matches.note, `Submitted output not locatable: the escrow has no live output, and the indexer could not be asked (${why})`);
+        for (const secret of ['hunter2', 'internal.koios.example', 'Bad gateway', INDEXER_URL]) assert.ok(!v.checks.on_chain_hash_matches.note.includes(secret), `${secret} leaked`);
+      }
+    });
+    test('what Koios says of the output decides, not the row: a datum that differs, a value that differs, or a transaction Koios does not know refuses it', async () => {
+      const s = submitted({ escrow: 'finished' });
+      const through = (change: (row: Record<string, any>) => void, hideTx?: string): typeof fetch => (async (url: string, init: { body: string }) => {
+        const res = await s.fetchImpl(url, init as never);
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {}; // the supplier's GET carries none
+        if (String(url).endsWith('/api/v1/utxo_info') && (body._utxo_refs as string[]).includes(`${SUBMIT_TX}#0`)) {
+          const rows = (await res.json()) as Array<Record<string, any>>;
+          for (const row of rows) if (row.tx_hash === SUBMIT_TX) change(row);
+          return new Response(JSON.stringify(rows), { status: 200 });
+        }
+        if (hideTx !== undefined && String(url).endsWith('/api/v1/tx_info') && (body._tx_hashes as string[]).includes(hideTx)) return new Response('[]', { status: 200 });
+        return res;
+      }) as unknown as typeof fetch;
+      const check = async (fetchImpl: typeof fetch, expected: RegExp) => {
+        const v = await verifyJob(s.node, KOIOS, { escrowRef: ESCROW_REF, ...input }, fetchImpl);
+        assert.equal(v.verdict, 'incomplete');
+        assert.match(v.checks.on_chain_hash_matches.note, expected);
+      };
+      const datumWith = (row: Record<string, any>, over: Partial<EscrowDatum>) => { row.inline_datum.bytes = encodeEscrowDatum({ ...decodeEscrowDatum(row.inline_datum.bytes), ...over }); };
+      await check(through((row) => datumWith(row, { payment_lovelace: 100_000n })), new RegExp(`UTxO ${SUBMIT_TX}#0 does not belong to escrow ${ESCROW_REF}: its datum differs from that escrow's in payment_lovelace, which Claim and Submit leave unchanged\\.$`));
+      await check(through((row) => { row.value = '9999999'; }), new RegExp(`UTxO ${SUBMIT_TX}#0 does not belong to escrow ${ESCROW_REF}: it holds 9999999 lovelace where the Post output held 2261030\\.$`));
+      await check(through((row) => datumWith(row, { state: 'Claimed', submitted_at: null, result_receipt_hash: null })), new RegExp(`UTxO ${SUBMIT_TX}#0 is not a Submitted output: its datum is in state Claimed\\.$`));
+      await check(through((row) => datumWith(row, { result_receipt_hash: null })), new RegExp(`UTxO ${SUBMIT_TX}#0 is a Submitted output without a receipt hash\\.$`));
+      await check(through(() => {}, SUBMIT_TX), new RegExp(`Cannot tell whether UTxO ${SUBMIT_TX}#0 belongs to escrow ${ESCROW_REF}: Koios does not know the transaction behind it yet; retry in a few seconds\\.$`));
+      await check(through((row) => { row.address = ADVERT_ADDRESS; }), new RegExp(`UTxO ${SUBMIT_TX}#0 is not an escrow output: its payment credential is not the escrow script's\\.$`));
+    });
   });
-  test('a copy of the escrow at its credential that the resolver cannot tell apart skips only the hash check, with the resolver\'s words', async () => {
-    const v = await submitted({ escrow: 'finished', decoy: true }).verify(input);
-    assert.equal(v.verdict, 'incomplete');
-    assert.deepEqual(statesOf(v), { ...PASSING, on_chain_hash_matches: 'skipped' });
-    assert.match(v.checks.on_chain_hash_matches.note, /^the escrow's live output could not be resolved: None of .* descends from escrow .* by the spend chain/);
+
+  describe('a Submitted output the caller names', () => {
+    test('needs no lookup - not the lineage and not the indexer - and is held to the same proof, live or settled', async () => {
+      for (const escrow of ['submitted', 'finished'] as const) {
+        const s = submitted({ escrow, indexer: { fails: new Error('the indexer must not be asked') } });
+        const v = await s.verify({ ...input, submittedRef: ` ${SUBMIT_TX.toUpperCase()}#0 ` });
+        assert.equal(v.verdict, 'verified', escrow);
+        assert.deepEqual([v.submittedRef, v.submittedVia, v.submittedSpent], [`${SUBMIT_TX}#0`, 'argument', escrow === 'finished'], escrow);
+        assert.deepEqual(s.indexerCalls(), [], escrow);
+        assert.equal(credentialRequests(s.koios).length, 0, `${escrow}: no lineage was walked`);
+        assert.deepEqual(txInfoRequests(s.koios).map((c) => c.body._tx_hashes), [[SUBMIT_TX], [CLAIM_TX]], escrow);
+      }
+    });
+    test('that is not a Submitted output of the escrow is refused, and the check is skipped with the reason', async () => {
+      const s = submitted({ escrow: 'submitted' });
+      const post = await s.verify({ ...input, submittedRef: ESCROW_REF });
+      assert.equal(post.verdict, 'incomplete');
+      assert.equal(post.checks.on_chain_hash_matches.note, `Submitted output not locatable: the one you gave was refused: UTxO ${ESCROW_REF} is not a Submitted output: its datum is in state Open.`);
+      const nowhere = await s.verify({ ...input, submittedRef: `${'ab'.repeat(32)}#3` });
+      assert.equal(nowhere.checks.on_chain_hash_matches.note, `Submitted output not locatable: the one you gave was refused: Escrow ${'ab'.repeat(32)}#3 not found on the ledger.`);
+      assert.deepEqual([nowhere.submittedRef, nowhere.submittedVia], [null, null]);
+    });
+    test('that is no ref at all is an error before anything is asked', async () => {
+      const s = submitted();
+      await assert.rejects(s.verify({ ...input, submittedRef: 'nope#1' }), /Invalid out ref "nope#1"/);
+      assert.equal(s.koios.calls.length, 0);
+    });
+  });
+
+  test('the live Submitted output is found on chain and the indexer is not asked; the Accept landing in between makes it spent and nothing else', async () => {
+    for (const submittedSpent of [false, true]) {
+      const s = submitted({ submittedSpent });
+      const v = await s.verify(input);
+      assert.equal(v.verdict, 'verified');
+      assert.deepEqual([v.submittedRef, v.submittedVia, v.submittedSpent], [`${SUBMIT_TX}#0`, 'lineage', submittedSpent]);
+      assert.deepEqual(s.indexerCalls(), []);
+    }
   });
   test('a ref that names a later output of the escrow is refused: the receipt names the Post output', async () => {
     await rejectsWith(submitted({ escrow: 'claimed', names: 'claimed-output' }).verify(input), (message) => {

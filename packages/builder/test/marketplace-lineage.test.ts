@@ -10,13 +10,14 @@ import { FixtureProvider, OWN_ADDRESS } from './fixtures/fixture-provider.ts';
 import { ADVERT_DATUM_HEX, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
 import {
   escrowKoios, world, koiosFor, escrowAt, stakedEscrowAddress, txInfoRequests, credentialRequests, GENUINE_TXS, DECOY_TXS, DECOY_KINDS,
-  ESCROW_TX, CLAIM_TX, SUBMIT_TX, DECOY_TX, SLY_DECOY_TX, SUPPLIER_ADDRESS,
+  ESCROW_TX, CLAIM_TX, SUBMIT_TX, DECOY_TX, SLY_DECOY_TX, OTHER_CLAIM_TX, SUPPLIER_ADDRESS,
 } from './fixtures/escrow-koios.fixture.ts';
 import type { KoiosOptions } from './fixtures/escrow-koios.fixture.ts';
 import { ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_SCRIPT_HASH } from '../src/vector/marketplace-constants.ts';
 import { decodeEscrowDatum, encodeEscrowDatum } from '../src/vector/marketplace-datum.ts';
 import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
-import { resolveEscrowLineage, readEscrowOutput } from '../src/vector/marketplace-lineage.ts';
+import { resolveEscrowLineage, readEscrowOutput, readSubmittedOutput, submittedRefsOf } from '../src/vector/marketplace-lineage.ts';
+import { indexerRowOf } from './fixtures/transport-world.fixture.ts';
 import { koiosCredentialUtxos } from '../src/vector/marketplace-indexer.ts';
 import { resolveEscrowLineage as resolveViaBuild } from '../src/vector/marketplace-build.ts';
 
@@ -540,5 +541,119 @@ describe('readEscrowOutput', () => {
       ['a Koios that answers 502', { status: 502 }, /^Could not read escrow .*: Koios utxo_info answered 502$/],
     ];
     for (const [name, o, message] of refused) await assert.rejects(() => read(world([], o)), refusal(message), name);
+  });
+});
+
+// The Submitted output of an escrow that may be settled. The resolver above finds live outputs only; the marketplace indexer keeps a
+// row for every state an escrow reached, so it can say where the Submitted output was, and anything it names (or a caller does) is
+// used only after Koios has been read and the spend chain has proved it the escrow's own.
+describe('submittedRefsOf', () => {
+  const advertRef = `${posted.advert_ref.txHash}#${posted.advert_ref.index}`;
+  const rowOf = (over: Record<string, unknown> = {}, ref = `${SUBMIT_TX}#0`) => indexerRowOf(ref, submitted, over);
+
+  test('a Submitted row that agrees with the Post datum on every field Claim and Submit keep puts its output forward, once, canonical and in order', () => {
+    assert.deepEqual(submittedRefsOf([rowOf()], posted), [`${SUBMIT_TX}#0`]);
+    assert.deepEqual(submittedRefsOf([rowOf({}, ` ${SUBMIT_TX.toUpperCase()}#0 `), rowOf()], posted), [`${SUBMIT_TX}#0`], 'the same output twice is one');
+    assert.deepEqual(submittedRefsOf([rowOf({}, `${'f1'.repeat(32)}#0`), rowOf({}, `${'0a'.repeat(32)}#0`)], posted), [`${'0a'.repeat(32)}#0`, `${'f1'.repeat(32)}#0`]);
+    // hex is compared in lower case, however the indexer spells it
+    const upper = rowOf({ buyer_pkh: posted.buyer_pkh.toUpperCase(), supplier_pkh: posted.supplier_pkh.toUpperCase(), prompt_hash: posted.prompt_hash.toUpperCase(), request_spec_hash: posted.request_spec_hash.toUpperCase(), advert_ref: advertRef.toUpperCase() });
+    assert.deepEqual(submittedRefsOf([upper], posted), [`${SUBMIT_TX}#0`]);
+  });
+  test('every field matters: a row that differs in any one of them is another escrow, the same hire made again included', () => {
+    const differing: Record<string, unknown> = {
+      buyer_pkh: 'aa'.repeat(28), supplier_pkh: 'aa'.repeat(28), advert_ref: `${'aa'.repeat(32)}#0`, capability_id: 'other.capability.v1',
+      request_spec_hash: 'aa'.repeat(32), prompt_hash: 'aa'.repeat(32), payment_lovelace: '1', buyer_bond_lovelace: '1', supplier_bond_lovelace: '1',
+      deliver_by: posted.deliver_by + 1, posted_at: posted.posted_at + 1,
+    };
+    for (const [field, value] of Object.entries(differing)) assert.deepEqual(submittedRefsOf([rowOf({ [field]: value })], posted), [], field);
+    // buying the same thing from the same supplier again differs in these two alone
+    assert.deepEqual(submittedRefsOf([rowOf({ posted_at: posted.posted_at + 5000, deliver_by: posted.deliver_by + 5000 })], posted), []);
+  });
+  test('only a row in state Submitted counts, whatever else it agrees on', () => {
+    for (const state of ['Open', 'Claimed', 'Accepted', 'Released', 'submitted', '', null, undefined, 2]) assert.deepEqual(submittedRefsOf([rowOf({ state })], posted), [], String(state));
+  });
+  test('a field of the wrong type is never a match: amounts are decimal text, times are numbers', () => {
+    for (const over of [{ payment_lovelace: 200_000 }, { payment_lovelace: '2e5' }, { payment_lovelace: '-1' }, { deliver_by: String(posted.deliver_by) }, { posted_at: String(posted.posted_at) }, { buyer_pkh: 7 }, { advert_ref: { txHash: posted.advert_ref.txHash, index: 0 } }, { capability_id: null }]) {
+      assert.deepEqual(submittedRefsOf([rowOf(over)], posted), [], JSON.stringify(over));
+    }
+  });
+  test('entries that are not rows, and rows with no usable ref, are passed over', () => {
+    const rows = [null, undefined, 7, 'row', [], [rowOf()], {}, { state: 'Submitted' }, rowOf({ utxo_ref: 'nope' }), rowOf({ utxo_ref: 7 }), rowOf({ utxo_ref: `${SUBMIT_TX}#-1` }), rowOf()];
+    assert.deepEqual(submittedRefsOf(rows, posted), [`${SUBMIT_TX}#0`]);
+    assert.deepEqual(submittedRefsOf([], posted), []);
+  });
+});
+
+describe('readSubmittedOutput', () => {
+  const post = { ref: ESCROW_REF, datum: posted, lovelace: ESCROW_LOCKED_LOVELACE };
+  const outputRow = (txHash: string, datum: EscrowDatum, spent: boolean, over: Record<string, unknown> = {}) =>
+    ({ tx_hash: txHash, tx_index: 0, address: ESCROW_ADDRESS, value: String(ESCROW_LOCKED_LOVELACE), is_spent: spent, inline_datum: { bytes: encodeEscrowDatum(datum) }, ...over });
+  const submittedRow = (spent = true, over: Record<string, unknown> = {}) => outputRow(SUBMIT_TX, submitted, spent, over);
+  const readFrom = (rows: unknown[], o: KoiosOptions = {}, ref = `${SUBMIT_TX}#0`) => { const w = world([], { rows, ...o }); return { koios: w.koios, run: readSubmittedOutput(KOIOS, post, ref, w.koios.f) }; };
+  const refusedWith = (message: RegExp) => (err: unknown) => { assert.ok(err instanceof Error); assert.match(err.message, message); return true; };
+
+  test('reads the Submitted output of the escrow, live or spent, from Koios utxo_info, and proves it by the spend chain in two calls to tx_info', async () => {
+    for (const spent of [false, true]) {
+      const { koios, run } = readFrom([submittedRow(spent)]);
+      assert.deepEqual(await run, { datum: submitted, receiptHash: submitted.result_receipt_hash, spent, ref: `${SUBMIT_TX}#0` }, `spent: ${spent}`);
+      assert.deepEqual(koios.calls.filter((c) => c.path === '/api/v1/utxo_info').map((c) => c.body._utxo_refs), [[`${SUBMIT_TX}#0`]]);
+      assert.deepEqual(txInfoRequests(koios).map((c) => c.body._tx_hashes), [[SUBMIT_TX], [CLAIM_TX]], 'the transaction that made it, then the one that made the Claimed output it spent');
+      assert.equal(credentialRequests(koios).length, 0, 'no credential is listed: the output is named, not searched for');
+    }
+  });
+  test('the ref may be spelled in any case with padding, and comes back canonical', async () => {
+    const { run } = readFrom([submittedRow()], {}, ` ${SUBMIT_TX.toUpperCase()}#0 `);
+    assert.equal((await run).ref, `${SUBMIT_TX}#0`);
+    await assert.rejects(readFrom([], {}, 'nope#1').run, /Invalid out ref/);
+  });
+  test('an output that is not a Submitted output is refused, with its state', async () => {
+    await assert.rejects(readFrom([outputRow(SUBMIT_TX, claimedDatum, false)]).run, refusedWith(new RegExp(`^UTxO ${SUBMIT_TX}#0 is not a Submitted output: its datum is in state Claimed\\.$`)));
+    await assert.rejects(readFrom([outputRow(ESCROW_TX, posted, true)], {}, ESCROW_REF).run, refusedWith(new RegExp(`^UTxO ${ESCROW_REF} is not a Submitted output: its datum is in state Open\\.$`)));
+    await assert.rejects(readFrom([outputRow(SUBMIT_TX, { ...submitted, result_receipt_hash: null }, true)]).run, refusedWith(new RegExp(`^UTxO ${SUBMIT_TX}#0 is a Submitted output without a receipt hash\\.$`)));
+  });
+  test('an output whose datum differs from the escrow\'s in a field Claim and Submit keep, or whose value does, belongs to another escrow', async () => {
+    const changes: Array<[field: string, change: Partial<EscrowDatum>]> = [
+      ['buyer_pkh', { buyer_pkh: 'aa'.repeat(28) }], ['supplier_pkh', { supplier_pkh: 'aa'.repeat(28) }], ['capability_id', { capability_id: 'other.capability.v1' }],
+      ['request_spec_hash', { request_spec_hash: 'aa'.repeat(32) }], ['prompt_hash', { prompt_hash: 'aa'.repeat(32) }], ['payment_lovelace', { payment_lovelace: 100_000n }],
+      ['deliver_by', { deliver_by: posted.deliver_by + 1 }], ['posted_at', { posted_at: posted.posted_at + 1 }],
+      ['deliver_by, posted_at', { deliver_by: posted.deliver_by + 1, posted_at: posted.posted_at + 1 }],
+    ];
+    for (const [field, change] of changes) {
+      await assert.rejects(readFrom([outputRow(SUBMIT_TX, { ...submitted, ...change }, true)]).run, refusedWith(new RegExp(`^UTxO ${SUBMIT_TX}#0 does not belong to escrow ${ESCROW_REF}: its datum differs from that escrow's in ${field}, which Claim and Submit leave unchanged\\.$`)), field);
+    }
+    for (const value of ['2200000', '3000000']) {
+      await assert.rejects(readFrom([submittedRow(true, { value })]).run, refusedWith(new RegExp(`^UTxO ${SUBMIT_TX}#0 does not belong to escrow ${ESCROW_REF}: it holds ${value} lovelace where the Post output held 2261030\\.$`)), value);
+    }
+  });
+  test('what readEscrowOutput refuses is refused here too: an output Koios does not know, at another address, without a datum, unfunded', async () => {
+    await assert.rejects(readFrom([]).run, refusedWith(new RegExp(`^Escrow ${SUBMIT_TX}#0 not found on the ledger\\.$`)));
+    await assert.rejects(readFrom([submittedRow(true, { address: OWN_ADDRESS })]).run, refusedWith(/^UTxO .* is not an escrow output/));
+    await assert.rejects(readFrom([submittedRow(true, { inline_datum: null })]).run, refusedWith(/^UTxO .* does not hold an escrow datum\.$/));
+    await assert.rejects(readFrom([submittedRow(true, { value: '1000000' })]).run, refusedWith(/is not funded: its datum owes 2200000 lovelace but the output holds 1000000/));
+    await assert.rejects(readFrom([submittedRow(true, { is_spent: undefined })]).run, refusedWith(/^Koios did not report whether escrow .* is spent/));
+  });
+  // The datum alone cannot tell the escrow's own output from a copy: every field of it is public. What a copy cannot fake is how it
+  // came to be.
+  test('a copy of the Submitted output, wherever it came from, does not descend from the escrow and is refused, with the hash it carries unused', async () => {
+    for (const [name, creatingTx] of DECOY_KINDS) {
+      const copy = { ...submitted, result_receipt_hash: 'dc'.repeat(32) };
+      await assert.rejects(
+        readFrom([outputRow(creatingTx, copy, false)], { txs: { ...GENUINE_TXS, ...DECOY_TXS } }, `${creatingTx}#0`).run,
+        refusedWith(new RegExp(`^UTxO ${creatingTx}#0 does not belong to escrow ${ESCROW_REF}: it carries the escrow's fields, but it does not descend from that escrow by the spend chain\\.$`)), name,
+      );
+    }
+    // a genuine-looking chain that belongs to another escrow: the Claimed output it spent was made by a Claim of someone else's Post
+    const others = { ...GENUINE_TXS, [SUBMIT_TX]: [[`${OTHER_CLAIM_TX}#0`, ESCROW_ADDRESS]] as Array<[string, string]>, ...DECOY_TXS };
+    await assert.rejects(readFrom([submittedRow()], { txs: others }).run, refusedWith(/does not descend from that escrow by the spend chain\.$/));
+  });
+  test('a transaction Koios does not know yet is "cannot tell", never a pass and never a refusal of the output', async () => {
+    const knowsOnlyTheClaim = { [CLAIM_TX]: GENUINE_TXS[CLAIM_TX] };
+    const knowsOnlyTheSubmit = { [SUBMIT_TX]: GENUINE_TXS[SUBMIT_TX] };
+    for (const txs of [{}, knowsOnlyTheClaim, knowsOnlyTheSubmit]) {
+      await assert.rejects(readFrom([submittedRow()], { txs }).run, refusedWith(new RegExp(`^Cannot tell whether UTxO ${SUBMIT_TX}#0 belongs to escrow ${ESCROW_REF}: Koios does not know the transaction behind it yet; retry in a few seconds\\.$`)), JSON.stringify(Object.keys(txs)));
+    }
+  });
+  test('a Koios that cannot be asked about the transactions is an error that names the escrow and carries nothing it said', async () => {
+    await assert.rejects(readFrom([submittedRow()], { txStatus: 502 }).run, refusedWith(new RegExp(`^Could not read escrow ${ESCROW_REF}: Koios tx_info answered 502$`)));
   });
 });

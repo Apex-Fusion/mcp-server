@@ -980,7 +980,7 @@
     }
   },
   "vector_marketplace_verify_receipt": {
-    "description": "Check a template-contract supplier's receipt without trusting the supplier. Five checks, each reported pass, FAIL or skipped: (1) receipt.escrow_ref equals the escrow ref; (2) sha256 of the result text equals the receipt's response_hash; (3) the supplier's public key hashes to receipt.supplier_pkh and to the escrow's supplier_pkh; (4) the Ed25519 signature over the canonical receipt verifies; (5) the escrow's result_receipt_hash on chain equals the hash of the signed receipt. Says verified only when all five pass. Pass the result text exactly as vector_marketplace_get_job returned it (from its JSON block, not the shortened view), or check 2 is skipped. Run it before vector_build_marketplace_accept: check 5 reads the escrow's Submitted output, which is no longer there once the escrow is accepted. Read-only; the supplier's key is read from its /capability unless you pass supplier_pub_key_hex.",
+    "description": "Check a template-contract supplier's receipt without trusting the supplier. Five checks, each reported pass, FAIL or skipped: (1) receipt.escrow_ref equals the escrow ref; (2) sha256 of the result text equals the receipt's response_hash; (3) the supplier's public key hashes to receipt.supplier_pkh and to the escrow's supplier_pkh; (4) the Ed25519 signature over the canonical receipt verifies; (5) the escrow's result_receipt_hash on chain equals the hash of the signed receipt. One extra row, not one of the five: the receipt's prompt_hash equals the escrow's prompt_hash. Says verified only when every row passes. Pass the result text exactly as vector_marketplace_get_job returned it (from its JSON block, not the shortened view), or check 2 is skipped. Works before and after the Accept: check 5 finds the escrow's Submitted output on chain, live or, once it is spent, through the marketplace indexer (which only says where to look: the output is read from Koios and proven to be the escrow's own by the spend chain); pass submitted_ref to name it yourself. Read-only; the supplier's key is read from its /capability unless you pass supplier_pub_key_hex.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1013,6 +1013,10 @@
         },
         "supplier_pub_key_hex": {
           "description": "The supplier's public key, 64 hex characters. Normally read from the supplier's /capability; it has to hash to the escrow's supplier_pkh either way",
+          "type": "string"
+        },
+        "submitted_ref": {
+          "description": "Optional: the escrow's Submitted output, '<txid>#<index>', to skip the lookup. It is read from Koios and checked against the escrow exactly like one that is looked up",
           "type": "string"
         }
       },
