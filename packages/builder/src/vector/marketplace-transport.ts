@@ -1,6 +1,6 @@
 // packages/builder/src/vector/marketplace-transport.ts
 // Job transport to supplier endpoints, through safeFetch only. A supplier is reached at the endpoint_url of the advert its escrow
-// names (resolveEscrowLineage, then posted.advert_ref, then readAdvert), never at a URL the caller gives. Nothing here builds, signs
+// names (the escrow's Post output, then its advert_ref, then readAdvert), never at a URL the caller gives. Nothing here builds, signs
 // or submits a transaction, and no error carries a supplier URL: they name the escrow and what happened.
 //
 // The routes are pinned from Apex-Fusion/agents-marketplace origin/main e847a55 (2026-10-13), supplier/src/server.ts. A supplier is a
@@ -22,25 +22,34 @@
 // Who may send what to whom. Anyone can post an escrow, with an advert of their own on a host of their own, and buyer_pkh and
 // prompt_hash are public datum fields that anyone can copy into an escrow of theirs: neither can be taken at its word. So the ref must
 // be the Post output of an escrow that (1) names the key of the caller's buyerAddress as its buyer and (2) was funded by that key: the
-// transaction that made the Post output has an input of that key (nobody signs an output's datum, but an input needs its owner's
-// signature, so the buyer put funds into this very transaction). A transaction Koios does not know is a refusal. A copy of a real
-// escrow's fields in a transaction its buyer did not fund fails (2). A send must also (3) carry exactly the payload the escrow
-// committed to (promptHashForPayload of it is the escrow's prompt_hash). All of it is checked before any call to the supplier.
+// transaction that made the Post output has an input of that key (a datum field naming a key is not that key's signature, but
+// spending an input needs its owner's signature, so the buyer put funds into this very transaction). A transaction Koios does not
+// know is a refusal. A copy of a real escrow's fields in a transaction its buyer did not fund fails (2). A send must also (3) carry
+// exactly the payload the escrow committed to (promptHashForPayload of it is the escrow's prompt_hash). All of it is checked before
+// any call to the supplier.
 //
-// Residual, because a keyless hosted tool cannot authenticate its caller: buyerAddress is the caller's word. A caller steered into
-// passing the address of an escrow that an attacker posted and funded themselves, with a prompt_hash copied from the victim's real
-// escrow and an advert on the attacker's host, passes (1) to (3), and the payload goes to the attacker. The planned closure is a
-// signed-message binding: the buyer's signer signs `send:<escrowRef>:<promptHash>` and sendJob verifies that signature against
-// buyer_pkh before it calls anything. Until it exists the tool text has to say what the tool cannot know.
+// A poll reads only the Post output (readEscrowOutput: Koios utxo_info of that one ref, spent or not). The buyer, the funder and the
+// advert are all there, so a poll does not walk the escrow's spend chain and does not ask the node: a copy that anyone leaves at the
+// escrow credential cannot make a finished job unpollable. A send also needs the live output (it must be Open), so it resolves the
+// lineage.
+//
+// Residual, because a keyless hosted tool cannot authenticate its caller: buyerAddress and the escrow ref are the caller's word. A
+// caller steered into passing the address and the ref of an escrow that an attacker posted and funded themselves, with a prompt_hash
+// copied from the victim's real escrow and an advert on the attacker's host, passes (1) to (3), and the payload goes to the attacker.
+// A poll has the same hole: a getJob steered to an attacker's escrow, with the victim's job id, sends that id to the attacker's host,
+// and the template's job GET is unauthenticated, so a job id is a bearer token for the result behind it. A signed message does not
+// close it on the server: the planned `send:<escrowRef>:<promptHash>` signature, checked against buyer_pkh, is one that an attacker
+// who funded the escrow can produce offline, because that attacker holds the buyer_pkh the escrow names. The closure is client-side:
+// the local signer refuses to send for an escrow whose buyer_pkh is not its own key, or a send is mediated by the signer with a
+// nonce the server issues. Until it exists the tool text has to say what the tool cannot know.
 import type { Provider } from '@lucid-evolution/lucid';
 import { safeFetch } from './safe-fetch.js';
 import { readAdvert, koiosTxInputCreds } from './marketplace-indexer.js';
 import type { AdvertRead } from './marketplace-indexer.js';
 import { formatOutRef, parseOutRef, promptHashForPayload, wirePayloadFor } from './marketplace-datum.js';
-import type { AdvertDatum } from './marketplace-datum.js';
+import type { AdvertDatum, EscrowDatum } from './marketplace-datum.js';
 import { paymentKeyHashOf } from './gov-build.js';
-import { resolveEscrowLineage, koiosFailure } from './marketplace-lineage.js';
-import type { EscrowLineage } from './marketplace-lineage.js';
+import { resolveEscrowLineage, readEscrowOutput, koiosFailure } from './marketplace-lineage.js';
 import { cell } from './marketplace-shared.js';
 
 // ─── Routes ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -244,39 +253,45 @@ function buyerKeyHash(buyerAddress: unknown, refuse: (why: string) => Error): st
   throw refuse('buyerAddress must be the wallet address (a key address) the escrow was posted from.');
 }
 
+/** "a Claimed output", "an Accepted output". */
+const withArticle = (word: string): string => `${/^[AEIOU]/i.test(word) ? 'an' : 'a'} ${word}`;
+
 /**
- * The escrow's lineage and the advert whose endpoint serves it, once everything that could make this the wrong escrow, the wrong
- * person or the wrong place is ruled out. The escrow comes from resolveEscrowLineage (credential-checked, fails closed), its advert from
- * readAdvert at the advert script address, asked of the same Koios. Refused, naming the escrow and saying nothing was sent:
+ * Rules out the wrong escrow and the wrong person for the Post output `posted` that a caller has read. Refused, naming the escrow
+ * and saying nothing was sent:
  * - a ref that is not the output the escrow's Post made (a later output has the supplier's transactions behind it, not the buyer's);
  * - an escrow whose datum does not name the key of `buyerAddress` as its buyer;
  * - an escrow whose Post transaction has no input of that key. buyer_pkh and prompt_hash are public, so anyone can copy them into an
- *   escrow of their own, with an advert on a host of their own. Nobody signs an output's datum, but an input needs its owner's
- *   signature, so the buyer funded this very transaction only if one of its inputs is the buyer's. A transaction Koios does not know,
- *   or cannot be asked about, is a refusal too (fail closed, as buildPostEscrow does for an advert's author);
- * - for a send, an escrow with no live output or one that is not Open;
- * - for a send, an advert that is Retired, spent (its supplier retired or replaced it: the endpoint it names is not one to send a
- *   payload to now) or of a spent status Koios does not report. A poll sends the supplier nothing it does not have, and the endpoint
- *   of a spent or retired advert is still where the job went, so a poll reads the advert whatever its state, and an escrow that has
- *   been accepted or released (no live output) is still the one whose finished job it asks about;
- * - an endpoint that is not an https URL, and a capability that is not a template-contract one (this release).
+ *   escrow of their own, with an advert on a host of their own. A datum field naming a key is not that key's signature, but
+ *   spending an input needs its owner's signature, so the buyer funded this very transaction only if one of its inputs is the
+ *   buyer's. A transaction Koios does not know, or cannot be asked about, is a refusal too (fail closed, as buildPostEscrow does
+ *   for an advert's author).
  */
-async function resolveTarget(
-  provider: Provider, koiosUrl: string, canonical: string, fetchImpl: typeof fetch,
-  o: { refuse: (why: string) => Error; buyerPkh: string; buyerAddress: string; forSend: boolean },
-): Promise<{ lineage: EscrowLineage; advert: AdvertDatum }> {
+async function checkBuyer(
+  posted: EscrowDatum, koiosUrl: string, canonical: string, fetchImpl: typeof fetch,
+  o: { refuse: (why: string) => Error; buyerPkh: string; buyerAddress: string },
+): Promise<void> {
   const { refuse } = o;
-  const lineage = await resolveEscrowLineage(provider, koiosUrl, canonical, fetchImpl);
-  const { posted } = lineage;
-  if (posted.state !== 'Open') throw refuse(`it is a ${posted.state} output, not the output its Post made: use the escrow ref the Post returned.`);
+  if (posted.state !== 'Open') throw refuse(`it is ${withArticle(posted.state)} output, not the output its Post made: use the escrow ref the Post returned.`);
   if (posted.buyer_pkh !== o.buyerPkh) throw refuse(`it was not posted by ${cell(o.buyerAddress, 120)}.`);
   let funders: string[];
   try { funders = await koiosTxInputCreds(koiosUrl, canonical.slice(0, 64), fetchImpl); } catch (err) { throw refuse(`could not check who funded it (${koiosFailure(err)}).`); }
   if (!funders.includes(posted.buyer_pkh)) throw refuse(`the transaction that posted it has no input from ${cell(o.buyerAddress, 120)}, so that wallet did not fund it.`);
-  if (o.forSend) {
-    if (lineage.current === null) throw refuse('no live output was found for it (it may be finished, or the chain index may be behind).');
-    if (lineage.current.datum.state !== 'Open') throw refuse(`it is ${lineage.current.datum.state} and a job can only be sent while it is Open.`);
-  }
+}
+
+/**
+ * The advert whose endpoint serves the escrow whose Post output is `posted`, read with readAdvert at the advert script address from
+ * the same Koios. Refused, naming the escrow and saying nothing was sent:
+ * - for a send, an advert that is Retired, spent (its supplier retired or replaced it: the endpoint it names is not one to send a
+ *   payload to now) or of a spent status Koios does not report. A poll sends the supplier nothing it does not have, and the endpoint
+ *   of a spent or retired advert is still where the job went, so a poll reads the advert whatever its state;
+ * - an endpoint that is not an https URL, and a capability that is not a template-contract one (this release).
+ */
+async function readTargetAdvert(
+  posted: EscrowDatum, koiosUrl: string, fetchImpl: typeof fetch,
+  o: { refuse: (why: string) => Error; forSend: boolean },
+): Promise<AdvertDatum> {
+  const { refuse } = o;
   const advertRef = formatOutRef(posted.advert_ref.txHash, posted.advert_ref.index);
   let read: AdvertRead;
   try { read = await readAdvert(advertRef, fetchImpl, koiosUrl); } catch (err) { throw refuse(`its advert ${advertRef} could not be read (${koiosFailure(err)}).`); }
@@ -290,7 +305,7 @@ async function resolveTarget(
   if (!isHttps(read.advert.endpoint_url)) throw refuse(`the endpoint of its advert ${advertRef} is not an https URL.`);
   const scope = outOfScope(undefined, read.advert.capability_id);
   if (scope !== null) throw refuse(scope);
-  return { lineage, advert: read.advert };
+  return read.advert;
 }
 
 export interface SentJob { jobId: string; status: string; route: Route['kind']; endpoint: string; capabilityId: string }
@@ -298,11 +313,12 @@ export interface SentJob { jobId: string; status: string; route: Route['kind']; 
 /**
  * Sends the job for an Open escrow to its supplier and returns the job id the supplier answers with (202 means its Claim has
  * confirmed). Only for a template-contract supplier, and only for the escrow's own buyer: `buyerAddress` must be the wallet address
- * whose key funded the escrow's Post (see resolveTarget), and `payload` exactly the payload the escrow committed to (its prompt_hash
+ * whose key funded the escrow's Post (see checkBuyer), and `payload` exactly the payload the escrow committed to (its prompt_hash
  * is promptHashForPayload of it). All of that is checked before the supplier is called; who the caller is cannot be (see the
- * residual in the header). The request is the route's: the escrow ref is the canonical one, the headers are the route's alone. Errors
- * name the escrow and never the endpoint or the body of an answer; a failure after the request may have reached the supplier says
- * the escrow may have been claimed anyway.
+ * residual in the header). The escrow must be live and Open before its advert is read, and so before anything is asked of the
+ * advert's host. The request is the route's: the escrow ref is the canonical one, the headers are the route's alone. Errors name the
+ * escrow and never the endpoint or the body of an answer; a failure after the request may have reached the supplier says the
+ * escrow may have been claimed anyway.
  */
 export async function sendJob(provider: Provider, koiosUrl: string, p: { escrowRef: string; payload: string; buyerAddress: string; route?: Route['kind'] }, fetchImpl: typeof fetch = fetch): Promise<SentJob> {
   const canonical = canonicalRef(p.escrowRef);
@@ -311,8 +327,14 @@ export async function sendJob(provider: Provider, koiosUrl: string, p: { escrowR
   const forced = outOfScope(p.route, undefined);
   if (forced !== null) throw refuse(forced);
   const buyerPkh = buyerKeyHash(p.buyerAddress, refuse);
-  const { lineage, advert } = await resolveTarget(provider, koiosUrl, canonical, fetchImpl, { refuse, buyerPkh, buyerAddress: p.buyerAddress, forSend: true });
-  if (promptHashForPayload(p.payload) !== lineage.posted.prompt_hash) throw refuse("the payload does not match the escrow's prompt_hash: it must be exactly the payload the escrow was posted with.");
+  const lineage = await resolveEscrowLineage(provider, koiosUrl, canonical, fetchImpl);
+  const { posted } = lineage;
+  await checkBuyer(posted, koiosUrl, canonical, fetchImpl, { refuse, buyerPkh, buyerAddress: p.buyerAddress });
+  // Live and Open comes before the advert is read: an escrow that is finished, Claimed or Submitted costs no read of its advert.
+  if (lineage.current === null) throw refuse('no live output was found for it (it may be finished, or the chain index may be behind).');
+  if (lineage.current.datum.state !== 'Open') throw refuse(`it is ${lineage.current.datum.state} and a job can only be sent while it is Open.`);
+  const advert = await readTargetAdvert(posted, koiosUrl, fetchImpl, { refuse, forSend: true });
+  if (promptHashForPayload(p.payload) !== posted.prompt_hash) throw refuse("the payload does not match the escrow's prompt_hash: it must be exactly the payload the escrow was posted with.");
   const route = routeFor(advert.capability_id, p.route);
   const { headers, body } = route.body(canonical, p.payload);
   const size = Buffer.byteLength(body, 'utf8');
@@ -353,18 +375,22 @@ function wrongEscrow(text: string, canonical: string): JobView | null {
 /**
  * Asks the supplier of an escrow how a job stands, for the escrow's own buyer only (`buyerAddress`, as for sendJob) and for a
  * template-contract supplier only. The escrow may be live (Open, Claimed, Submitted) or consumed (accepted, released): a finished
- * job is fetchable after settlement. The endpoint is the advert's even when the advert has since been spent or retired. An answer
- * that names another escrow than the one asked about is a failed view. `supplierPkh` is the key the advert names; the view is the
- * supplier's own account (see JobView) and `endpoint` the URL it came from.
+ * job is fetchable after settlement. Only the Post output is read (readEscrowOutput; see the header), which holds the buyer, the
+ * funder's transaction and the advert, so no copy left at the escrow credential and no lag of the node can stop a poll. The
+ * endpoint is the advert's even when the advert has since been spent or retired. An answer that names another escrow than the one
+ * asked about is a failed view. `supplierPkh` is the key the advert names; the view is the supplier's own account (see JobView) and
+ * `endpoint` the URL it came from.
  */
-export async function getJob(provider: Provider, koiosUrl: string, p: { escrowRef: string; jobId: string; buyerAddress: string; route?: Route['kind'] }, fetchImpl: typeof fetch = fetch): Promise<PolledJob> {
+export async function getJob(koiosUrl: string, p: { escrowRef: string; jobId: string; buyerAddress: string; route?: Route['kind'] }, fetchImpl: typeof fetch = fetch): Promise<PolledJob> {
   const canonical = canonicalRef(p.escrowRef);
   const refuse = (why: string) => new Error(`Cannot poll a job for escrow ${canonical}: ${why} Nothing was sent.`);
   if (typeof p.jobId !== 'string' || !JOB_ID.test(p.jobId)) throw refuse('the job id must be 1 to 128 letters, digits, hyphens or underscores.');
   const forced = outOfScope(p.route, undefined);
   if (forced !== null) throw refuse(forced);
   const buyerPkh = buyerKeyHash(p.buyerAddress, refuse);
-  const { advert } = await resolveTarget(provider, koiosUrl, canonical, fetchImpl, { refuse, buyerPkh, buyerAddress: p.buyerAddress, forSend: false });
+  const { datum: posted } = await readEscrowOutput(koiosUrl, canonical, fetchImpl);
+  await checkBuyer(posted, koiosUrl, canonical, fetchImpl, { refuse, buyerPkh, buyerAddress: p.buyerAddress });
+  const advert = await readTargetAdvert(posted, koiosUrl, fetchImpl, { refuse, forSend: false });
   const route = routeFor(advert.capability_id, p.route);
   let res: Awaited<ReturnType<typeof safeFetch>>;
   try {

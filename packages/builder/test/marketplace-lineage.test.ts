@@ -16,7 +16,7 @@ import type { KoiosOptions } from './fixtures/escrow-koios.fixture.ts';
 import { ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_SCRIPT_HASH } from '../src/vector/marketplace-constants.ts';
 import { decodeEscrowDatum, encodeEscrowDatum } from '../src/vector/marketplace-datum.ts';
 import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
-import { resolveEscrowLineage } from '../src/vector/marketplace-lineage.ts';
+import { resolveEscrowLineage, readEscrowOutput } from '../src/vector/marketplace-lineage.ts';
 import { koiosCredentialUtxos } from '../src/vector/marketplace-indexer.ts';
 import { resolveEscrowLineage as resolveViaBuild } from '../src/vector/marketplace-build.ts';
 
@@ -493,5 +493,52 @@ describe('resolveEscrowLineage', () => {
     const odd = at(ESCROW_TX, { ...posted, prompt_hash: '' });
     const row = { tx_hash: ESCROW_TX, tx_index: 0, address: ESCROW_ADDRESS, value: String(ESCROW_LOCKED_LOVELACE), is_spent: false, inline_datum: { bytes: encodeEscrowDatum({ ...posted, prompt_hash: '' }) } };
     assert.equal((await lineage([odd], { rows: [row] })).current?.utxo, odd);
+  });
+});
+
+// What the transport reads when it needs only what the Post output says (its buyer, its supplier, its advert, its hashes): Koios
+// utxo_info of the one ref, spent or not, and nothing else.
+describe('readEscrowOutput', () => {
+  const read = (w: World, ref = ESCROW_REF) => readEscrowOutput(KOIOS, ref, w.koios.f);
+  test('reads the datum, the spent flag and the value of the output the ref names, spent or not, from utxo_info alone', async () => {
+    for (const spent of [true, false]) {
+      const w = world([], { spent });
+      assert.deepEqual(await read(w), { datum: posted, spent, lovelace: ESCROW_LOCKED_LOVELACE }, `spent: ${spent}`);
+      assert.deepEqual(w.koios.calls.map((c) => c.path), ['/api/v1/utxo_info'], 'no credential listing, no tx_info, and the node is not in it at all');
+    }
+  });
+  test('a copy left at the escrow credential cannot change the answer, though it stops the resolver', async () => {
+    // a decoy that carries the escrow's fields in a transaction that spent no escrow output: the resolver cannot tell what continues the escrow
+    const w = world([at(DECOY_TX, claimedDatum)], { txs: { ...GENUINE_TXS, ...DECOY_TXS } });
+    await assert.rejects(() => resolve(w), refusal(/None of .* descends from escrow .* by the spend chain/));
+    assert.deepEqual((await read(w)).datum, posted);
+    assert.equal(credentialRequests(w.koios).length, 1, 'the resolver listed the credential; reading the output did not');
+  });
+  test('a ref names an output of any state: it is for the caller to say what state it must be', async () => {
+    const row = { tx_hash: CLAIM_TX, tx_index: 0, address: ESCROW_ADDRESS, value: String(ESCROW_LOCKED_LOVELACE), is_spent: false, inline_datum: { bytes: encodeEscrowDatum(claimedDatum) } };
+    assert.equal((await read(world([], { rows: [row] }), `${CLAIM_TX}#0`)).datum.state, 'Claimed');
+  });
+  test('asks Koios for the canonical lowercase ref, and a malformed ref is refused without calling Koios', async () => {
+    const w = world([]);
+    await read(w, `  ${ESCROW_TX.toUpperCase()}#0 `);
+    assert.deepEqual(w.koios.calls.map((c) => c.body), [{ _utxo_refs: [ESCROW_REF], _extended: true }]);
+    const unused = escrowKoios();
+    await assert.rejects(() => readEscrowOutput(KOIOS, 'nope#1', unused.f), /Invalid out ref/);
+    assert.equal(unused.calls.length, 0);
+  });
+  test('refuses, in the resolver\'s words and naming the escrow, what is not a funded escrow output', async () => {
+    const other = [{ tx_hash: 'ab'.repeat(32), tx_index: 0, address: ESCROW_ADDRESS, value: '1', is_spent: false, inline_datum: { bytes: ESCROW_OPEN_DATUM_HEX } }];
+    const refused: Array<[name: string, o: KoiosOptions, message: RegExp]> = [
+      ['an output Koios does not know', { rows: [] }, /^Escrow .* not found on the ledger\.$/],
+      ['an answer for another output', { rows: other }, /not found on the ledger/],
+      ['an output at another address', { address: OWN_ADDRESS }, /^UTxO .* is not an escrow output: its payment credential is not the escrow script's\.$/],
+      ['an output with no datum', { datumHex: null }, /^UTxO .* does not hold an escrow datum\.$/],
+      ['an output with another datum', { datumHex: ADVERT_DATUM_HEX }, /^UTxO .* does not hold an escrow datum\.$/],
+      ['an output whose spent status is not reported', { spent: null }, /^Koios did not report whether escrow .* is spent; refusing to guess where it is\.$/],
+      ['an output whose value is not reported', { value: null }, /^Koios did not report the value of escrow .*; refusing to guess whether it is funded\.$/],
+      ['an output that holds less than its datum owes', { value: '1000000' }, /is not funded: its datum owes 2200000 lovelace but the output holds 1000000/],
+      ['a Koios that answers 502', { status: 502 }, /^Could not read escrow .*: Koios utxo_info answered 502$/],
+    ];
+    for (const [name, o, message] of refused) await assert.rejects(() => read(world([], o)), refusal(message), name);
   });
 });

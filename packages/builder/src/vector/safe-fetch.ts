@@ -1,9 +1,11 @@
 // packages/builder/src/vector/safe-fetch.ts
-// Vendored from Apex-Fusion/vector-service-agents packages/vector-read/src/safe-fetch.ts @ f3b50e9; keep the two copies identical.
+// Vendored from Apex-Fusion/vector-service-agents packages/vector-read/src/safe-fetch.ts @ cfd036e; keep the two copies identical.
 // The only code path on the public server that fetches URLs taken from chain data
 // (advert endpoint_url, detail_uri). Rules: https only, no credentials, hosts that
-// resolve to loopback/private/link-local/CGNAT/unspecified ranges are refused,
-// bodies are capped, redirects never change scheme, and the whole call has a budget.
+// resolve to loopback/private/link-local/site-local/multicast/CGNAT/unspecified ranges
+// are refused (an IPv4 address inside an IPv6 one counts as that IPv4 address, whatever
+// the spelling), bodies are capped, redirects never change scheme, and the whole call
+// has a budget: the host lookup is inside it.
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
@@ -22,18 +24,48 @@ export function assertSafeUrl(url: string): URL {
   return u;
 }
 
+const isPrivateV4 = (a: number, b: number) => a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+
+// The eight 16-bit groups of an IPv6 address in any spelling: zero compression, leading zeros, upper case, an embedded dotted quad, a zone suffix.
+// Null when the text is not an IPv6 address. (A resolver may answer in any of these forms, not only the canonical one.)
+function ipv6Groups(text: string): number[] | null {
+  let s = text.toLowerCase();
+  const zone = s.indexOf('%');
+  if (zone >= 0) s = s.slice(0, zone);
+  const tailAt = s.lastIndexOf(':') + 1;
+  if (s.slice(tailAt).includes('.')) { // a dotted quad at the end stands for two groups
+    const quad = s.slice(tailAt);
+    if (isIP(quad) !== 4) return null;
+    const [a, b, c, d] = quad.split('.').map(Number);
+    s = `${s.slice(0, tailAt)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const groupsOf = (part: string) => (part === '' ? [] : part.split(':').map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : Number.NaN)));
+  const head = groupsOf(halves[0]), rest = halves.length === 2 ? groupsOf(halves[1]) : [];
+  const gap = 8 - head.length - rest.length; // the zero groups that "::" stands for
+  if (halves.length === 2 ? gap < 1 : gap !== 0) return null;
+  const groups = [...head, ...Array<number>(Math.max(gap, 0)).fill(0), ...rest];
+  return groups.length === 8 && groups.every((g) => Number.isInteger(g)) ? groups : null;
+}
+
 export function isPrivateAddress(ip: string): boolean {
   const v = isIP(ip);
   if (v === 4) {
     const [a, b] = ip.split('.').map(Number);
-    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+    return isPrivateV4(a, b);
   }
   if (v === 6) {
-    const low = ip.toLowerCase();
-    if (low === '::1' || low === '::') return true;
-    if (low.startsWith('::ffff:')) return isPrivateAddress(low.slice(7));
-    const first = parseInt(low.split(':')[0] || '0', 16);
-    return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80;
+    const g = ipv6Groups(ip);
+    if (!g) return true; // a form this function cannot read is not trusted
+    const embedded = () => isPrivateV4(g[6] >> 8, g[6] & 0xff); // the IPv4 address in the last 32 bits
+    if (g.slice(0, 6).every((x) => x === 0)) return true; // ::/96: unspecified, loopback and the deprecated IPv4-compatible forms (::10.0.0.1)
+    if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return embedded(); // IPv4-mapped (::ffff:10.0.0.1)
+    if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return embedded(); // NAT64 (64:ff9b::a00:1 is 10.0.0.1)
+    return (g[0] & 0xfe00) === 0xfc00 // fc00::/7 unique local
+      || (g[0] & 0xffc0) === 0xfe80 // fe80::/10 link-local
+      || (g[0] & 0xffc0) === 0xfec0 // fec0::/10 site-local (deprecated)
+      || (g[0] & 0xff00) === 0xff00; // ff00::/8 multicast
   }
   return true;
 }
@@ -65,20 +97,34 @@ async function readCapped(res: Response, max: number): Promise<Buffer> {
   return Buffer.concat(chunks, total);
 }
 
+// Settles like `work`, or rejects with the signal's reason the moment the signal fires: for the budget that is the TimeoutError that fetch would give.
+// A lookup cannot be cancelled; it is only no longer waited for, and what it answers afterwards is dropped.
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) { work.catch(() => {}); return Promise.reject(signal.reason); }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
 export async function safeFetch(url: string, init: RequestInit = {}, opts: SafeFetchOpts = {}): Promise<{ status: number; headers: Headers; text: string }> {
   const u = assertSafeUrl(url);
+  // The budget starts here, before the host lookup, and covers it: a resolver that stalls is cut at timeoutMs like a fetch that stalls.
+  // The timeout is combined with any signal the caller passed, never replaces it. (The caller's own signal reaches fetch, as before.)
+  const timeout = AbortSignal.timeout(opts.timeoutMs ?? SAFE_FETCH_DEFAULTS.timeoutMs);
+  const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
   // Residual risk (check-then-connect): the host is vetted by the lookup below and then resolved a second
   // time by fetch itself, so a hostile resolver could answer differently the second time. That gap is
   // bounded by https-only and certificate validation (the peer must still prove it is the vetted hostname).
   // Pinning the vetted address would need an undici dispatcher with its own connect step; ruled out.
   const lookup = opts.lookup ?? (async (h: string) => dnsLookup(h, { all: true }));
-  const addrs = isIP(u.hostname) ? [{ address: u.hostname, family: isIP(u.hostname) }] : await lookup(u.hostname);
+  // URL.hostname keeps the brackets of an IPv6 literal ("[::1]"), and isIP does not know that form: strip them so a literal is judged directly.
+  const literal = u.hostname.startsWith('[') && u.hostname.endsWith(']') ? u.hostname.slice(1, -1) : u.hostname;
+  const addrs = isIP(literal) ? [{ address: literal, family: isIP(literal) }] : await untilAborted(Promise.resolve(lookup(u.hostname)), timeout);
   if (addrs.length === 0) throw new Error(`safeFetch: ${u.hostname} does not resolve`);
   for (const a of addrs) if (isPrivateAddress(a.address)) throw new Error(`safeFetch: ${u.hostname} resolves to a private or reserved address; refused`);
   const f = opts.fetchImpl ?? fetch;
-  // The timeout is combined with any signal the caller passed, never replaces it.
-  const timeout = AbortSignal.timeout(opts.timeoutMs ?? SAFE_FETCH_DEFAULTS.timeoutMs);
-  const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
   const res = await f(u.toString(), { ...init, redirect: 'manual', signal });
   if (res.status >= 300 && res.status < 400) {
     const loc = res.headers.get('location') ?? '';

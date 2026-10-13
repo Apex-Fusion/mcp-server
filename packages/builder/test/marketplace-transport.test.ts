@@ -39,7 +39,7 @@ import { ROUTES, routeFor, parseJobResponse, sendJob, getJob } from '../src/vect
 import type { Route } from '../src/vector/marketplace-transport.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
 import { OWN_ADDRESS } from './fixtures/fixture-provider.ts';
-import { world, escrowAt, ESCROW_TX, CLAIM_TX, SUBMIT_TX, SUPPLIER_ADDRESS, GENUINE_TXS } from './fixtures/escrow-koios.fixture.ts';
+import { world, escrowAt, credentialRequests, ESCROW_TX, CLAIM_TX, SUBMIT_TX, DECOY_TX, SUPPLIER_ADDRESS, GENUINE_TXS, DECOY_TXS } from './fixtures/escrow-koios.fixture.ts';
 import type { SpentOutputs } from './fixtures/escrow-koios.fixture.ts';
 
 const KOIOS = 'https://koios.example';
@@ -272,8 +272,13 @@ function advertDatum(over: { capability_id?: string; endpoint_url?: string; stat
 
 interface Scenario {
   capability?: string; endpoint?: string; escrow?: 'open' | 'claimed' | 'submitted' | 'finished';
-  /** The ref the caller names: the Post output (default), or the output the Claim made (a later output of the same escrow; needs escrow: 'claimed'). */
-  names?: 'post' | 'claimed-output';
+  /**
+   * The ref the caller names: the Post output (default), the output the Claim made (a later output of the same escrow; needs
+   * escrow: 'claimed'), or an output in the Accepted state, which is all there is of the escrow on the chain.
+   */
+  names?: 'post' | 'claimed-output' | 'accepted-output';
+  /** A copy of the escrow's fields left at the escrow credential by a transaction that spent no escrow output, besides the escrow's own outputs. */
+  decoy?: boolean;
   /** The payload the escrow commits to, as its prompt_hash (default PAYLOAD). */
   committed?: string;
   /**
@@ -296,13 +301,17 @@ function scenario(o: Scenario = {}) {
   const claimed: EscrowDatum = { ...posted, state: 'Claimed' };
   const submitted: EscrowDatum = { ...posted, submitted_at: posted.posted_at + 60_000, result_receipt_hash: 'cd'.repeat(32), state: 'Submitted' };
   const state = o.escrow ?? 'open';
-  const chain: UTxO[] = { open: [escrowAt(ESCROW_TX, posted)], claimed: [escrowAt(CLAIM_TX, claimed)], submitted: [escrowAt(SUBMIT_TX, submitted)], finished: [] }[state];
+  const accepted: EscrowDatum = { ...posted, state: 'Accepted' };
+  const own: UTxO[] = o.names === 'accepted-output'
+    ? [escrowAt(CLAIM_TX, accepted)]
+    : { open: [escrowAt(ESCROW_TX, posted)], claimed: [escrowAt(CLAIM_TX, claimed)], submitted: [escrowAt(SUBMIT_TX, submitted)], finished: [] }[state];
+  const chain: UTxO[] = [...own, ...(o.decoy ? [escrowAt(DECOY_TX, claimed)] : [])];
   const funder = o.funder ?? 'buyer';
   const postInputs = POST_INPUTS[funder]; // undefined: Koios does not know the Post transaction
-  const koiosOptions = { txs: { ...GENUINE_TXS, ...(postInputs ? { [ESCROW_TX]: postInputs } : {}) }, ...(funder === 'koios-error' ? { txStatus: 502 } : {}) };
-  const claimedOutputRow = { tx_hash: CLAIM_TX, tx_index: 0, address: ESCROW_ADDRESS, value: String(ESCROW_LOCKED_LOVELACE), is_spent: false, inline_datum: { bytes: encodeEscrowDatum(claimed) } };
-  const w = o.names === 'claimed-output'
-    ? world(chain, { ...koiosOptions, rows: [claimedOutputRow] })
+  const koiosOptions = { txs: { ...GENUINE_TXS, ...(o.decoy ? DECOY_TXS : {}), ...(postInputs ? { [ESCROW_TX]: postInputs } : {}) }, ...(funder === 'koios-error' ? { txStatus: 502 } : {}) };
+  const laterOutputRow = (datum: EscrowDatum) => ({ tx_hash: CLAIM_TX, tx_index: 0, address: ESCROW_ADDRESS, value: String(ESCROW_LOCKED_LOVELACE), is_spent: false, inline_datum: { bytes: encodeEscrowDatum(datum) } });
+  const w = o.names === 'claimed-output' ? world(chain, { ...koiosOptions, rows: [laterOutputRow(claimed)] })
+    : o.names === 'accepted-output' ? world(chain, { ...koiosOptions, rows: [laterOutputRow(accepted)] })
     : world(chain, { ...koiosOptions, datumHex: encodeEscrowDatum(posted), spent: state !== 'open' });
   const advert = o.advert ?? {};
   const advertRow: Record<string, unknown> = {
@@ -326,13 +335,13 @@ function scenario(o: Scenario = {}) {
     if (u.includes('/api/v1/')) return w.koios.f(url, init);
     return sup.f(url, init as RequestInit);
   }) as unknown as typeof fetch;
-  const named = o.names === 'claimed-output' ? `${CLAIM_TX}#0` : ESCROW_REF;
+  const named = o.names === 'claimed-output' || o.names === 'accepted-output' ? `${CLAIM_TX}#0` : ESCROW_REF;
   return {
     sup, koios: w.koios, posted, named, advertUrls: () => advertUrls, advertReads: () => advertUrls.length,
     /** The tx_info questions asked about the Post transaction (who funded it). */
     fundingChecks: () => w.koios.calls.filter((c) => c.path === '/api/v1/tx_info' && (c.body._tx_hashes as string[]).includes(ESCROW_TX)).map((c) => c.body),
     send: (over: Partial<Parameters<typeof sendJob>[2]> = {}) => sendJob(w.node, KOIOS, { escrowRef: named, payload: PAYLOAD, buyerAddress: OWN_ADDRESS, ...over }, fetchImpl),
-    poll: (over: Partial<Parameters<typeof getJob>[2]> = {}) => getJob(w.node, KOIOS, { escrowRef: named, jobId: JOB_ID, buyerAddress: OWN_ADDRESS, ...over }, fetchImpl),
+    poll: (over: Partial<Parameters<typeof getJob>[1]> = {}) => getJob(KOIOS, { escrowRef: named, jobId: JOB_ID, buyerAddress: OWN_ADDRESS, ...over }, fetchImpl),
   };
 }
 
@@ -461,6 +470,14 @@ describe('sendJob', () => {
       assert.equal(s.fundingChecks().length, 0);
       assert.equal(s.sup.calls.length, 0);
     });
+    test('the refusal names the state of that output with the right article: "an Accepted output", "a Claimed output"', async () => {
+      const s = scenario({ names: 'accepted-output' });
+      await rejectsWith(s.send(), (message) => {
+        assert.equal(message, `Cannot send a job for escrow ${CLAIM_TX}#0: it is an Accepted output, not the output its Post made: use the escrow ref the Post returned. Nothing was sent.`);
+      });
+      assert.equal(s.fundingChecks().length, 0);
+      assert.equal(s.sup.calls.length, 0);
+    });
   });
 
   // The payload is the buyer's too: the escrow committed to exactly one.
@@ -557,6 +574,19 @@ describe('sendJob', () => {
       assert.equal(s.sup.calls.length, 0);
     });
   }
+  // The advert is where the payload would go. The escrow must be live and Open before the advert is so much as read, so a send
+  // for an escrow that is Claimed, Submitted or finished never asks the ledger about its advert, and a live Open one asks once.
+  test('the escrow must be live and Open before its advert is read: otherwise the advert is never asked for', async () => {
+    for (const escrow of ['claimed', 'submitted', 'finished'] as const) {
+      const s = scenario({ escrow });
+      await rejectsWith(s.send(), (message) => { cleanOf(message); assert.match(message, /^Cannot send a job for escrow .* Nothing was sent\.$/); });
+      assert.equal(s.advertReads(), 0, `${escrow}: the advert was read`);
+      assert.equal(s.sup.calls.length, 0, escrow);
+    }
+    const open = scenario();
+    await open.send();
+    assert.equal(open.advertReads(), 1, 'an Open escrow reads its advert once');
+  });
   test('refuses an empty payload before asking anything, and a request over 1,000,000 bytes before it reaches the supplier', async () => {
     const s = scenario();
     await rejectsWith(s.send({ payload: '' }), (message) => { cleanOf(message); assert.match(message, /the payload must be a non-empty string\. Nothing was sent\.$/); });
@@ -751,6 +781,38 @@ describe('getJob', () => {
       const unknown = scenario({ escrow: 'finished', funder: 'unknown' });
       await rejectsWith(unknown.poll(), (message) => { cleanOf(message); assert.match(message, /could not check who funded it \(Koios tx_info: transaction not found\)/); });
       assert.equal(unknown.sup.calls.length, 0);
+    });
+  });
+
+  // A poll needs the buyer, the funder and the advert, and the Post output holds all three: it reads that output and nothing else
+  // of the escrow. So what anyone leaves at the escrow credential cannot make a finished job unpollable (griefing), and no node is
+  // asked (getJob takes none).
+  describe('a poll reads only the Post output', () => {
+    test('one read of the output and one of the transaction that made it, whatever state the escrow is in: no spend chain, no credential listing', async () => {
+      for (const escrow of ['open', 'claimed', 'submitted', 'finished'] as const) {
+        const s = scenario({ escrow, answer: () => reply(202, { status: 'running' }) });
+        assert.equal((await s.poll()).view.state, 'pending', escrow);
+        assert.deepEqual(s.koios.calls.map((c) => c.path), ['/api/v1/utxo_info', '/api/v1/tx_info'], escrow);
+        assert.equal(credentialRequests(s.koios).length, 0, escrow);
+      }
+    });
+    test('a copy of the escrow left at its credential cannot make a finished job unpollable, though a send for that escrow is stopped by it', async () => {
+      const s = scenario({ escrow: 'finished', decoy: true, answer: () => reply(200, done) });
+      const r = await s.poll();
+      assert.ok(r.view.state === 'done');
+      assert.equal(r.view.result, 'the output');
+      assert.equal(credentialRequests(s.koios).length, 0, 'the credential was not listed, so the copy was not met');
+      // a send has to know where the escrow is, and the resolver does not guess among copies: it fails closed
+      await rejectsWith(s.send(), (message) => assert.match(message, /^None of .* descends from escrow .* by the spend chain, though they carry its fields; refusing to treat any of them as the escrow\.$/));
+      assert.equal(s.sup.calls.length, 1, 'only the poll reached the supplier');
+    });
+    test('a ref that names an Accepted output is refused as "an Accepted output"', async () => {
+      const s = scenario({ names: 'accepted-output' });
+      await rejectsWith(s.poll(), (message) => {
+        assert.equal(message, `Cannot poll a job for escrow ${CLAIM_TX}#0: it is an Accepted output, not the output its Post made: use the escrow ref the Post returned. Nothing was sent.`);
+      });
+      assert.equal(s.fundingChecks().length, 0);
+      assert.equal(s.sup.calls.length, 0);
     });
   });
 

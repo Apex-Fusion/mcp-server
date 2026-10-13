@@ -7,6 +7,7 @@ import { ESCROW_SCRIPT_HASH } from './marketplace-constants.js';
 import { decodeEscrowDatum, encodeEscrowDatum, parseOutRef, formatOutRef } from './marketplace-datum.js';
 import type { EscrowDatum, EscrowState } from './marketplace-datum.js';
 import { koiosUtxoInfo, koiosCredentialUtxos, koiosTxInputRefs } from './marketplace-indexer.js';
+import type { KoiosUtxo } from './marketplace-indexer.js';
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -137,6 +138,34 @@ async function descendantsOf(rootRef: string, root: EscrowDatum, candidates: Can
 }
 
 /**
+ * The output `escrowRef` names, as Koios utxo_info describes it, spent or not (Koios keeps the datum of a spent output): its
+ * datum, whether Koios says it is spent, and what it holds. Koios only: no node, no spend chain, no other output, so nothing that
+ * anyone locks at the escrow credential can change the answer. A caller that needs only what the Post output says (its buyer, its
+ * supplier, its advert, its hashes) reads it here and not through resolveEscrowLineage, which fails when a copy at the escrow
+ * credential cannot be told from the escrow's own continuation. It fails closed as the resolver does for this output: not found,
+ * not at the escrow credential, no escrow datum, spent status or value not reported, not funded. Errors name the escrow by its
+ * canonical ref and carry no endpoint and no response body.
+ */
+export async function readEscrowOutput(koiosUrl: string, escrowRef: string, fetchImpl: typeof fetch = fetch): Promise<{ datum: EscrowDatum; spent: boolean; lovelace: bigint }> {
+  const ref = parseOutRef(escrowRef);
+  const canonical = formatOutRef(ref.txHash, ref.outputIndex);
+  let rows: KoiosUtxo[];
+  try { rows = await koiosUtxoInfo(koiosUrl, [canonical], fetchImpl); } catch (err) { throw new Error(`Could not read escrow ${canonical}: ${koiosFailure(err)}`); }
+  const row = rows.find((u) => String(u?.tx_hash).toLowerCase() === ref.txHash && u?.tx_index === ref.outputIndex);
+  if (!row) throw new Error(`Escrow ${canonical} not found on the ledger.`);
+  if (!isEscrowAddress(row.address)) throw new Error(`UTxO ${canonical} is not an escrow output: its payment credential is not the escrow script's.`);
+  let datum: EscrowDatum;
+  try { datum = decodeEscrowDatum(row.inline_datum?.bytes ?? ''); } catch { throw new Error(`UTxO ${canonical} does not hold an escrow datum.`); }
+  if (typeof row.is_spent !== 'boolean') throw new Error(`Koios did not report whether escrow ${canonical} is spent; refusing to guess where it is.`);
+  const lovelace = lovelaceOf(row.value);
+  if (lovelace === undefined) throw new Error(`Koios did not report the value of escrow ${canonical}; refusing to guess whether it is funded.`);
+  if (lovelace < owedLovelace(datum)) {
+    throw new Error(`Escrow ${canonical} is not funded: its datum owes ${owedLovelace(datum)} lovelace but the output holds ${lovelace}; refusing to treat it as an escrow.`);
+  }
+  return { datum, spent: row.is_spent, lovelace };
+}
+
+/**
  * Where is this escrow now? `escrowRef` names the Post output (`<txHash>#0`, as buildPostEscrow returns it); a later output of
  * the same escrow works too. While that output is unspent it is the live escrow. Once it is spent, the live one is the UTxO
  * that descends from it by the SPEND CHAIN, and `current: null` means none was found: the escrow is finished, or Koios has not
@@ -192,21 +221,10 @@ export async function resolveEscrowLineage(provider: Provider, koiosUrl: string,
     return utxo;
   };
 
-  const rows = await fromKoios(() => koiosUtxoInfo(koiosUrl, [canonical], fetchImpl));
-  const row = rows.find((u) => String(u?.tx_hash).toLowerCase() === ref.txHash && u?.tx_index === ref.outputIndex);
-  if (!row) throw new Error(`Escrow ${canonical} not found on the ledger.`);
-  if (!isEscrowAddress(row.address)) throw new Error(`UTxO ${canonical} is not an escrow output: its payment credential is not the escrow script's.`);
-  let posted: EscrowDatum;
-  try { posted = decodeEscrowDatum(row.inline_datum?.bytes ?? ''); } catch { throw new Error(`UTxO ${canonical} does not hold an escrow datum.`); }
-  if (typeof row.is_spent !== 'boolean') throw new Error(`Koios did not report whether escrow ${canonical} is spent; refusing to guess where it is.`);
-  const rootLovelace = lovelaceOf(row.value);
-  if (rootLovelace === undefined) throw new Error(`Koios did not report the value of escrow ${canonical}; refusing to guess whether it is funded.`);
-  if (rootLovelace < owedLovelace(posted)) {
-    throw new Error(`Escrow ${canonical} is not funded: its datum owes ${owedLovelace(posted)} lovelace but the output holds ${rootLovelace}; refusing to treat it as an escrow.`);
-  }
+  const { datum: posted, spent: rootSpent, lovelace: rootLovelace } = await readEscrowOutput(koiosUrl, canonical, fetchImpl);
 
   const [rootOnNode] = await fromNode(() => provider.getUtxosByOutRef([ref]));
-  if (!row.is_spent) {
+  if (!rootSpent) {
     if (!rootOnNode) throw disagree('Koios says it is unspent, the node does not list it (one of them is behind)');
     return { posted, current: { utxo: confirmedOnNode(rootOnNode, canonical, { datum: posted, lovelace: rootLovelace }), datum: posted }, spent: false };
   }
