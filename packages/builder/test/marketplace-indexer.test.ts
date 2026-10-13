@@ -1,9 +1,9 @@
 // packages/builder/test/marketplace-indexer.test.ts
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Constr, Data } from '@lucid-evolution/lucid';
-import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, koiosTxInputCreds, koiosTxInputRefs, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
-import { ADVERT_ADDRESS, ESCROW_ADDRESS, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
+import { Constr, Data, credentialToAddress } from '@lucid-evolution/lucid';
+import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, koiosTxInputCreds, koiosTxInputRefs, koiosCredentialUtxos, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
+import { ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_SCRIPT_HASH, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
 
 const fakeFetch = (body: unknown, status = 200) => (async () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
@@ -257,12 +257,14 @@ describe('koiosTxInputCreds', () => {
 describe('koiosTxInputRefs', () => {
   const [TX_A, TX_B, TX_C] = ['aa', 'bb', 'cc'].map((b) => b.repeat(32));
   const WALLET = 'addr1v9qp4aqc5ln0kyrzwu5j3q0um64pes2mtvgja8ytmvk5djgfj3cl6';
-  const input = (ref: string, bech32: unknown = WALLET) => ({ tx_hash: ref.slice(0, 64), tx_index: Number(ref.slice(65)), payment_addr: { bech32, cred: 'dd'.repeat(28) }, stake_addr: null });
+  const WALLET_CRED = 'dd'.repeat(28);
+  /** An input as tx_info reports it: the ref of the output it spends, and the address and payment credential that output sits at. */
+  const input = (ref: string, cred: unknown = WALLET_CRED, bech32: unknown = WALLET) => ({ tx_hash: ref.slice(0, 64), tx_index: Number(ref.slice(65)), payment_addr: { bech32, cred }, stake_addr: null });
   const row = (tx_hash: string, inputs: unknown) => ({ tx_hash, inputs });
   const KOIOS = 'https://koios.example';
 
   test('asks tx_info once for every transaction, inputs and assets included, and maps each to the refs of its inputs', async () => {
-    const { f, calls } = koiosReturning([row(TX_A, [input(`${TX_C}#0`, ESCROW_ADDRESS), input(`${TX_C}#1`)]), row(TX_B, [input(`${TX_A}#2`)])]);
+    const { f, calls } = koiosReturning([row(TX_A, [input(`${TX_C}#0`, ESCROW_SCRIPT_HASH, ESCROW_ADDRESS), input(`${TX_C}#1`)]), row(TX_B, [input(`${TX_A}#2`)])]);
     const refs = await koiosTxInputRefs('https://koios.example/', [TX_A, TX_B], f);
     assert.deepEqual([...refs], [[TX_A, [`${TX_C}#0`, `${TX_C}#1`]], [TX_B, [`${TX_A}#2`]]]);
     assert.equal(calls.length, 1);
@@ -275,10 +277,19 @@ describe('koiosTxInputRefs', () => {
     assert.deepEqual(calls[0].body._tx_hashes, [TX_A]);
     assert.deepEqual([...refs], [[TX_A, [`${TX_B}#0`]]]);
   });
-  test('given an address, keeps only the inputs held there (case ignored); a transaction that spent nothing there maps to an empty list', async () => {
-    const rows = [row(TX_A, [input(`${TX_C}#0`, ESCROW_ADDRESS), input(`${TX_C}#1`, WALLET)]), row(TX_B, [input(`${TX_C}#1`, WALLET)])];
-    const refs = await koiosTxInputRefs(KOIOS, [TX_A, TX_B], koiosReturning(rows).f, ESCROW_ADDRESS.toUpperCase());
-    assert.deepEqual([...refs], [[TX_A, [`${TX_C}#0`]], [TX_B, []]]);
+  test('given a payment credential, keeps only the inputs held at addresses with it, whatever their stake part (case ignored); a transaction that spent nothing there maps to an empty list', async () => {
+    const staked = credentialToAddress('Mainnet', { type: 'Script', hash: ESCROW_SCRIPT_HASH }, { type: 'Key', hash: 'ee'.repeat(28) });
+    const rows = [
+      row(TX_A, [input(`${TX_C}#0`, ESCROW_SCRIPT_HASH, ESCROW_ADDRESS), input(`${TX_C}#1`, ESCROW_SCRIPT_HASH, staked), input(`${TX_C}#2`)]),
+      row(TX_B, [input(`${TX_C}#3`)]),
+    ];
+    const refs = await koiosTxInputRefs(KOIOS, [TX_A, TX_B], koiosReturning(rows).f, ESCROW_SCRIPT_HASH.toUpperCase());
+    assert.deepEqual([...refs], [[TX_A, [`${TX_C}#0`, `${TX_C}#1`]], [TX_B, []]]);
+  });
+  test('the filter reads the payment credential Koios reports, not the address text', async () => {
+    const rows = [row(TX_A, [input(`${TX_C}#0`, WALLET_CRED, ESCROW_ADDRESS), input(`${TX_C}#1`, ESCROW_SCRIPT_HASH, WALLET), input(`${TX_C}#2`, undefined, ESCROW_ADDRESS)])];
+    const refs = await koiosTxInputRefs(KOIOS, [TX_A], koiosReturning(rows).f, ESCROW_SCRIPT_HASH);
+    assert.deepEqual(refs.get(TX_A), [`${TX_C}#1`]);
   });
   test('a transaction Koios does not know is absent from the map, and rows nobody asked about are ignored', async () => {
     const refs = await koiosTxInputRefs(KOIOS, [TX_A, TX_B], koiosReturning([row(TX_A, [input(`${TX_C}#0`)]), row(TX_C, [input(`${TX_A}#0`)])]).f);
@@ -311,5 +322,86 @@ describe('koiosTxInputRefs', () => {
     await assert.rejects(() => run(fakeFetch({}, 500)), safeMessage(/^Koios tx_info answered 500$/));
     await assert.rejects(() => run(htmlFetch), safeMessage(/^Koios tx_info: .*not valid JSON/));
     for (const body of [{}, { error: 'x' }, null, 'oops', 7]) await assert.rejects(() => run(fakeFetch(body)), safeMessage(/^Koios tx_info: Koios returned a non-list response$/));
+  });
+});
+
+// koiosCredentialUtxos: every unspent output at an address with a given payment credential, stake part and all. The escrow
+// validator finds the continuation of a Claim or Submit by payment credential alone, so the live escrow can sit at an address
+// the enterprise address does not cover; only a credential query sees it. Koios pages at 1,000 rows, so it is read page by page.
+describe('koiosCredentialUtxos', () => {
+  const CRED = ESCROW_SCRIPT_HASH;
+  const KOIOS = 'https://koios.example';
+  const rowN = (i: number) => ({ tx_hash: i.toString(16).padStart(64, '0'), tx_index: 0, address: ESCROW_ADDRESS, value: '2261030', payment_cred: CRED, inline_datum: { bytes: 'd87980' }, is_spent: false });
+  /** A Koios that pages the way PostgREST does: offset and limit from the query string, rows from `all`, never more than `cap` at once. */
+  const paging = (all: unknown[], cap = 1000) => {
+    const calls: Array<{ url: string; body: any; offset: number; limit: number }> = [];
+    const f = (async (u: string, init: any) => {
+      const q = new URL(u).searchParams;
+      const offset = Number(q.get('offset') ?? 0);
+      const limit = Math.min(Number(q.get('limit') ?? cap), cap);
+      calls.push({ url: u, body: JSON.parse(init.body), offset, limit });
+      return new Response(JSON.stringify(all.slice(offset, offset + limit)), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { f, calls };
+  };
+
+  test('asks credential_utxos for the credential with extended rows, in a fixed order, and returns the rows', async () => {
+    const { f, calls } = paging([rowN(1), rowN(2)]);
+    const rows = await koiosCredentialUtxos('https://koios.example/', CRED.toUpperCase(), f);
+    assert.deepEqual(rows.map((r) => r.tx_hash), [rowN(1).tx_hash, rowN(2).tx_hash]);
+    assert.equal(calls.length, 1);
+    const url = new URL(calls[0].url);
+    assert.equal(`${url.origin}${url.pathname}`, 'https://koios.example/api/v1/credential_utxos');
+    assert.equal(url.searchParams.get('order'), 'tx_hash.asc,tx_index.asc');
+    assert.deepEqual([calls[0].offset, calls[0].limit], [0, 100]);
+    assert.deepEqual(calls[0].body, { _payment_credentials: [CRED], _extended: true });
+  });
+  test('reads page after page until a short one, and the pages join up', async () => {
+    const all = [1, 2, 3, 4, 5].map(rowN);
+    const { f, calls } = paging(all);
+    const rows = await koiosCredentialUtxos(KOIOS, CRED, f, { pageSize: 2 });
+    assert.deepEqual(calls.map((c) => [c.offset, c.limit]), [[0, 2], [2, 2], [4, 2]]);
+    assert.deepEqual(rows, all);
+  });
+  test('a page that is exactly full costs one more request, which comes back empty', async () => {
+    const { f, calls } = paging([1, 2, 3, 4].map(rowN));
+    assert.equal((await koiosCredentialUtxos(KOIOS, CRED, f, { pageSize: 2 })).length, 4);
+    assert.deepEqual(calls.map((c) => c.offset), [0, 2, 4]);
+  });
+  test('a datum slice narrows the read on the server (hex only); what Koios sends is returned as it comes', async () => {
+    const { f, calls } = paging([rowN(1)]);
+    await koiosCredentialUtxos(KOIOS, CRED, f, { datumContains: 'ABCD01' });
+    assert.equal(new URL(calls[0].url).searchParams.get('inline_datum->>bytes'), 'like.*abcd01*');
+    const none = paging([]);
+    for (const slice of ['', 'xyz', 'ab cd', 'ab*', '%', 'ab'.repeat(200)]) {
+      await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, none.f, { datumContains: slice }), /hex/, JSON.stringify(slice.slice(0, 12)));
+    }
+    assert.equal(none.calls.length, 0, 'nothing was asked for a slice that is not hex');
+  });
+  test('refuses to read without end: maxRows caps what one call collects', async () => {
+    const { f, calls } = paging(Array.from({ length: 10 }, (_, i) => rowN(i + 1)));
+    await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, f, { pageSize: 2, maxRows: 4 }), safeMessage(/^Koios credential_utxos: 4 or more outputs matched; refusing to read them all$/));
+    assert.equal(calls.length, 2);
+  });
+  test('the credential must be 28 bytes of hex, checked before anything is asked', async () => {
+    const { f, calls } = paging([]);
+    for (const bad of ['', 'zz', 'ab'.repeat(27), 'ab'.repeat(29)]) await assert.rejects(() => koiosCredentialUtxos(KOIOS, bad, f), /payment credential/, JSON.stringify(bad.slice(0, 8)));
+    assert.equal(calls.length, 0);
+  });
+  test('entries that are not rows are dropped', async () => {
+    const { f } = paging([rowN(1), null, 'x', {}, { tx_hash: 'ab', tx_index: 'x' }, { tx_hash: rowN(2).tx_hash, tx_index: 1.5 }, rowN(3)]);
+    assert.deepEqual((await koiosCredentialUtxos(KOIOS, CRED, f)).map((r) => r.tx_hash), [rowN(1).tx_hash, rowN(3).tx_hash]);
+  });
+  test('POSTs to <base>/api/v1/credential_utxos however many slashes end the base', async () => {
+    const urls: string[] = [];
+    const f = (async (u: string) => { urls.push(u); return new Response('[]', { status: 200 }); }) as unknown as typeof fetch;
+    for (const base of ['https://koios.example/', 'https://koios.example', 'https://koios.example//']) await koiosCredentialUtxos(base, CRED, f);
+    assert.deepEqual(urls.map((u) => u.split('?')[0]), Array(3).fill('https://koios.example/api/v1/credential_utxos'));
+  });
+  test('failures name the operation and the status, never the URL or a body snippet', async () => {
+    const run = (f: typeof fetch) => koiosCredentialUtxos(KOIOS, CRED, f);
+    await assert.rejects(() => run(fakeFetch({}, 500)), safeMessage(/^Koios credential_utxos answered 500$/));
+    await assert.rejects(() => run(htmlFetch), safeMessage(/^Koios credential_utxos: .*not valid JSON/));
+    for (const body of [{}, { error: 'x' }, null, 'oops', 7]) await assert.rejects(() => run(fakeFetch(body)), safeMessage(/^Koios credential_utxos: Koios returned a non-list response$/));
   });
 });

@@ -15,8 +15,8 @@ export interface SupplierRow {
   status: string; advert_status: string; current_escrow_ref: string | null; last_seen_iso: string | null; created_slot: number;
 }
 export interface KoiosUtxo {
-  tx_hash: string; tx_index: number; address?: string; value: string; is_spent?: boolean;
-  inline_datum?: { bytes: string; value?: unknown } | null; datum_hash?: string | null;
+  tx_hash: string; tx_index: number; address?: string; value: string; is_spent?: boolean; payment_cred?: string;
+  inline_datum?: { bytes: string; value?: unknown } | null; datum_hash?: string | null; asset_list?: unknown[];
   reference_script?: { hash: string; bytes: string; type: string } | null; block_height?: number; block_time?: number;
 }
 interface Opts { fetchImpl?: typeof fetch; timeoutMs?: number }
@@ -72,44 +72,87 @@ export async function fetchSupplier(pkh: string, opts: Opts = {}): Promise<Suppl
   return normaliseSupplier(body as Record<string, unknown>);
 }
 
-/** Koios utxo_info: returns inline datum bytes even for spent outputs. */
-export async function koiosUtxoInfo(koiosUrl: string, refs: string[], fetchImpl: typeof fetch = fetch): Promise<KoiosUtxo[]> {
+/**
+ * POST a JSON payload to a Koios route that answers with a list, and return the list. The failures name the operation and the
+ * status only (see readJson): an HTTP error, a body that is not JSON, a body that is not a list.
+ */
+async function koiosPostList(koiosUrl: string, route: string, payload: unknown, fetchImpl: typeof fetch, query = ''): Promise<unknown[]> {
   const base = koiosUrl.replace(/\/+$/, '');
-  const res = await fetchImpl(`${base}/api/v1/utxo_info`, {
+  const res = await fetchImpl(`${base}/api/v1/${route}${query}`, {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'vector-mcp-builder' },
-    body: JSON.stringify({ _utxo_refs: refs, _extended: true }),
+    body: JSON.stringify(payload),
     signal: AbortSignal.timeout(15_000),
   });
-  if (!res.ok) throw new Error(`Koios utxo_info answered ${res.status}`);
-  const body = await readJson<unknown>(res, 'Koios utxo_info');
-  if (!Array.isArray(body)) throw new Error('Koios utxo_info: Koios returned a non-list response');
-  return body as KoiosUtxo[];
+  if (!res.ok) throw new Error(`Koios ${route} answered ${res.status}`);
+  const body = await readJson<unknown>(res, `Koios ${route}`);
+  if (!Array.isArray(body)) throw new Error(`Koios ${route}: Koios returned a non-list response`);
+  return body;
+}
+
+/** Koios utxo_info: returns inline datum bytes even for spent outputs. */
+export async function koiosUtxoInfo(koiosUrl: string, refs: string[], fetchImpl: typeof fetch = fetch): Promise<KoiosUtxo[]> {
+  return (await koiosPostList(koiosUrl, 'utxo_info', { _utxo_refs: refs, _extended: true }, fetchImpl)) as KoiosUtxo[];
 }
 
 /**
- * Koios tx_info: the payment credentials of a transaction's inputs, lowercase hex. Spending an input at a key address
- * needs that key's witness, so a credential equal to a key hash means that key signed the transaction. The request must
- * set `_inputs`: without it Koios answers with an empty inputs list, which would read as "nobody signed". A ledger
- * transaction always has an input, so an empty or missing list, like a transaction Koios does not know, is an error and
- * never an answer.
+ * Koios credential_utxos: the unspent outputs at every address whose payment credential is `paymentCredential` (28 bytes, hex),
+ * whatever its stake part. The escrow validator finds the continuation of a Claim or Submit by payment credential alone, so the
+ * live escrow can sit at an address that the enterprise address does not cover; only a credential query sees it. Koios pages at
+ * 1,000 rows, so the rows are read `pageSize` at a time in a fixed order (tx hash, index) until a short page; keep pageSize below
+ * the server's own cap or a capped page would be taken for the last one. `datumContains` (hex) narrows the read on the server to
+ * outputs whose inline datum contains it, which keeps a call small however many outputs the credential holds; the caller still
+ * checks every row it gets. At most `maxRows` rows are collected, past that the read is refused. Errors name the operation and the
+ * status only.
+ */
+export async function koiosCredentialUtxos(
+  koiosUrl: string, paymentCredential: string, fetchImpl: typeof fetch = fetch,
+  opts: { datumContains?: string; pageSize?: number; maxRows?: number } = {},
+): Promise<KoiosUtxo[]> {
+  const credential = paymentCredential.toLowerCase();
+  if (!/^[0-9a-f]{56}$/.test(credential)) throw new Error('The payment credential must be 28 bytes of hex (56 characters).');
+  let filter = '';
+  if (opts.datumContains !== undefined) {
+    if (!/^[0-9a-f]{2,256}$/i.test(opts.datumContains)) throw new Error('The datum slice to look for must be 1 to 128 bytes of hex.');
+    filter = `&inline_datum->>bytes=like.*${opts.datumContains.toLowerCase()}*`;
+  }
+  const pageSize = opts.pageSize ?? 100;
+  const maxRows = opts.maxRows ?? 5_000;
+  const rows: KoiosUtxo[] = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await koiosPostList(koiosUrl, 'credential_utxos', { _payment_credentials: [credential], _extended: true }, fetchImpl, `?order=tx_hash.asc,tx_index.asc&offset=${offset}&limit=${pageSize}${filter}`);
+    for (const entry of page) {
+      const row = entry as Partial<KoiosUtxo> | null;
+      if (row !== null && typeof row === 'object' && typeof row.tx_hash === 'string' && Number.isInteger(row.tx_index)) rows.push(row as KoiosUtxo);
+    }
+    if (page.length < pageSize) return rows;
+    if (rows.length >= maxRows) throw new Error(`Koios credential_utxos: ${maxRows} or more outputs matched; refusing to read them all`);
+  }
+}
+
+// The tx_info call behind koiosTxInputCreds and koiosTxInputRefs. It asks for the inputs and the assets: without `_inputs` Koios
+// answers with an empty inputs list, which would read as "spent nothing".
+type TxInput = { tx_hash?: unknown; tx_index?: unknown; payment_addr?: { bech32?: unknown; cred?: unknown } } | null;
+interface TxInfoRow { tx_hash?: unknown; inputs?: unknown }
+async function koiosTxInfo(koiosUrl: string, txHashes: string[], fetchImpl: typeof fetch): Promise<TxInfoRow[]> {
+  return (await koiosPostList(koiosUrl, 'tx_info', { _tx_hashes: txHashes, _inputs: true, _assets: true }, fetchImpl)) as TxInfoRow[];
+}
+/** A ledger transaction always has an input, so a missing or empty list means Koios did not honour `_inputs`: an error, never an answer. */
+function inputsOf(tx: TxInfoRow): TxInput[] {
+  if (!Array.isArray(tx.inputs) || tx.inputs.length === 0) throw new Error('Koios tx_info: response has no inputs');
+  return tx.inputs as TxInput[];
+}
+
+/**
+ * Koios tx_info: the payment credentials of a transaction's inputs, lowercase hex. Spending an input at a key address needs that
+ * key's witness, so a credential equal to a key hash means that key signed the transaction. A transaction Koios does not know is
+ * an error, and never an answer.
  */
 export async function koiosTxInputCreds(koiosUrl: string, txHash: string, fetchImpl: typeof fetch = fetch): Promise<string[]> {
   const hash = txHash.toLowerCase();
-  const base = koiosUrl.replace(/\/+$/, '');
-  const res = await fetchImpl(`${base}/api/v1/tx_info`, {
-    method: 'POST',
-    headers: { accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'vector-mcp-builder' },
-    body: JSON.stringify({ _tx_hashes: [hash], _inputs: true, _assets: true }),
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) throw new Error(`Koios tx_info answered ${res.status}`);
-  const body = await readJson<unknown>(res, 'Koios tx_info');
-  if (!Array.isArray(body)) throw new Error('Koios tx_info: Koios returned a non-list response');
-  const tx = body.find((t) => String(t?.tx_hash).toLowerCase() === hash);
+  const tx = (await koiosTxInfo(koiosUrl, [hash], fetchImpl)).find((t) => String(t?.tx_hash).toLowerCase() === hash);
   if (!tx) throw new Error('Koios tx_info: transaction not found');
-  if (!Array.isArray(tx.inputs) || tx.inputs.length === 0) throw new Error('Koios tx_info: response has no inputs');
-  return tx.inputs.flatMap((i: { payment_addr?: { cred?: unknown } } | null) => {
+  return inputsOf(tx).flatMap((i) => {
     const cred = i?.payment_addr?.cred;
     return typeof cred === 'string' ? [cred.toLowerCase()] : [];
   });
@@ -117,35 +160,23 @@ export async function koiosTxInputCreds(koiosUrl: string, txHash: string, fetchI
 
 /**
  * Koios tx_info for several transactions in ONE request: for each one Koios knows, the refs (`txHash#index`, lowercase) of the
- * outputs it spent. An input's address is the address of the output it spends, so `atAddress` narrows the list to the outputs
- * spent at that address; for a script address those are the script outputs the transaction consumed, which is how the escrow
- * lineage is read off the chain (the transaction that created an escrow output spent the previous one). A transaction Koios does
- * not know is absent from the map (its answer is unknown, not "spent nothing"); a known one that spent nothing at `atAddress`
- * maps to an empty list. Like koiosTxInputCreds, the request sets `_inputs` (without it Koios answers with an empty list), and a
- * known transaction whose inputs are missing or empty is an error, since a ledger transaction always has one. Errors name the
- * operation and the status only.
+ * outputs it spent. An input's payment credential is the credential of the output it spends, so `atCredential` (hex) narrows the
+ * list to the outputs spent at addresses with that credential, whatever their stake part; for a script credential those are the
+ * script outputs the transaction consumed, which is how the escrow lineage is read off the chain (the transaction that created
+ * an escrow output spent the previous one). A transaction Koios does not know is absent from the map (its answer is unknown, not
+ * "spent nothing"); a known one that spent nothing at `atCredential` maps to an empty list. Errors name the operation and the
+ * status only.
  */
-export async function koiosTxInputRefs(koiosUrl: string, txHashes: string[], fetchImpl: typeof fetch = fetch, atAddress?: string): Promise<Map<string, string[]>> {
-  const wanted = [...new Set(txHashes.map((h) => h.toLowerCase()))];
+export async function koiosTxInputRefs(koiosUrl: string, txHashes: string[], fetchImpl: typeof fetch = fetch, atCredential?: string): Promise<Map<string, string[]>> {
+  const wanted = new Set(txHashes.map((h) => h.toLowerCase()));
   const refs = new Map<string, string[]>();
-  if (wanted.length === 0) return refs;
-  const base = koiosUrl.replace(/\/+$/, '');
-  const res = await fetchImpl(`${base}/api/v1/tx_info`, {
-    method: 'POST',
-    headers: { accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'vector-mcp-builder' },
-    body: JSON.stringify({ _tx_hashes: wanted, _inputs: true, _assets: true }),
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) throw new Error(`Koios tx_info answered ${res.status}`);
-  const body = await readJson<unknown>(res, 'Koios tx_info');
-  if (!Array.isArray(body)) throw new Error('Koios tx_info: Koios returned a non-list response');
-  const address = atAddress?.toLowerCase();
-  for (const tx of body) {
+  if (wanted.size === 0) return refs;
+  const credential = atCredential?.toLowerCase();
+  for (const tx of await koiosTxInfo(koiosUrl, [...wanted], fetchImpl)) {
     const hash = String(tx?.tx_hash).toLowerCase();
-    if (!wanted.includes(hash)) continue;
-    if (!Array.isArray(tx.inputs) || tx.inputs.length === 0) throw new Error('Koios tx_info: response has no inputs');
-    refs.set(hash, tx.inputs.flatMap((i: { tx_hash?: unknown; tx_index?: unknown; payment_addr?: { bech32?: unknown } } | null) => {
-      if (address !== undefined && String(i?.payment_addr?.bech32).toLowerCase() !== address) return [];
+    if (!wanted.has(hash)) continue;
+    refs.set(hash, inputsOf(tx).flatMap((i) => {
+      if (credential !== undefined && String(i?.payment_addr?.cred).toLowerCase() !== credential) return [];
       return typeof i?.tx_hash === 'string' && Number.isInteger(i?.tx_index) ? [`${i.tx_hash.toLowerCase()}#${i.tx_index}`] : [];
     }));
   }
