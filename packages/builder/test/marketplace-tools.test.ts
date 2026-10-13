@@ -308,8 +308,11 @@ describe('vector_build_marketplace_post_escrow', () => {
     const exact = await lockedLineFor({ price_lovelace: 300_000n, supplier_bond_lovelace: 700_000n });
     assert.ok(exact.includes('(plus any floor excess) returns. Miss that window'), exact);
     assert.ok(!exact.includes('raised'), exact);
-    // the rule is on price + supplier bond: a small buyer bond is the buyer's own return, not a supplier payout
-    assert.ok(!(await lockedLineFor({ buyer_bond_lovelace: 100_000n })).includes('raised'));
+    // the rule is on price + supplier bond: a small buyer bond is the buyer's own return, not a supplier payout. The Locked line also
+    // carries the bond the advert declared, which proves the knob reached the datum (a test that left the bond at 1 unit would pass anyway).
+    const smallBuyerBond = await lockedLineFor({ buyer_bond_lovelace: 100_000n });
+    assert.ok(smallBuyerBond.includes('buyer bond 0.100000'), smallBuyerBond);
+    assert.ok(!smallBuyerBond.includes('raised'), smallBuyerBond);
   });
   test('warns, in one line, when no pure 5-unit output could be kept aside for Accept and Reclaim', async () => {
     node = new FixtureProvider([{ txHash: FIXTURE_TXHASH, outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 900_000_000n } }]); // the only output is the only collateral candidate

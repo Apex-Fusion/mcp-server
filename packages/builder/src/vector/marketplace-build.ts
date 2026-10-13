@@ -212,6 +212,16 @@ export async function buildPostEscrow(
 }
 
 // ─── Accept / Reclaim plans (pure) ──────────────────────────────────────────
+
+/**
+ * Does Accept raise the supplier's payout to the minimum output? Accept owes the supplier the price and its bond; when that is
+ * less than MIN_UTXO_LOVELACE the output is raised to it, out of the buyer's return. One rule for planAccept and for the Post text
+ * that warns the buyer before it signs.
+ */
+export function supplierPayoutRaised(priceLovelace: bigint, supplierBondLovelace: bigint): boolean {
+  return priceLovelace + supplierBondLovelace < MIN_UTXO_LOVELACE;
+}
+
 // A payout below the minimum output cannot exist, so it is raised to MIN_UTXO_LOVELACE and the plan says so (`...Raised`): the
 // signer is shown more than the datum owes, and the difference is not free. `supplierPkh` is the key the datum names.
 export function planAccept(datum: EscrowDatum, callerPkh: string, nowMs: number) {
@@ -220,7 +230,7 @@ export function planAccept(datum: EscrowDatum, callerPkh: string, nowMs: number)
   const validTo = datum.submitted_at + ACCEPT_WINDOW_MS;
   if (nowMs > validTo) throw new Error(`Accept window closed at ${iso(validTo)}; the supplier may now Release.`);
   const supplierDue = datum.payment_lovelace + datum.supplier_bond_lovelace;
-  const supplierRaised = supplierDue < MIN_UTXO_LOVELACE;
+  const supplierRaised = supplierPayoutRaised(datum.payment_lovelace, datum.supplier_bond_lovelace);
   const buyerRaised = datum.buyer_bond_lovelace < MIN_UTXO_LOVELACE;
   return {
     supplierPkh: datum.supplier_pkh,

@@ -9,8 +9,8 @@ import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
 import { lucidForAddress } from './build.js';
 import { withJson } from './marketplace-indexer.js';
-import { buildPostEscrow, buildAccept, buildReclaim } from './marketplace-build.js';
-import { ACCEPT_WINDOW_MS, MIN_UTXO_LOVELACE } from './marketplace-constants.js';
+import { buildPostEscrow, buildAccept, buildReclaim, supplierPayoutRaised } from './marketplace-build.js';
+import { ACCEPT_WINDOW_MS } from './marketplace-constants.js';
 import { text, fail, cell, isoOrRaw, SIGN_COPY } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
 
@@ -38,7 +38,7 @@ export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit:
         const r = await buildPostEscrow(lucid, provider, { changeAddress, advertRef: advert_ref, payload, deliverByMs: deliver_by_ms });
         const deliverBy = isoOrRaw(r.deliverBy);
         // planAccept raises a supplier payout below the minimum output to it, and the raise comes out of the buyer's side: said here, before the Post is signed.
-        const supplierRaise = r.priceLovelace + r.supplierBondLovelace < MIN_UTXO_LOVELACE ? ' (the supplier payout is raised to the 1-unit minimum out of your return)' : '';
+        const supplierRaise = supplierPayoutRaised(r.priceLovelace, r.supplierBondLovelace) ? ' (the supplier payout is raised to the 1-unit minimum out of your return)' : '';
         // supplierPkh, endpointHost and capabilityId come out of an advert, which anyone can write: all three go through cell().
         const warning = r.collateralKept ? '' : '\n**Warning:** no pure 5-unit output was kept aside for the Accept/Reclaim script spends; make sure your wallet still has one afterwards (the change of this Post counts if it is a pure output of at least 5 units).';
         const md = `# Unsigned Escrow Post Built (Not Submitted)\n\n` +

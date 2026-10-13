@@ -23,7 +23,7 @@ import { decodeAdvertDatum, decodeEscrowDatum, encodeEscrowDatum, formatOutRef, 
 import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
 import {
   planPostEscrow, buildPostEscrow, reserveCollateralInputs, planAccept, planReclaim, paymentKeyHashOf, enterpriseAddressOf,
-  assertEscrowIsOutputZero, buildAccept, buildReclaim,
+  assertEscrowIsOutputZero, buildAccept, buildReclaim, supplierPayoutRaised,
 } from '../src/vector/marketplace-build.ts';
 
 const OWN_PKH = getAddressDetails(OWN_ADDRESS).paymentCredential!.hash;
@@ -536,6 +536,9 @@ describe('planAccept / planReclaim', () => {
     assert.deepEqual([at(600_000n, 399_999n, 999_999n).supplierRaised, at(600_000n, 399_999n, 999_999n).buyerRaised], [true, true]);
     assert.deepEqual([at(5_000_000n, 1n, 999_999n).supplierRaised, at(5_000_000n, 1n, 999_999n).buyerRaised], [false, true]);
     assert.deepEqual([at(1n, 1n, 5_000_000n).supplierRaised, at(1n, 1n, 5_000_000n).buyerRaised], [true, false]);
+    // the rule is one exported predicate on price + supplier bond, which the Post text asks as well: the two cannot drift apart
+    assert.deepEqual([supplierPayoutRaised(600_000n, 400_000n), supplierPayoutRaised(600_000n, 399_999n), supplierPayoutRaised(0n, 0n)], [false, true, true]);
+    assert.equal(supplierPayoutRaised(1n, 999_999n), at(1n, 999_999n, 1_000_000n).supplierRaised);
   });
   test('accept refuses the wrong buyer, the wrong state and a closed window', () => {
     assert.throws(() => planAccept(base, 'cc'.repeat(28), 1_786_530_200_000), /not the buyer/);
