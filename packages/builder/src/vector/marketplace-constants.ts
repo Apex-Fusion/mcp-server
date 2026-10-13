@@ -1,7 +1,7 @@
 // packages/builder/src/vector/marketplace-constants.ts
-// Vector mainnet marketplace constants. Source: agents-marketplace docs/DEPLOY_NEW_SUPPLIER.md
-// and the live reference-script UTxOs (verified via Koios 2026-10-13). Inlined on purpose:
-// the Docker image ships only build/, so nothing here may read plutus.json.
+// Vector mainnet marketplace constants. Source: agents-marketplace contracts/marketplace/plutus.json
+// and the service-agents design spec §6, plus the live reference-script UTxOs (verified via Koios
+// 2026-10-13). Inlined on purpose: the Docker image ships only build/, so nothing here may read plutus.json.
 export const ESCROW_SCRIPT_HASH = '810ee059cd7819ce8f995ae438bbb06fef10017b4a17929cf971a912';
 export const ESCROW_ADDRESS = 'addr1wxqsaczee4upnn50n9dwgw9mkph77yqp0d9p0y5ul9c6jysrv9dl5';
 export const ADVERT_SCRIPT_HASH = '9929fa4eed8b66b30b8608e601ed2a4b7b413a2413dd13ab275594da';
