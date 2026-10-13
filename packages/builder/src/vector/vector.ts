@@ -727,6 +727,6 @@ Sign locally with vector_signer_sign { txCbor }, then broadcast with vector_subm
   // Self-Improvement Module tools (Module 6)
   registerSelfImprovementTools(server, identity);
 
-  // Marketplace tools (adverts, escrow, receipts) live in marketplace.ts
+  // Marketplace tools (adverts, escrow, receipts): marketplace.ts is the entry, one file per tool family
   registerMarketplaceTools(server, identity);
 }

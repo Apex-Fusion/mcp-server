@@ -1,8 +1,8 @@
 // packages/builder/test/marketplace-tools.test.ts
 // Handler-level tests for the marketplace tools: a minimal fake server captures the handlers, global fetch is stubbed (the indexer,
 // and Koios either as the advert reads or as the escrow world of fixtures/escrow-koios.fixture.ts), and the node the build tools
-// talk to is a FixtureProvider handed in through the provider seam of registerMarketplaceTools. No network is touched.
-// (Registration and schemas are covered by the smoke suite.)
+// talk to is a FixtureProvider handed in as the provider argument of registerMarketplaceTools, as is the rate limiter. No network
+// is touched. (Schemas are covered by the smoke suite.)
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML, Constr, Data, fromText, getAddressDetails } from '@lucid-evolution/lucid';
@@ -10,7 +10,7 @@ import type { Provider, UTxO } from '@lucid-evolution/lucid';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { registerMarketplaceTools } from '../src/vector/marketplace.ts';
-import { limiterFor, RATE_LIMIT_PER_MINUTE } from '../src/vector/rate-limiter.ts';
+import { RateLimiter } from '../src/vector/rate-limiter.ts';
 import { ADVERT_ADDRESS, ESCROW_ADDRESS, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
 import { decodeEscrowDatum, encodeEscrowDatum, promptHashForPayload } from '../src/vector/marketplace-datum.ts';
 import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
@@ -24,12 +24,11 @@ type Handler = (args: Record<string, unknown>) => Promise<{ content: { type: str
 const serverOf = (into: Map<string, Handler>) => ({ tool: (name: string, _description: string, _shape: unknown, handler: Handler) => { into.set(name, handler); } }) as unknown as McpServer;
 // The node the build tools talk to is whatever the running test put in `node`.
 let node: Provider | undefined;
-const providerSeam = { provider: () => { if (!node) throw new Error('this test set no node'); return node; } };
-// The read tools and the build tools are registered apart, each under its own identity, so each has its own budget of calls per minute.
+const nodeOfTheTest = (): Provider => { if (!node) throw new Error('this test set no node'); return node; };
+// One registration serves every test of the file. Its limiter is a big one, so that the many calls of the file never meet it;
+// the rate-limit test registers its own, spent.
 const handlers = new Map<string, Handler>();
-registerMarketplaceTools(serverOf(handlers), 'marketplace-tools-test', providerSeam);
-const buildHandlers = new Map<string, Handler>();
-registerMarketplaceTools(serverOf(buildHandlers), 'marketplace-build-tools-test', providerSeam);
+registerMarketplaceTools(serverOf(handlers), 'marketplace-tools-test', nodeOfTheTest, new RateLimiter(100_000));
 const callOn = (registered: Map<string, Handler>) => async (name: string, args: Record<string, unknown> = {}): Promise<string> => {
   const h = registered.get(name);
   assert.ok(h, `${name} is registered`);
@@ -39,7 +38,6 @@ const callOn = (registered: Map<string, Handler>) => async (name: string, args: 
   return out.content[0].text;
 };
 const call = callOn(handlers);
-const callBuild = callOn(buildHandlers);
 const JSON_FENCE = '\n```json\n';
 const jsonOf = (t: string) => JSON.parse(t.slice(t.lastIndexOf(JSON_FENCE) + JSON_FENCE.length, t.lastIndexOf('\n```')));
 const markdownOf = (t: string) => t.slice(0, t.lastIndexOf('\n\n' + JSON_FENCE.slice(1)));
@@ -249,7 +247,7 @@ describe('vector_build_marketplace_post_escrow', () => {
 
   test('builds the unsigned post and shows the signer who is paid, what is locked and what comes back, truthfully', async () => {
     const before = Date.now();
-    const t = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+    const t = await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
     const after = Date.now();
     const j = jsonOf(t);
     assert.ok(t.startsWith('# Unsigned Escrow Post Built (Not Submitted)\n'));
@@ -285,7 +283,7 @@ describe('vector_build_marketplace_post_escrow', () => {
   });
   test('warns, in one line, when no pure 5-unit output could be kept aside for Accept and Reclaim', async () => {
     node = new FixtureProvider([{ txHash: FIXTURE_TXHASH, outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 900_000_000n } }]); // the only output is the only collateral candidate
-    const t = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+    const t = await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
     assert.equal(jsonOf(t).collateral_kept, false);
     assert.equal(lineOf(t, '**Collateral kept aside:**'), '**Collateral kept aside:** no');
     const warning = onlyLinesWith(t, 'no pure 5-unit output was kept aside');
@@ -298,7 +296,7 @@ describe('vector_build_marketplace_post_escrow', () => {
     const hostile = 'evil | cap\n## Inj `x`\r\n- **F:** l';
     const longHost = `${'h'.repeat(100)}.example:8443`;
     stub({ utxos: [advertUtxo(advertDatumWith({ capability_id: hostile, endpoint_url: `https://${longHost}/x?a=1` }))] });
-    const t = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+    const t = await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
     assert.ok(t.startsWith('# Unsigned Escrow Post Built'), t.slice(0, 600));
     assert.equal(lineOf(t, '**Hiring:**'), `**Hiring:** \`evil ¦ cap ## Inj 'x' - **F:** l\` from supplier key \`${ADVERT_EXPECTED.supplier_pkh}\`, endpoint host \`${'h'.repeat(79)}…\``);
     assert.equal(markdownOf(t).split('\n').filter((l) => /^(## |- )/.test(l)).length, 0, 'no heading or bullet was smuggled in');
@@ -306,34 +304,34 @@ describe('vector_build_marketplace_post_escrow', () => {
 
   test('a spent advert is a text refusal with troubleshooting tips, not a thrown error', async () => {
     stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX, { is_spent: true })] });
-    const t = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+    const t = await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
     assert.ok(t.startsWith(`Failed to build escrow post: Advert ${ADVERT_REF} has been spent (its supplier retired or replaced it); pick another advert.\n\n**Troubleshooting Tips:**\n1. The wallet needs the lock plus about 1 unit for fees`), t);
     assert.ok(t.includes('2. Check the advert is still Active with vector_marketplace_get_supplier'));
     assert.ok(!t.includes('Unsigned'));
   });
   test('refuses, as text, an advert its supplier key did not create, a retired one, and a buyer who is the supplier', async () => {
     stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)], authorCreds: ['bb'.repeat(28)] });
-    assert.match(await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* was not created by its supplier key/);
+    assert.match(await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* was not created by its supplier key/);
     const retired = Data.from(ADVERT_DATUM_HEX) as Constr<Data>;
     retired.fields[12] = new Constr(1, []);
     stub({ utxos: [advertUtxo(Data.to(retired))] });
-    assert.match(await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* is retired; pick another supplier\./);
+    assert.match(await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* is retired; pick another supplier\./);
     // The supplier's own wallet must hold something on the node, or building stops at "no UTxOs found" before the check is reached.
     node = new FixtureProvider([{ txHash: FIXTURE_TXHASH, outputIndex: 7, address: SUPPLIER_ADDRESS, assets: { lovelace: 900_000_000n } }]);
     stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)] });
-    assert.match(await callBuild(POST_TOOL, { changeAddress: SUPPLIER_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: The buyer cannot be the supplier of the same advert\./);
+    assert.match(await call(POST_TOOL, { changeAddress: SUPPLIER_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: The buyer cannot be the supplier of the same advert\./);
   });
   test('a deliver_by past the 24 h ceiling (a unit slip) reaches the caller as text; deliver_by_ms stays optional', async () => {
     const micro = Date.now() * 1000;
-    const t = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello', deliver_by_ms: micro });
+    const t = await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello', deliver_by_ms: micro });
     assert.match(t, /^Failed to build escrow post: deliver_by is \d+ ms from now, more than the 86580000 ms \(24 h plus the buffer\) a Post will lock funds for; deliver_by is POSIX milliseconds, check the unit\./);
-    const ok = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello', deliver_by_ms: Date.now() + 3_600_000 });
+    const ok = await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello', deliver_by_ms: Date.now() + 3_600_000 });
     assert.ok(ok.startsWith('# Unsigned Escrow Post Built'));
     assert.ok(Math.abs(jsonOf(ok).deliver_by - (Date.now() + 3_600_000)) < 5_000, 'an explicit deadline is the one built');
   });
   test('a wallet that cannot pay the lock is a text refusal too', async () => {
     node = new FixtureProvider([{ txHash: FIXTURE_TXHASH, outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 1_500_000n } }]);
-    const t = await callBuild(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+    const t = await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
     assert.ok(t.startsWith('Failed to build escrow post: '), t);
     assert.ok(t.includes('**Troubleshooting Tips:**'));
   });
@@ -370,7 +368,7 @@ describe('vector_build_marketplace_accept', () => {
     const now = Date.now();
     const posted = postedAround(now);
     const koios = escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 60_000))], posted, true);
-    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ` ${ESCROW_TX.toUpperCase()}#0 ` });
+    const t = await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ` ${ESCROW_TX.toUpperCase()}#0 ` });
     const j = jsonOf(t);
     askedConfiguredKoios(koios.calls.map((c) => c.url!));
     assert.ok(t.startsWith('# Unsigned Accept Built (Not Submitted)\n'));
@@ -392,7 +390,7 @@ describe('vector_build_marketplace_accept', () => {
     const now = Date.now();
     const posted = postedAround(now);
     escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 520_000))], posted, true);
-    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const t = await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
     const left = jsonOf(t).seconds_left;
     assert.ok(left > 70 && left <= 80, `seconds_left ${left}`);
     assert.equal(lineOf(t, '**Hurry:**'), `**Hurry:** only ${left} s remain in the accept window.`);
@@ -400,21 +398,21 @@ describe('vector_build_marketplace_accept', () => {
   test('an accept after the window has closed is a text refusal that names when it closed', async () => {
     const submitted = submittedAt(BASE, BASE.posted_at + 60_000); // the live August escrow: its window closed long ago
     escrowWorld([escrowAt(SUBMIT_TX, submitted)], BASE, true);
-    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const t = await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
     assert.equal(t, `Failed to build accept: Accept window closed at ${new Date(submitted.submitted_at! + 600_000).toISOString()}; the supplier may now Release. (escrow ${ESCROW_REF})${ACCEPT_TIPS}`);
   });
   test('says when a payout was raised to the 1-unit minimum: the supplier\'s, and the buyer bond', async () => {
     const now = Date.now();
     const low = postedAround(now, { payment_lovelace: 100_000n, supplier_bond_lovelace: 100_000n, buyer_bond_lovelace: 500_000n });
     escrowWorld([escrowAt(SUBMIT_TX, submittedAt(low, now - 60_000))], low, true);
-    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const t = await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
     assert.equal(lineOf(t, '**Supplier receives:**'), `**Supplier receives:** 1.000000${RAISED} at supplier key \`${BASE.supplier_pkh}\``);
     assert.equal(lineOf(t, '**Your bond back:**'), `**Your bond back:** 1.000000${RAISED}`);
     assert.deepEqual([jsonOf(t).supplier_lovelace, jsonOf(t).buyer_lovelace], ['1000000', '1000000']);
   });
   test('an escrow with no live continuation is a text refusal that does not call the escrow over', async () => {
     escrowWorld([], postedAround(Date.now()), true); // Koios says the Post output is spent, and nothing carries the escrow on
-    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const t = await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
     assert.equal(t, `Failed to build accept: No live continuation of escrow ${ESCROW_REF} found (spent, or not yet indexed); retry or check the explorer.${ACCEPT_TIPS}`);
     assert.doesNotMatch(refusalOf(t), ENDED_WORDING);
   });
@@ -423,7 +421,7 @@ describe('vector_build_marketplace_accept', () => {
     const posted = postedAround(now);
     const inflated = { ...submittedAt(posted, now - 60_000), payment_lovelace: posted.payment_lovelace + 1_000_000n };
     escrowWorld([escrowAt(SUBMIT_TX, inflated)], posted, true);
-    const t = await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const t = await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
     assert.equal(t, `Failed to build accept: UTxO ${SUBMIT_TX}#0 follows escrow ${ESCROW_REF} along the spend chain, but its datum differs from that escrow's in payment_lovelace, which Claim and Submit leave unchanged; refusing to build on it.${ACCEPT_TIPS}`);
     assert.doesNotMatch(refusalOf(t), ENDED_WORDING);
   });
@@ -431,9 +429,9 @@ describe('vector_build_marketplace_accept', () => {
     const now = Date.now();
     const posted = postedAround(now);
     escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 60_000))], posted, true);
-    assert.match(await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: 'nope#1' }), /^Failed to build accept: Invalid out ref/);
+    assert.match(await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: 'nope#1' }), /^Failed to build accept: Invalid out ref/);
     escrowWorld([escrowAt(SUBMIT_TX, submittedAt({ ...posted, buyer_pkh: 'aa'.repeat(28) }, now - 60_000))], { ...posted, buyer_pkh: 'aa'.repeat(28) }, true);
-    assert.match(await callBuild(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF }), /^Failed to build accept: This escrow was posted by another key; you are not the buyer\. \(escrow /);
+    assert.match(await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF }), /^Failed to build accept: This escrow was posted by another key; you are not the buyer\. \(escrow /);
   });
 });
 
@@ -442,7 +440,7 @@ describe('vector_build_marketplace_reclaim', () => {
     const now = Date.now();
     const posted = postedAround(now, { deliver_by: now - 300_000 });
     const koios = escrowWorld([escrowAt(ESCROW_TX, posted)], posted, false);
-    const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ` ${ESCROW_TX.toUpperCase()}#0 ` });
+    const t = await call(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ` ${ESCROW_TX.toUpperCase()}#0 ` });
     assert.ok(t.startsWith('# Unsigned Reclaim Built (Not Submitted)\n'));
     askedConfiguredKoios(koios.calls.map((c) => c.url!));
     assert.equal(lineOf(t, '**Escrow:**'), `**Escrow:** \`${ESCROW_REF}\``, 'the canonical ref, whatever case and spacing the caller used');
@@ -456,7 +454,7 @@ describe('vector_build_marketplace_reclaim', () => {
     const now = Date.now();
     const posted = postedAround(now); // deliver_by an hour from now
     escrowWorld([escrowAt(ESCROW_TX, posted)], posted, false);
-    const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const t = await call(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
     const opens = Math.ceil((posted.deliver_by + 1) / 1000) * 1000;
     assert.equal(t, `Failed to build reclaim: Reclaim opens at ${new Date(opens).toISOString()}: deliver_by is ${new Date(posted.deliver_by).toISOString()}, and the validity range may start only on a whole second after it. (escrow ${ESCROW_REF})${RECLAIM_TIPS}`);
   });
@@ -464,13 +462,13 @@ describe('vector_build_marketplace_reclaim', () => {
     const now = Date.now();
     const low = postedAround(now, { deliver_by: now - 300_000, payment_lovelace: 100_000n, supplier_bond_lovelace: 100_000n, buyer_bond_lovelace: 100_000n });
     escrowWorld([escrowAt(ESCROW_TX, low)], low, false);
-    const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const t = await call(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
     assert.equal(lineOf(t, '**Returned to you:**'), `**Returned to you:** 1.000000${RAISED} (price + supplier bond + buyer bond), and whatever else the escrow holds, as change`);
     assert.equal(jsonOf(t).buyer_lovelace, '1000000');
   });
   test('an escrow with no live continuation is a text refusal that does not call the escrow over', async () => {
     escrowWorld([], postedAround(Date.now(), { deliver_by: Date.now() - 300_000 }), true);
-    const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const t = await call(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
     assert.equal(t, `Failed to build reclaim: No live continuation of escrow ${ESCROW_REF} found (spent, or not yet indexed); retry or check the explorer.${RECLAIM_TIPS}`);
     assert.doesNotMatch(refusalOf(t), ENDED_WORDING);
   });
@@ -478,7 +476,7 @@ describe('vector_build_marketplace_reclaim', () => {
     const now = Date.now();
     const posted = postedAround(now, { deliver_by: now - 300_000 });
     escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 60_000))], posted, true);
-    const t = await callBuild(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    const t = await call(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
     assert.equal(t, `Failed to build reclaim: Escrow state is Submitted; Reclaim needs Open or Claimed. (escrow ${ESCROW_REF})${RECLAIM_TIPS}`);
   });
 });
@@ -491,19 +489,21 @@ describe('the build tools\' error text and rate limit', () => {
       [ACCEPT_TOOL, { escrow_ref: ESCROW_REF }, 'build accept'],
       [RECLAIM_TOOL, { escrow_ref: ESCROW_REF }, 'build reclaim'],
     ] as const) {
-      const t = await callBuild(tool, { changeAddress: OWN_ADDRESS, ...args });
+      const t = await call(tool, { changeAddress: OWN_ADDRESS, ...args });
       assert.ok(t.startsWith(`Failed to ${what}: boom ¦ 'x' ## Injected - **Fake:** line\n\n**Troubleshooting Tips:**\n1. `), `${tool}: ${t}`);
     }
   });
-  test('a caller over budget is turned away by every build tool before the node or the network is touched', async () => {
-    const identity = 'marketplace-over-budget-test';
-    const over = new Map<string, Handler>();
+  test('a caller over budget is turned away by every marketplace tool before the node or the network is touched', async () => {
+    const spent = new RateLimiter(1);
+    assert.equal(spent.check().allowed, true); // the one call this limiter allows
     let nodeAsked = 0, fetched = 0;
-    registerMarketplaceTools(serverOf(over), identity, { provider: () => { nodeAsked++; throw new Error('the node must not be asked'); } });
+    const over = new Map<string, Handler>();
+    registerMarketplaceTools(serverOf(over), 'marketplace-over-budget-test', () => { nodeAsked++; throw new Error('the node must not be asked'); }, spent);
     globalThis.fetch = (async () => { fetched++; return reply([]); }) as typeof fetch;
-    const bucket = limiterFor(identity);
-    for (let i = 0; i < RATE_LIMIT_PER_MINUTE; i++) assert.equal(bucket.check().allowed, true);
     for (const [tool, args] of [
+      ['vector_marketplace_list_capabilities', {}],
+      ['vector_marketplace_list_suppliers', {}],
+      ['vector_marketplace_get_supplier', { advert_ref: ADVERT_REF }],
       [POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'x' }],
       [ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF }],
       [RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF }],
@@ -518,6 +518,5 @@ describe('registration', () => {
   test('registers exactly the three read tools and the three build tools', () => {
     const six = ['vector_build_marketplace_accept', 'vector_build_marketplace_post_escrow', 'vector_build_marketplace_reclaim', 'vector_marketplace_get_supplier', 'vector_marketplace_list_capabilities', 'vector_marketplace_list_suppliers'];
     assert.deepEqual([...handlers.keys()].sort(), six);
-    assert.deepEqual([...buildHandlers.keys()].sort(), six);
   });
 });
