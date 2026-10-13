@@ -19,7 +19,7 @@
 // The three fleet POST handlers read the escrow ref from the X-Escrow-Ref header (makeChatHandler, makeTtsHandler, makeOcrHandler);
 // the chat one takes a Responses request (input, instructions, ...: RESPONSE_REQUEST_FIELDS) and refuses any other field. The template
 // contract is vector-agent-template c4c378a agent/src/routes/custom.ts: POST /v1/job {escrow_ref, payload}, GET /v1/job/:jobId.
-import { describe, test } from 'node:test';
+import { describe, test, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { Constr, Data, fromText } from '@lucid-evolution/lucid';
@@ -525,6 +525,14 @@ describe('getJob', () => {
     assert.equal(s.sup.calls.length, 0);
     assert.equal(s.koios.calls.length, 0);
   });
+  test('reads at most 1,000,000 bytes of an answer: exactly that many are read, one more is refused', async () => {
+    const overhead = Buffer.byteLength(JSON.stringify({ choices: [{ message: { content: '' } }], receipt: {}, receipt_signature: 'cd' }));
+    const sized = (bytes: number) => reply(200, JSON.stringify({ choices: [{ message: { content: 'x'.repeat(bytes - overhead) } }], receipt: {}, receipt_signature: 'cd' }));
+    const full = await scenario({ escrow: 'claimed', answer: () => sized(1_000_000) }).poll();
+    assert.ok(full.view.state === 'done');
+    assert.equal(full.view.result.length, 1_000_000 - overhead);
+    await rejectsWith(scenario({ escrow: 'claimed', answer: () => sized(1_000_001) }).poll(), (message) => { cleanOf(message); assert.match(message, /the supplier's answer is over the 1000000 byte limit\.$/); });
+  });
   test('a 200 that is no JSON object is not a finished job', async () => {
     const s = scenario({ escrow: 'claimed', answer: () => reply(200, '<html>welcome</html>') });
     assert.deepEqual((await s.poll()).view, { state: 'failed', reason: 'malformed_response', message: 'The supplier answered 200 with something that is not a JSON object.' });
@@ -537,5 +545,61 @@ describe('getJob', () => {
     const s = scenario({ escrow: 'claimed', endpoint: 'https://192.168.1.10' });
     await rejectsWith(s.poll(), (message) => { cleanOf(message); assert.match(message, /the supplier host resolves to a private or reserved address, which is refused\.$/); });
     assert.equal(s.sup.calls.length, 0);
+  });
+});
+
+// A supplier that never answers must cost a bounded wait and say what to check, not hang (Review Focus 1).
+describe('a supplier that never answers', () => {
+  afterEach(() => { mock.restoreAll(); });
+  /**
+   * The budget becomes a number in exactly one place, AbortSignal.timeout inside safeFetch. It is recorded there, and the 20 s is
+   * shortened to 30 ms so that the test does not sit through it; every other timeout (Koios, 15 s) is left alone.
+   */
+  function shortened() {
+    const budgets: number[] = [];
+    const real = AbortSignal.timeout.bind(AbortSignal);
+    mock.method(AbortSignal, 'timeout', (ms: number) => { budgets.push(ms); return real(ms === 20_000 ? 30 : ms); });
+    return budgets;
+  }
+  /** Answers when the request is abandoned and not before, as a connection to a dead supplier does. */
+  const hangs = (_call: Call, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    const signal = init.signal as AbortSignal;
+    if (signal.aborted) reject(signal.reason);
+    else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+
+  test('sendJob gives up after 20 s and says the escrow may have been claimed', async () => {
+    const budgets = shortened();
+    const s = scenario({ answer: hangs });
+    const started = Date.now();
+    await rejectsWith(s.send(), (message) => {
+      cleanOf(message);
+      assert.equal(message, `Could not send the job for escrow ${ESCROW_REF}: the supplier did not answer within 20 s. It may have claimed the escrow anyway, so check its state before sending again; if it stays Open, reclaim it after deliver_by.`);
+    });
+    assert.ok(Date.now() - started < 5_000, 'it did not wait for the real budget');
+    assert.deepEqual(budgets.filter((ms) => ms === 20_000), [20_000], 'the supplier call is given 20 s, once');
+    assert.equal(s.sup.calls.length, 1, 'and is not retried');
+  });
+  test('getJob gives up after 20 s too, without the claim warning (a poll claims nothing)', async () => {
+    const budgets = shortened();
+    const s = scenario({ escrow: 'claimed', answer: hangs });
+    await rejectsWith(s.poll(), (message) => {
+      cleanOf(message);
+      assert.equal(message, `Could not poll job ${JOB_ID} of escrow ${ESCROW_REF}: the supplier did not answer within 20 s.`);
+    });
+    assert.deepEqual(budgets.filter((ms) => ms === 20_000), [20_000]);
+    assert.equal(s.sup.calls.length, 1);
+  });
+  test('an aborted call is a timeout whichever way the abort is named', async () => {
+    for (const name of ['TimeoutError', 'AbortError']) {
+      const s = scenario({ answer: () => { throw Object.assign(new Error('The operation was aborted due to timeout'), { name }); } });
+      await rejectsWith(s.send(), (message) => assert.match(message, /the supplier did not answer within 20 s\. It may have claimed the escrow anyway/, name));
+    }
+  });
+  test('a Koios that never answers is an error naming the escrow, not a hang', async () => {
+    const never = (async () => { await new Promise((resolve) => setTimeout(resolve, 50)); throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }); }) as unknown as typeof fetch;
+    await rejectsWith(sendJob({} as never, KOIOS, { escrowRef: ESCROW_REF, payload: 'x' }, never), (message) => {
+      assert.equal(message, `Could not read escrow ${ESCROW_REF}: Koios request failed (network error or timeout)`);
+    });
   });
 });
