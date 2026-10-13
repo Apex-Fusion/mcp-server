@@ -17,8 +17,8 @@ import {
   advertTextFieldsRoundTrip, decodeEscrowDatum, encodeEscrowDatum, requestSpecHash, promptHashForPayload,
   escrowLockFloor, parseOutRef, formatOutRef,
 } from './marketplace-datum.js';
-import type { AdvertDatum, EscrowDatum } from './marketplace-datum.js';
-import { readAdvert, koiosTxInputCreds, koiosUtxoInfo } from './marketplace-indexer.js';
+import type { AdvertDatum, EscrowDatum, EscrowState } from './marketplace-datum.js';
+import { readAdvert, koiosTxInputCreds, koiosTxInputRefs, koiosUtxoInfo } from './marketplace-indexer.js';
 import type { KoiosUtxo } from './marketplace-indexer.js';
 
 // One definition of "the payment key hash of a change address" for every builder family: gov-build's, re-exported.
@@ -249,35 +249,86 @@ export interface EscrowLineage {
   spent: boolean;
 }
 
+type LiveEscrow = { utxo: UTxO; datum: EscrowDatum };
+
 /**
- * What a failed Koios call may tell a caller. koiosUtxoInfo's own messages name only the operation and the status; any other
- * failure (a transport error can carry the endpoint's host or URL) becomes a fixed phrase.
+ * What a failed Koios call may tell a caller. The messages of koiosUtxoInfo and koiosTxInputRefs name only the operation and
+ * the status; any other failure (a transport error can carry the endpoint's host or URL) becomes a fixed phrase.
  */
 function koiosFailure(err: unknown): string {
   const message = errorText(err);
-  return message.startsWith('Koios utxo_info') ? message : 'Koios request failed (network error or timeout)';
+  return /^Koios (utxo_info|tx_info)/.test(message) ? message : 'Koios request failed (network error or timeout)';
 }
 
 /** What an escrow's datum says is owed between the parties: the payment and both bonds, all that Accept and Reclaim pay out. */
 const owedLovelace = (d: EscrowDatum): bigint => d.payment_lovelace + d.buyer_bond_lovelace + d.supplier_bond_lovelace;
 const heldLovelace = (u: UTxO): bigint => u.assets.lovelace ?? 0n;
-/** The lineage rule: Claim and Submit leave advert_ref, buyer_pkh, posted_at and prompt_hash as they were posted. */
-const continuesEscrow = (posted: EscrowDatum, d: EscrowDatum): boolean =>
+/** The candidate rule: Claim and Submit leave advert_ref, buyer_pkh, posted_at and prompt_hash as they were posted. Public, so copyable: it only picks candidates. */
+const carriesFieldsOf = (posted: EscrowDatum, d: EscrowDatum): boolean =>
   d.advert_ref.txHash === posted.advert_ref.txHash && d.advert_ref.index === posted.advert_ref.index
   && d.buyer_pkh === posted.buyer_pkh && d.posted_at === posted.posted_at && d.prompt_hash === posted.prompt_hash;
+/** The states an escrow has a UTxO in, in the order Claim and Submit take it through them. Accepted, Reclaimed and Released are terminal: nothing is left at the escrow address. */
+const LIVE_STATES: EscrowState[] = ['Open', 'Claimed', 'Submitted'];
+const txOf = (ref: string): string => ref.slice(0, 64);
+const refOf = (e: LiveEscrow): string => formatOutRef(e.utxo.txHash.toLowerCase(), e.utxo.outputIndex);
+const named = (list: LiveEscrow[]): string => list.map(refOf).sort().join(', ');
 
 /**
- * Where is this escrow now? `escrowRef` names the Post output (`<txHash>#0`, as buildPostEscrow returns it). Claim and Submit
- * spend the escrow's UTxO and re-create it at the same address with the same value, so while the Post output is unspent it is the
- * live escrow, and once it is spent the live one is the UTxO at the escrow address that carries the same advert_ref, buyer,
- * posted_at and prompt_hash. `spent: true` with `current: null` means the escrow is finished.
+ * Which of `candidates` descend from the escrow output `rootRef` by the spend chain, and which Koios cannot tell yet because it
+ * does not know a transaction on the way (see resolveEscrowLineage). A candidate one state past the root's was made by a
+ * transaction that spent the root; one two states past was made by a transaction that spent an escrow output whose own
+ * transaction spent the root. Only inputs at the escrow address count, so a transfer that merely spends the supplier's change
+ * from the Claim is no link. One tx_info batch covers the candidates' transactions, a second the step between when one is needed.
+ */
+async function descendantsOf(rootRef: string, root: EscrowDatum, candidates: LiveEscrow[], koiosUrl: string, fetchImpl: typeof fetch): Promise<{ genuine: LiveEscrow[]; unknown: LiveEscrow[] }> {
+  // transaction hash -> the escrow outputs that transaction spent; a transaction Koios does not know is absent
+  const escrowInputsOf = async (txHashes: string[]): Promise<Map<string, string[]>> => {
+    try { return await koiosTxInputRefs(koiosUrl, txHashes, fetchImpl, ESCROW_ADDRESS); } catch (err) { throw new Error(`Could not read escrow ${rootRef}: ${koiosFailure(err)}`); }
+  };
+  const rootStep = LIVE_STATES.indexOf(root.state);
+  const stepsPastRoot = (c: LiveEscrow): number => { const step = LIVE_STATES.indexOf(c.datum.state); return rootStep < 0 || step < 0 ? 0 : step - rootStep; };
+  const reachable = candidates.filter((c) => stepsPastRoot(c) === 1 || stepsPastRoot(c) === 2); // a copy in any other state cannot come after the root
+  const spentByTx = await escrowInputsOf(reachable.map((c) => c.utxo.txHash));
+  const genuine: LiveEscrow[] = [];
+  const unknown: LiveEscrow[] = [];
+  const twoSteps: Array<{ candidate: LiveEscrow; spent: string[] }> = [];
+  for (const c of reachable) {
+    const spent = spentByTx.get(c.utxo.txHash.toLowerCase());
+    if (spent === undefined) unknown.push(c);
+    else if (stepsPastRoot(c) === 1) { if (spent.includes(rootRef)) genuine.push(c); }
+    else twoSteps.push({ candidate: c, spent });
+  }
+  const middle = await escrowInputsOf(twoSteps.flatMap(({ spent }) => spent.map(txOf)));
+  for (const { candidate, spent } of twoSteps) {
+    const behind = spent.map((ref) => middle.get(txOf(ref)));
+    if (behind.some((inputs) => inputs?.includes(rootRef))) genuine.push(candidate);
+    else if (behind.some((inputs) => inputs === undefined)) unknown.push(candidate);
+  }
+  return { genuine, unknown };
+}
+
+/**
+ * Where is this escrow now? `escrowRef` names the Post output (`<txHash>#0`, as buildPostEscrow returns it); a later output of
+ * the same escrow works too. While that output is unspent it is the live escrow. Once it is spent, the live one is the UTxO at
+ * the escrow address that descends from it by the SPEND CHAIN, and `spent: true` with `current: null` means the escrow is
+ * finished.
+ *
+ * Why the datum is not enough. Claim and Submit leave advert_ref, buyer_pkh, posted_at and prompt_hash as posted, so those four
+ * fields pick the candidates; but they are public, and anyone can lock a UTxO at the escrow address that carries copies of
+ * them. What a copy cannot fake is how it came to be. escrow.ak lets Claim and Submit make exactly one output at the escrow
+ * credential, so the true continuation is the output of the transaction that spent the previous escrow output: Post output,
+ * Claim, Claimed output, Submit, Submitted output. A candidate in state Claimed is genuine when the transaction that made it
+ * spent the posted output; one in state Submitted when its transaction spent an escrow output whose transaction spent the posted
+ * output. Koios tx_info answers both questions in at most two batched calls (none when nothing carries the escrow on, one when
+ * the live output is Claimed).
  *
  * Fails closed. Anyone can lock a UTxO at the escrow address with any datum, and Accept pays what the datum says, with the
  * wallet making up whatever the escrow output does not cover; so a UTxO counts as an escrow only when it is at ESCROW_ADDRESS,
  * holds an escrow datum, and holds at least the payment and both bonds that datum owes. It throws, naming the escrow, when
- * Koios cannot be read or does not say whether the Post output is spent, when Koios and the node disagree about it, and when
- * two funded UTxOs both claim to be the live escrow. A Koios failure's message carries neither the endpoint nor a response body.
- * `fetchImpl` stands in for fetch in the Koios call (tests).
+ * Koios cannot be read or does not say whether the Post output is spent, when Koios and the node disagree about it, when
+ * UTxOs carry the escrow's fields but none provably descends from it (or Koios does not know a transaction on the way yet), and
+ * when two of them do. A Koios failure's message carries neither the endpoint nor a response body. `fetchImpl` stands in for
+ * fetch in the Koios calls (tests).
  */
 export async function resolveEscrowLineage(provider: Provider, koiosUrl: string, escrowRef: string, fetchImpl: typeof fetch = fetch): Promise<EscrowLineage> {
   const ref = parseOutRef(escrowRef);
@@ -302,17 +353,22 @@ export async function resolveEscrowLineage(provider: Provider, koiosUrl: string,
     return { posted, current: { utxo, datum: posted }, spent: false };
   }
 
-  const live: Array<{ utxo: UTxO; datum: EscrowDatum }> = [];
+  const candidates: LiveEscrow[] = [];
   for (const u of await provider.getUtxos(ESCROW_ADDRESS)) {
     if (!u.datum) continue;
     // A node that lags Koios may still list the output Koios says is spent: that is where the escrow was, not where it is.
     if (u.txHash.toLowerCase() === ref.txHash && u.outputIndex === ref.outputIndex) continue;
     let d: EscrowDatum;
     try { d = decodeEscrowDatum(u.datum); } catch { continue; }
-    if (continuesEscrow(posted, d) && heldLovelace(u) >= owedLovelace(d)) live.push({ utxo: u, datum: d });
+    if (carriesFieldsOf(posted, d) && heldLovelace(u) >= owedLovelace(d)) candidates.push({ utxo: u, datum: d });
   }
-  if (live.length > 1) throw new Error(`More than one live UTxO at the escrow address continues escrow ${canonical}; refusing to choose between them.`);
-  return { posted, current: live[0] ?? null, spent: true };
+  if (candidates.length === 0) return { posted, current: null, spent: true };
+  const { genuine, unknown } = await descendantsOf(canonical, posted, candidates, koiosUrl, fetchImpl);
+  if (genuine.length === 1) return { posted, current: genuine[0], spent: true };
+  if (genuine.length > 1) throw new Error(`More than one UTxO descends from escrow ${canonical} by the spend chain (${named(genuine)}); refusing to choose between them.`);
+  throw new Error(unknown.length > 0
+    ? `Cannot tell which UTxO carries escrow ${canonical} on: Koios does not know the transaction behind ${named(unknown)} yet; retry in a few seconds.`
+    : `None of ${named(candidates)} descends from escrow ${canonical} by the spend chain, though they carry its fields; refusing to treat any of them as the escrow.`);
 }
 
 // ─── Accept / Reclaim builders ──────────────────────────────────────────────

@@ -27,14 +27,27 @@ const REF_SCRIPT_UTXO: UTxO = {
   txHash: ESCROW_REF_UTXO.txHash, outputIndex: ESCROW_REF_UTXO.outputIndex, address: FOREIGN_ADDRESS,
   assets: { lovelace: 60_000_000n }, scriptRef: { type: 'PlutusV3', script: ESCROW_SCRIPT_CBOR },
 };
-const koios = (spent: boolean) => (async () => new Response(JSON.stringify([{
-  tx_hash: ESCROW_REF.slice(0, 64), tx_index: 0, address: ESCROW_ADDRESS, value: '2261030', is_spent: spent, inline_datum: { bytes: encodeEscrowDatum(POSTED) },
-}]), { status: 200 })) as unknown as typeof fetch;
+// Koios: utxo_info describes the Post output; tx_info gives the escrow outputs the Claim and the Submit spent (the spend chain
+// the resolver follows from the Post output to the Submitted one).
+const CLAIM_TX = 'c1'.repeat(32);
+const SUBMIT_TX = 'ee'.repeat(32);
+const SPENT_BY: Record<string, string[]> = { [CLAIM_TX]: [ESCROW_REF], [SUBMIT_TX]: [`${CLAIM_TX}#0`] };
+const koios = (spent: boolean) => (async (url: string, init: { body: string }) => {
+  if (new URL(url).pathname.endsWith('/tx_info')) {
+    const known = (JSON.parse(init.body)._tx_hashes as string[]).filter((h) => SPENT_BY[h] !== undefined);
+    return new Response(JSON.stringify(known.map((h) => ({
+      tx_hash: h, inputs: SPENT_BY[h].map((ref) => ({ tx_hash: ref.slice(0, 64), tx_index: Number(ref.slice(65)), payment_addr: { bech32: ESCROW_ADDRESS } })),
+    }))), { status: 200 });
+  }
+  return new Response(JSON.stringify([{
+    tx_hash: ESCROW_REF.slice(0, 64), tx_index: 0, address: ESCROW_ADDRESS, value: '2261030', is_spent: spent, inline_datum: { bytes: encodeEscrowDatum(POSTED) },
+  }]), { status: 200 });
+}) as unknown as typeof fetch;
 
 // Everything else is in order (live escrow, funds, collateral, reference script); only the clock is off, by a single millisecond.
 const ONE_MS_OFF = 1_756_485_600_001;
 const provider = Object.assign(
-  new FixtureProvider([...FIXTURE_UTXOS, REF_SCRIPT_UTXO, escrowAt(ESCROW_REF.slice(0, 64), POSTED), escrowAt('ee'.repeat(32), SUBMITTED)]),
+  new FixtureProvider([...FIXTURE_UTXOS, REF_SCRIPT_UTXO, escrowAt(ESCROW_REF.slice(0, 64), POSTED), escrowAt(SUBMIT_TX, SUBMITTED)]),
   { getSystemStartMs: async () => ONE_MS_OFF },
 );
 

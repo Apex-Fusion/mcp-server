@@ -115,6 +115,43 @@ export async function koiosTxInputCreds(koiosUrl: string, txHash: string, fetchI
   });
 }
 
+/**
+ * Koios tx_info for several transactions in ONE request: for each one Koios knows, the refs (`txHash#index`, lowercase) of the
+ * outputs it spent. An input's address is the address of the output it spends, so `atAddress` narrows the list to the outputs
+ * spent at that address; for a script address those are the script outputs the transaction consumed, which is how the escrow
+ * lineage is read off the chain (the transaction that created an escrow output spent the previous one). A transaction Koios does
+ * not know is absent from the map (its answer is unknown, not "spent nothing"); a known one that spent nothing at `atAddress`
+ * maps to an empty list. Like koiosTxInputCreds, the request sets `_inputs` (without it Koios answers with an empty list), and a
+ * known transaction whose inputs are missing or empty is an error, since a ledger transaction always has one. Errors name the
+ * operation and the status only.
+ */
+export async function koiosTxInputRefs(koiosUrl: string, txHashes: string[], fetchImpl: typeof fetch = fetch, atAddress?: string): Promise<Map<string, string[]>> {
+  const wanted = [...new Set(txHashes.map((h) => h.toLowerCase()))];
+  const refs = new Map<string, string[]>();
+  if (wanted.length === 0) return refs;
+  const base = koiosUrl.replace(/\/+$/, '');
+  const res = await fetchImpl(`${base}/api/v1/tx_info`, {
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'vector-mcp-builder' },
+    body: JSON.stringify({ _tx_hashes: wanted, _inputs: true, _assets: true }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`Koios tx_info answered ${res.status}`);
+  const body = await readJson<unknown>(res, 'Koios tx_info');
+  if (!Array.isArray(body)) throw new Error('Koios tx_info: Koios returned a non-list response');
+  const address = atAddress?.toLowerCase();
+  for (const tx of body) {
+    const hash = String(tx?.tx_hash).toLowerCase();
+    if (!wanted.includes(hash)) continue;
+    if (!Array.isArray(tx.inputs) || tx.inputs.length === 0) throw new Error('Koios tx_info: response has no inputs');
+    refs.set(hash, tx.inputs.flatMap((i: { tx_hash?: unknown; tx_index?: unknown; payment_addr?: { bech32?: unknown } } | null) => {
+      if (address !== undefined && String(i?.payment_addr?.bech32).toLowerCase() !== address) return [];
+      return typeof i?.tx_hash === 'string' && Number.isInteger(i?.tx_index) ? [`${i.tx_hash.toLowerCase()}#${i.tx_index}`] : [];
+    }));
+  }
+  return refs;
+}
+
 /** Markdown for the human plus a fenced JSON block the assistant can pass between tools. */
 export function withJson(markdown: string, obj: unknown): string {
   const json = JSON.stringify(obj, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));

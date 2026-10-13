@@ -2,7 +2,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Constr, Data } from '@lucid-evolution/lucid';
-import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, koiosTxInputCreds, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
+import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, koiosTxInputCreds, koiosTxInputRefs, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
 import { ADVERT_ADDRESS, ESCROW_ADDRESS, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
 
@@ -249,5 +249,67 @@ describe('koiosTxInputCreds', () => {
     for (const inputs of [undefined, null, 'x', {}, []]) {
       await assert.rejects(() => koiosTxInputCreds('https://koios.example', TX, koiosReturning([row({ inputs })]).f), safeMessage(/^Koios tx_info: response has no inputs$/));
     }
+  });
+});
+
+// koiosTxInputRefs: which outputs a set of transactions spent, in one tx_info call. The escrow lineage is read off that: the
+// transaction that created an escrow output spent the previous one. Same request and same guards as koiosTxInputCreds.
+describe('koiosTxInputRefs', () => {
+  const [TX_A, TX_B, TX_C] = ['aa', 'bb', 'cc'].map((b) => b.repeat(32));
+  const WALLET = 'addr1v9qp4aqc5ln0kyrzwu5j3q0um64pes2mtvgja8ytmvk5djgfj3cl6';
+  const input = (ref: string, bech32: unknown = WALLET) => ({ tx_hash: ref.slice(0, 64), tx_index: Number(ref.slice(65)), payment_addr: { bech32, cred: 'dd'.repeat(28) }, stake_addr: null });
+  const row = (tx_hash: string, inputs: unknown) => ({ tx_hash, inputs });
+  const KOIOS = 'https://koios.example';
+
+  test('asks tx_info once for every transaction, inputs and assets included, and maps each to the refs of its inputs', async () => {
+    const { f, calls } = koiosReturning([row(TX_A, [input(`${TX_C}#0`, ESCROW_ADDRESS), input(`${TX_C}#1`)]), row(TX_B, [input(`${TX_A}#2`)])]);
+    const refs = await koiosTxInputRefs('https://koios.example/', [TX_A, TX_B], f);
+    assert.deepEqual([...refs], [[TX_A, [`${TX_C}#0`, `${TX_C}#1`]], [TX_B, [`${TX_A}#2`]]]);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://koios.example/api/v1/tx_info');
+    assert.deepEqual(calls[0].body, { _tx_hashes: [TX_A, TX_B], _inputs: true, _assets: true });
+  });
+  test('asks for the distinct lowercase hashes and keys the map, and the refs, by lowercase', async () => {
+    const { f, calls } = koiosReturning([row(TX_A.toUpperCase(), [input(`${TX_B.toUpperCase()}#0`)])]);
+    const refs = await koiosTxInputRefs(KOIOS, [TX_A.toUpperCase(), TX_A], f);
+    assert.deepEqual(calls[0].body._tx_hashes, [TX_A]);
+    assert.deepEqual([...refs], [[TX_A, [`${TX_B}#0`]]]);
+  });
+  test('given an address, keeps only the inputs held there (case ignored); a transaction that spent nothing there maps to an empty list', async () => {
+    const rows = [row(TX_A, [input(`${TX_C}#0`, ESCROW_ADDRESS), input(`${TX_C}#1`, WALLET)]), row(TX_B, [input(`${TX_C}#1`, WALLET)])];
+    const refs = await koiosTxInputRefs(KOIOS, [TX_A, TX_B], koiosReturning(rows).f, ESCROW_ADDRESS.toUpperCase());
+    assert.deepEqual([...refs], [[TX_A, [`${TX_C}#0`]], [TX_B, []]]);
+  });
+  test('a transaction Koios does not know is absent from the map, and rows nobody asked about are ignored', async () => {
+    const refs = await koiosTxInputRefs(KOIOS, [TX_A, TX_B], koiosReturning([row(TX_A, [input(`${TX_C}#0`)]), row(TX_C, [input(`${TX_A}#0`)])]).f);
+    assert.deepEqual([...refs.keys()], [TX_A]);
+    assert.equal(refs.has(TX_B), false);
+    assert.equal((await koiosTxInputRefs(KOIOS, [TX_B], koiosReturning([]).f)).size, 0);
+  });
+  test('no hashes: nothing is asked and nothing comes back', async () => {
+    const { f, calls } = koiosReturning([]);
+    assert.equal((await koiosTxInputRefs(KOIOS, [], f)).size, 0);
+    assert.equal(calls.length, 0);
+  });
+  test('inputs without a usable ref are skipped', async () => {
+    const odd = [input(`${TX_C}#0`), { payment_addr: { bech32: WALLET } }, { tx_hash: 7, tx_index: 0 }, { tx_hash: TX_B, tx_index: 'x' }, { tx_hash: TX_B, tx_index: 1.5 }, null];
+    assert.deepEqual((await koiosTxInputRefs(KOIOS, [TX_A], koiosReturning([row(TX_A, odd)]).f)).get(TX_A), [`${TX_C}#0`]);
+  });
+  test('a known transaction whose inputs are missing or empty is an error: a ledger transaction always has one, so that is Koios misbehaving', async () => {
+    for (const inputs of [undefined, null, 'x', {}, []]) {
+      await assert.rejects(() => koiosTxInputRefs(KOIOS, [TX_A], koiosReturning([row(TX_A, inputs)]).f), safeMessage(/^Koios tx_info: response has no inputs$/));
+    }
+  });
+  test('POSTs to <base>/api/v1/tx_info however many slashes end the base', async () => {
+    const urls: string[] = [];
+    const f = (async (u: string) => { urls.push(u); return new Response(JSON.stringify([row(TX_A, [input(`${TX_C}#0`)])]), { status: 200 }); }) as unknown as typeof fetch;
+    for (const base of ['https://koios.example/', 'https://koios.example', 'https://koios.example//']) await koiosTxInputRefs(base, [TX_A], f);
+    assert.deepEqual(urls, Array(3).fill('https://koios.example/api/v1/tx_info'));
+  });
+  test('failures name the operation and the status, never the URL or a body snippet', async () => {
+    const run = (f: typeof fetch) => koiosTxInputRefs(KOIOS, [TX_A], f);
+    await assert.rejects(() => run(fakeFetch({}, 500)), safeMessage(/^Koios tx_info answered 500$/));
+    await assert.rejects(() => run(htmlFetch), safeMessage(/^Koios tx_info: .*not valid JSON/));
+    for (const body of [{}, { error: 'x' }, null, 'oops', 7]) await assert.rejects(() => run(fakeFetch(body)), safeMessage(/^Koios tx_info: Koios returned a non-list response$/));
   });
 });
