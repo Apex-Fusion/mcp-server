@@ -15,17 +15,26 @@
 //
 // Scope of this release: template-contract suppliers only. Each fleet handler commits its own hash of the request it receives (the
 // Responses request, the OCR envelope, the TTS envelope) and buildPostEscrow commits promptHashForPayload, which only the template's
-// commitment is, so a fleet hire posted here cannot be claimed. sendJob and getJob therefore refuse a fleet capability, and a fleet
-// route forced by the caller, before anything is sent; the fleet half of the table below stays, tested, as the transport for a later
-// SDK-backed path.
+// commitment is, so a fleet hire posted here cannot be claimed. sendJob and getJob therefore refuse a fleet capability (llm.chat.*, the
+// multi-turn session capability, included), and a fleet route forced by the caller, before anything is sent; the fleet half of the
+// table below stays, tested, as the transport for a later SDK-backed path.
 //
-// Two ties keep the tool from posting data to an endpoint just because an escrow names it (anyone can post an escrow, and an advert for
-// it): the escrow must have been posted by the caller's buyerAddress (its buyer key is in the datum), and a send must carry exactly the
-// payload the escrow committed to (promptHashForPayload is its prompt_hash). buyerAddress is the caller's word, not a proof of who the
-// caller is; the payload tie is what stops a stranger's escrow from collecting a payload it was not posted for.
+// Who may send what to whom. Anyone can post an escrow, with an advert of their own on a host of their own, and buyer_pkh and
+// prompt_hash are public datum fields that anyone can copy into an escrow of theirs: neither can be taken at its word. So the ref must
+// be the Post output of an escrow that (1) names the key of the caller's buyerAddress as its buyer and (2) was funded by that key: the
+// transaction that made the Post output has an input of that key (nobody signs an output's datum, but an input needs its owner's
+// signature, so the buyer put funds into this very transaction). A transaction Koios does not know is a refusal. A copy of a real
+// escrow's fields in a transaction its buyer did not fund fails (2). A send must also (3) carry exactly the payload the escrow
+// committed to (promptHashForPayload of it is the escrow's prompt_hash). All of it is checked before any call to the supplier.
+//
+// Residual, because a keyless hosted tool cannot authenticate its caller: buyerAddress is the caller's word. A caller steered into
+// passing the address of an escrow that an attacker posted and funded themselves, with a prompt_hash copied from the victim's real
+// escrow and an advert on the attacker's host, passes (1) to (3), and the payload goes to the attacker. The planned closure is a
+// signed-message binding: the buyer's signer signs `send:<escrowRef>:<promptHash>` and sendJob verifies that signature against
+// buyer_pkh before it calls anything. Until it exists the tool text has to say what the tool cannot know.
 import type { Provider } from '@lucid-evolution/lucid';
 import { safeFetch } from './safe-fetch.js';
-import { readAdvert } from './marketplace-indexer.js';
+import { readAdvert, koiosTxInputCreds } from './marketplace-indexer.js';
 import type { AdvertRead } from './marketplace-indexer.js';
 import { formatOutRef, parseOutRef, promptHashForPayload, wirePayloadFor } from './marketplace-datum.js';
 import type { AdvertDatum } from './marketplace-datum.js';
@@ -92,15 +101,25 @@ export function routeFor(capabilityId: string, forced?: Route['kind']): Route {
   return ROUTES.template;
 }
 
+/**
+ * Is this capability served by the fleet and not by a template supplier? Whatever routeFor maps to chat, ocr or tts, and llm.chat.*,
+ * the multi-turn session capability, which routeFor leaves with the template route only because its supplier has no one-job route.
+ */
+function isFleetCapability(capabilityId: string): boolean {
+  return routeFor(capabilityId).kind !== 'template' || capabilityId.startsWith('llm.chat.');
+}
+
 // ─── What a supplier answers ─────────────────────────────────────────────────────────────────────────────────────────────────────
 /**
- * A supplier's answer to a poll. Everything in it comes from the supplier: show it as data. `raw` is the whole answer, kept so a
- * caller can pass on exactly what the receipt was made over; `submittedRef` is the Submitted escrow output the supplier says it made
- * (a ref in canonical form, or null), which says nothing until it is checked against the chain.
+ * A supplier's answer to a poll. Everything in it comes from the supplier: show it as data. A job is `done` only when the supplier
+ * hands over a receipt (an object) and a signature (a non-empty string); any other answer it calls a success is `failed`, as a
+ * malformed one. `raw` is the whole answer, kept so a caller can pass on exactly what the receipt was made over; `submittedRef` is
+ * the Submitted escrow output the supplier says it made (a ref in canonical form, or null), which says nothing until it is checked
+ * against the chain.
  */
 export type JobView =
   | { state: 'pending'; status: string }
-  | { state: 'done'; result: string; receipt: unknown; receiptSignature: string; submittedRef: string | null; raw: unknown }
+  | { state: 'done'; result: string; receipt: Record<string, unknown>; receiptSignature: string; submittedRef: string | null; raw: unknown }
   | { state: 'failed'; reason: string; message: string };
 
 function jsonObject(text: string): Record<string, unknown> | null {
@@ -109,11 +128,15 @@ function jsonObject(text: string): Record<string, unknown> | null {
     return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
   } catch { return null; }
 }
-/** What a supplier said about a failure: its own reason and message when it sent them, else the status and the start of its body. Bounded. */
-function said(status: number, body: Record<string, unknown> | null, text: string): { reason: string; message: string } {
+/**
+ * What a supplier said about a failure: the reason and the message it sent as strings, else the status as the reason and no message.
+ * Bounded. The rest of its answer is never repeated: a body that is not the supplier's own message (a proxy's page, a stack trace)
+ * says nothing the status does not, and error text carries none of it.
+ */
+function said(status: number, body: Record<string, unknown> | null): { reason: string; message: string } {
   return {
     reason: typeof body?.reason === 'string' ? body.reason.slice(0, 100) : `http_${status}`,
-    message: typeof body?.message === 'string' ? body.message.slice(0, 500) : text.slice(0, 200),
+    message: typeof body?.message === 'string' ? body.message.slice(0, 500) : '',
   };
 }
 /** The assistant's words in a Responses `output`: the text parts of its messages in order. Reasoning items and refusals carry none. */
@@ -147,14 +170,16 @@ export function parseJobResponse(status: number, text: string): JobView {
   const body = jsonObject(text);
   if (status === 202) return { state: 'pending', status: typeof body?.status === 'string' ? body.status.slice(0, 100) : 'accepted' };
   if (status === 200) {
-    // A job is finished when the supplier hands over a receipt; an answer that is not even a JSON object is not that.
+    // A job is finished when the supplier hands over a receipt and its signature; an answer without them, or that is not even a
+    // JSON object, is not that (the receipt is what Accept is decided on).
     if (body === null) return { state: 'failed', reason: 'malformed_response', message: 'The supplier answered 200 with something that is not a JSON object.' };
-    return {
-      state: 'done', result: resultOf(body, text), receipt: body.receipt, submittedRef: submittedRefOf(body.submitted_ref), raw: body,
-      receiptSignature: typeof body.receipt_signature === 'string' ? body.receipt_signature : '',
-    };
+    const { receipt, receipt_signature: signature } = body;
+    if (typeof receipt !== 'object' || receipt === null || Array.isArray(receipt) || typeof signature !== 'string' || signature === '') {
+      return { state: 'failed', reason: 'malformed_response', message: 'The supplier answered 200 without a receipt object and a non-empty receipt_signature.' };
+    }
+    return { state: 'done', result: resultOf(body, text), receipt: receipt as Record<string, unknown>, receiptSignature: signature, submittedRef: submittedRefOf(body.submitted_ref), raw: body };
   }
-  return { state: 'failed', ...said(status, body, text) };
+  return { state: 'failed', ...said(status, body) };
 }
 
 // ─── Reaching a supplier ─────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -178,6 +203,17 @@ const canonicalRef = (escrowRef: string): string => { const ref = parseOutRef(es
 function isHttps(url: string): boolean { try { return new URL(url).protocol === 'https:'; } catch { return false; } }
 const isTimeout = (err: unknown): boolean => err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
 
+/**
+ * Could the request have reached the supplier before this call failed? A refusal by the outbound-call policy (a private address, a
+ * scheme, credentials in the URL) comes before anything is sent, and a redirect is an answer that claims nothing. A timeout, a dropped
+ * connection or an answer too large to read can all come after the supplier has claimed the escrow.
+ */
+function mayHaveReached(err: unknown): boolean {
+  if (isTimeout(err)) return true;
+  const message = err instanceof Error ? err.message : '';
+  return /^safeFetch: /.test(message) ? /byte cap/.test(message) : true;
+}
+
 /** Why a call to a supplier failed, in words that carry neither its URL nor anything the network or the supplier said. */
 function callFailure(err: unknown, call: Call): string {
   if (isTimeout(err)) return `the supplier did not answer within ${call.timeoutMs / 1000} s`;
@@ -192,13 +228,13 @@ function callFailure(err: unknown, call: Call): string {
 }
 
 /**
- * Why a route forced by the caller, or an advert's capability, is out of this release's scope, or null. A capability that routeFor
- * maps to the chat, ocr or tts route is a fleet supplier, and so is any forced route but the template's. (A forced name that is no
- * route at all is routeFor's Unknown route error.)
+ * Why a route forced by the caller, or an advert's capability, is out of this release's scope, or null. A capability that
+ * isFleetCapability is a fleet supplier, and so is any forced route but the template's. (A forced name that is no route at all is
+ * routeFor's Unknown route error.)
  */
 function outOfScope(forced: Route['kind'] | undefined, capability: string | undefined): string | null {
   if (forced !== undefined && routeFor('', forced).kind !== 'template') return `the ${forced} route is a fleet route; ${TEMPLATE_ONLY}.`;
-  if (capability !== undefined && routeFor(capability).kind !== 'template') return `${cell(capability, 80)} uses the fleet route; ${TEMPLATE_ONLY}.`;
+  if (capability !== undefined && isFleetCapability(capability)) return `${cell(capability, 80)} uses the fleet route; ${TEMPLATE_ONLY}.`;
   return null;
 }
 
@@ -211,14 +247,19 @@ function buyerKeyHash(buyerAddress: unknown, refuse: (why: string) => Error): st
 /**
  * The escrow's lineage and the advert whose endpoint serves it, once everything that could make this the wrong escrow, the wrong
  * person or the wrong place is ruled out. The escrow comes from resolveEscrowLineage (credential-checked, fails closed), its advert from
- * readAdvert at the advert script address. Refused, naming the escrow and saying nothing was sent:
- * - an escrow that was not posted by `buyerAddress` (the buyer key is in the datum the buyer signed);
- * - an escrow with no live output; for a send, one that is not Open;
+ * readAdvert at the advert script address, asked of the same Koios. Refused, naming the escrow and saying nothing was sent:
+ * - a ref that is not the output the escrow's Post made (a later output has the supplier's transactions behind it, not the buyer's);
+ * - an escrow whose datum does not name the key of `buyerAddress` as its buyer;
+ * - an escrow whose Post transaction has no input of that key. buyer_pkh and prompt_hash are public, so anyone can copy them into an
+ *   escrow of their own, with an advert on a host of their own. Nobody signs an output's datum, but an input needs its owner's
+ *   signature, so the buyer funded this very transaction only if one of its inputs is the buyer's. A transaction Koios does not know,
+ *   or cannot be asked about, is a refusal too (fail closed, as buildPostEscrow does for an advert's author);
+ * - for a send, an escrow with no live output or one that is not Open;
  * - for a send, an advert that is Retired, spent (its supplier retired or replaced it: the endpoint it names is not one to send a
  *   payload to now) or of a spent status Koios does not report. A poll sends the supplier nothing it does not have, and the endpoint
- *   of a spent or retired advert is still where the job went, so a poll reads the advert whatever its state;
+ *   of a spent or retired advert is still where the job went, so a poll reads the advert whatever its state, and an escrow that has
+ *   been accepted or released (no live output) is still the one whose finished job it asks about;
  * - an endpoint that is not an https URL, and a capability that is not a template-contract one (this release).
- * (readAdvert reads from the configured Koios, which is the `koiosUrl` every tool passes; the escrow is read from the `koiosUrl` given.)
  */
 async function resolveTarget(
   provider: Provider, koiosUrl: string, canonical: string, fetchImpl: typeof fetch,
@@ -226,12 +267,19 @@ async function resolveTarget(
 ): Promise<{ lineage: EscrowLineage; advert: AdvertDatum }> {
   const { refuse } = o;
   const lineage = await resolveEscrowLineage(provider, koiosUrl, canonical, fetchImpl);
-  if (lineage.posted.buyer_pkh !== o.buyerPkh) throw refuse(`it was not posted by ${cell(o.buyerAddress, 120)}.`);
-  if (lineage.current === null) throw refuse('no live output was found for it (it may be finished, or the chain index may be behind).');
-  if (o.forSend && lineage.current.datum.state !== 'Open') throw refuse(`it is ${lineage.current.datum.state} and a job can only be sent while it is Open.`);
-  const advertRef = formatOutRef(lineage.posted.advert_ref.txHash, lineage.posted.advert_ref.index);
+  const { posted } = lineage;
+  if (posted.state !== 'Open') throw refuse(`it is a ${posted.state} output, not the output its Post made: use the escrow ref the Post returned.`);
+  if (posted.buyer_pkh !== o.buyerPkh) throw refuse(`it was not posted by ${cell(o.buyerAddress, 120)}.`);
+  let funders: string[];
+  try { funders = await koiosTxInputCreds(koiosUrl, canonical.slice(0, 64), fetchImpl); } catch (err) { throw refuse(`could not check who funded it (${koiosFailure(err)}).`); }
+  if (!funders.includes(posted.buyer_pkh)) throw refuse(`the transaction that posted it has no input from ${cell(o.buyerAddress, 120)}, so that wallet did not fund it.`);
+  if (o.forSend) {
+    if (lineage.current === null) throw refuse('no live output was found for it (it may be finished, or the chain index may be behind).');
+    if (lineage.current.datum.state !== 'Open') throw refuse(`it is ${lineage.current.datum.state} and a job can only be sent while it is Open.`);
+  }
+  const advertRef = formatOutRef(posted.advert_ref.txHash, posted.advert_ref.index);
   let read: AdvertRead;
-  try { read = await readAdvert(advertRef, fetchImpl); } catch (err) { throw refuse(`its advert ${advertRef} could not be read (${koiosFailure(err)}).`); }
+  try { read = await readAdvert(advertRef, fetchImpl, koiosUrl); } catch (err) { throw refuse(`its advert ${advertRef} could not be read (${koiosFailure(err)}).`); }
   if ('error' in read) throw refuse(read.error);
   if (o.forSend) {
     if (read.advert.status !== 'Active') throw refuse(`its advert ${advertRef} is ${read.advert.status}.`);
@@ -249,12 +297,12 @@ export interface SentJob { jobId: string; status: string; route: Route['kind']; 
 
 /**
  * Sends the job for an Open escrow to its supplier and returns the job id the supplier answers with (202 means its Claim has
- * confirmed). Only for a template-contract supplier, and only for the escrow's own buyer: `buyerAddress` must be the wallet address the
- * escrow was posted from, and `payload` exactly the payload it was posted with (its prompt_hash is promptHashForPayload of it), so an
- * escrow someone else posted, with an advert of their own, is not a place to send anything. All of that is checked before the supplier
- * is called. The request is the route's: the escrow ref is the canonical one, the headers are the route's alone. Errors name the escrow
- * and never the endpoint; a supplier that does not answer within the call budget is an error that says the escrow may have been
- * claimed anyway.
+ * confirmed). Only for a template-contract supplier, and only for the escrow's own buyer: `buyerAddress` must be the wallet address
+ * whose key funded the escrow's Post (see resolveTarget), and `payload` exactly the payload the escrow committed to (its prompt_hash
+ * is promptHashForPayload of it). All of that is checked before the supplier is called; who the caller is cannot be (see the
+ * residual in the header). The request is the route's: the escrow ref is the canonical one, the headers are the route's alone. Errors
+ * name the escrow and never the endpoint or the body of an answer; a failure after the request may have reached the supplier says
+ * the escrow may have been claimed anyway.
  */
 export async function sendJob(provider: Provider, koiosUrl: string, p: { escrowRef: string; payload: string; buyerAddress: string; route?: Route['kind'] }, fetchImpl: typeof fetch = fetch): Promise<SentJob> {
   const canonical = canonicalRef(p.escrowRef);
@@ -274,26 +322,40 @@ export async function sendJob(provider: Provider, koiosUrl: string, p: { escrowR
   try {
     res = await safeFetch(route.post(advert.endpoint_url), { method: 'POST', headers, body }, { ...SEND_CALL, fetchImpl });
   } catch (err) {
-    throw new Error(`Could not send the job for escrow ${canonical}: ${callFailure(err, SEND_CALL)}.${isTimeout(err) ? MAY_HAVE_CLAIMED : ''}`);
+    throw new Error(`Could not send the job for escrow ${canonical}: ${callFailure(err, SEND_CALL)}.${mayHaveReached(err) ? MAY_HAVE_CLAIMED : ''}`);
   }
   const answer = jsonObject(res.text);
   if (res.status !== 202) {
-    const { reason, message } = said(res.status, answer, res.text);
-    throw new Error(`Could not send the job for escrow ${canonical}: the supplier answered ${res.status} (${cell(reason, 64)}): ${cell(message, 200).replace(/[.\s]+$/, '')}.`);
+    const { reason, message } = said(res.status, answer);
+    const detail = cell(message, 200).replace(/[.\s]+$/, '');
+    // A 4xx is the supplier turning the job down before it claimed anything; any other status may come after the claim (the template's
+    // 504 claim_timeout, a proxy's 5xx, an unexpected 2xx).
+    const turnedDown = res.status >= 400 && res.status < 500;
+    throw new Error(`Could not send the job for escrow ${canonical}: the supplier answered ${res.status} (${cell(reason, 64)})${detail ? `: ${detail}` : ''}.${turnedDown ? '' : MAY_HAVE_CLAIMED}`);
   }
   const jobId = answer?.job_id;
-  if (typeof jobId !== 'string' || !JOB_ID.test(jobId)) throw new Error(`Could not send the job for escrow ${canonical}: the supplier answered 202 but returned no usable job id.`);
+  if (typeof jobId !== 'string' || !JOB_ID.test(jobId)) throw new Error(`Could not send the job for escrow ${canonical}: the supplier answered 202 but returned no usable job id.${MAY_HAVE_CLAIMED}`);
   const status = typeof answer?.status === 'string' ? answer.status.slice(0, 100) : 'accepted';
   return { jobId, status, route: route.kind, endpoint: advert.endpoint_url, capabilityId: advert.capability_id };
 }
 
 export interface PolledJob { view: JobView; route: Route['kind']; endpoint: string; supplierPkh: string; capabilityId: string }
 
+/** A poll answer that names another escrow than the one asked about is not an answer about this job: the failed view that says so, else null. */
+function wrongEscrow(text: string, canonical: string): JobView | null {
+  const echoed = jsonObject(text)?.escrow_ref;
+  if (echoed === undefined) return null;
+  let same = false;
+  if (typeof echoed === 'string') { try { same = canonicalRef(echoed) === canonical; } catch { /* not a ref: not the same */ } }
+  return same ? null : { state: 'failed', reason: 'escrow_mismatch', message: `The supplier's answer is for another escrow than ${canonical}; it is not used.` };
+}
+
 /**
- * Asks the supplier of a live escrow (Open, Claimed or Submitted) how a job stands, for the escrow's own buyer only (`buyerAddress`, as
- * for sendJob) and for a template-contract supplier only. The endpoint is the advert's even when the advert has since been spent or
- * retired. `supplierPkh` is the key the advert names; the view is the supplier's own account (see JobView) and `endpoint` the URL it
- * came from.
+ * Asks the supplier of an escrow how a job stands, for the escrow's own buyer only (`buyerAddress`, as for sendJob) and for a
+ * template-contract supplier only. The escrow may be live (Open, Claimed, Submitted) or consumed (accepted, released): a finished
+ * job is fetchable after settlement. The endpoint is the advert's even when the advert has since been spent or retired. An answer
+ * that names another escrow than the one asked about is a failed view. `supplierPkh` is the key the advert names; the view is the
+ * supplier's own account (see JobView) and `endpoint` the URL it came from.
  */
 export async function getJob(provider: Provider, koiosUrl: string, p: { escrowRef: string; jobId: string; buyerAddress: string; route?: Route['kind'] }, fetchImpl: typeof fetch = fetch): Promise<PolledJob> {
   const canonical = canonicalRef(p.escrowRef);
@@ -310,5 +372,6 @@ export async function getJob(provider: Provider, koiosUrl: string, p: { escrowRe
   } catch (err) {
     throw new Error(`Could not poll job ${p.jobId} of escrow ${canonical}: ${callFailure(err, POLL_CALL)}.`);
   }
-  return { view: parseJobResponse(res.status, res.text), route: route.kind, endpoint: advert.endpoint_url, supplierPkh: advert.supplier_pkh, capabilityId: advert.capability_id };
+  const view = wrongEscrow(res.text, canonical) ?? parseJobResponse(res.status, res.text);
+  return { view, route: route.kind, endpoint: advert.endpoint_url, supplierPkh: advert.supplier_pkh, capabilityId: advert.capability_id };
 }

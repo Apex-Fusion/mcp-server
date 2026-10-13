@@ -2,6 +2,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Constr, Data, credentialToAddress } from '@lucid-evolution/lucid';
+import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, koiosTxInputCreds, koiosTxInputRefs, koiosCredentialUtxos, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
 import { ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_SCRIPT_HASH, INDEXER_URL, indexerUrlFrom } from '../src/vector/marketplace-constants.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
@@ -148,6 +149,12 @@ const errorOf = (r: Awaited<ReturnType<typeof readAdvert>>): string => {
 };
 
 describe('readAdvert', () => {
+  test('asks the Koios it is given, and the configured one when it is given none', async () => {
+    const { f, calls } = koiosReturning([utxoAt(ADVERT_REF, ADVERT_ADDRESS, ADVERT_DATUM_HEX)]);
+    await readAdvert(ADVERT_REF, f, 'https://other-koios.example//');
+    await readAdvert(ADVERT_REF, f);
+    assert.deepEqual(calls.map((c) => c.url), ['https://other-koios.example/api/v1/utxo_info', `${VECTOR_KOIOS_URL.replace(/\/+$/, '')}/api/v1/utxo_info`]);
+  });
   test('returns the decoded advert, the UTxO and the spent flag for an advert at the advert script address', async () => {
     const { f, calls } = koiosReturning([utxoAt(ADVERT_REF, ADVERT_ADDRESS, ADVERT_DATUM_HEX)]);
     const r = await readAdvert(ADVERT_REF, f);

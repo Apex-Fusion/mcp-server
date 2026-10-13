@@ -209,12 +209,14 @@ export type AdvertRead = { error: string } | { utxo: KoiosUtxo; advert: AdvertDa
  * Reads one advert from the ledger. It refuses UTxOs that are not at the advert script address or hold no advert datum. That does
  * not make an advert genuine (the advert validator does not check who creates one, so buildPostEscrow also proves authorship) or
  * live: a spent or retired advert is returned too, flagged by `spent` and `advert.status`, and buildPostEscrow requires it unspent.
+ * `koiosUrl` is the Koios it asks (the configured one unless a caller that has read other things from a Koios of its own passes that
+ * one, so that one decision draws on one source).
  */
-export async function readAdvert(ref: string, fetchImpl: typeof fetch = fetch): Promise<AdvertRead> {
+export async function readAdvert(ref: string, fetchImpl: typeof fetch = fetch, koiosUrl: string = VECTOR_KOIOS_URL): Promise<AdvertRead> {
   let parsed: { txHash: string; outputIndex: number };
   try { parsed = parseOutRef(ref); } catch (err) { return { error: err instanceof Error ? err.message : String(err) }; }
   const canonical = formatOutRef(parsed.txHash, parsed.outputIndex);
-  const utxos = await koiosUtxoInfo(VECTOR_KOIOS_URL, [canonical], fetchImpl);
+  const utxos = await koiosUtxoInfo(koiosUrl, [canonical], fetchImpl);
   const utxo = utxos.find((u) => String(u?.tx_hash).toLowerCase() === parsed.txHash && u?.tx_index === parsed.outputIndex);
   if (!utxo) return { error: `No UTxO at ${canonical}.` };
   if (utxo.address?.toLowerCase() !== ADVERT_ADDRESS) return { error: `UTxO ${canonical} is not at the advert script address.` };
