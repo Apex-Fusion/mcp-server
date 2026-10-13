@@ -28,8 +28,9 @@ type Candidate = { txHash: string; outputIndex: number; datum: EscrowDatum };
 /**
  * What a failed Koios call may tell a caller. The messages of koiosUtxoInfo, koiosCredentialUtxos and koiosTxInputRefs name only
  * the operation and the status; any other failure (a transport error can carry the endpoint's host or URL) becomes a fixed phrase.
+ * Exported for the transport module, whose advert read goes through the same Koios call.
  */
-function koiosFailure(err: unknown): string {
+export function koiosFailure(err: unknown): string {
   const message = errorText(err);
   return /^Koios (utxo_info|credential_utxos|tx_info)/.test(message) ? message : 'Koios request failed (network error or timeout)';
 }
