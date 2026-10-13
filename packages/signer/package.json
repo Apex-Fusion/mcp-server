@@ -14,13 +14,14 @@
   "publishConfig": { "access": "public" },
   "scripts": {
     "build": "tsup && chmod +x build/index.js",
+    "prepack": "npm run build",
     "start": "node build/index.js"
   },
   "dependencies": {
     "@anastasia-labs/cardano-multiplatform-lib-nodejs": "6.0.2-3",
     "@lucid-evolution/wallet": "^0.1.72",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "zod": "^3.24.1"
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@apexfusion/vector-mcp-shared": "*"

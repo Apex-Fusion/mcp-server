@@ -1,10 +1,11 @@
 // Fresh raw Ed25519 key for a member's local signer. Prints to stdout; writes nothing.
 //
-// SECURITY: printKeygen() is the ONLY place the private key leaves this module,
-// and it goes to stdout exactly once, in the NAME=value form config.ts reads. It
-// is never written to stderr, a file or the audit log. There is no mnemonic
-// behind it either (generate_ed25519 draws 32 random bytes), so that one line is
-// the only copy: lose it and the funds at its address are gone.
+// SECURITY: the key leaves this module only through generateKey()'s return value
+// and printKeygen()'s one stdout line. printKeygen() prints it exactly once, in the
+// NAME=value form config.ts reads; it is never written to stderr, a file or the
+// audit log. There is no mnemonic behind it either (generate_ed25519 draws 32
+// random bytes), so that one line is the only copy: lose it and the funds at its
+// address are gone.
 //
 // A raw key controls exactly one address, which keeps a leak bounded (see
 // keysource.ts). The address is an enterprise address (no stake part) on network

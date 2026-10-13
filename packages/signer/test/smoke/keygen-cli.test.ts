@@ -126,6 +126,7 @@ describe('vector-mcp-signer keygen (built entry point)', () => {
 
   test('every run generates a fresh key', () => {
     assert.equal(second.code, 0, `stderr: ${second.stderr}`);
+    assert.equal(second.stderr, '');
     assert.notEqual(
       assignments(first.stdout).VECTOR_SIGNER_PRIVATE_KEY,
       assignments(second.stdout).VECTOR_SIGNER_PRIVATE_KEY
