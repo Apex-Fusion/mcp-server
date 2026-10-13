@@ -1,21 +1,24 @@
 // packages/builder/test/marketplace-build.test.ts
 import { describe, test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { CML, Constr, Data, getAddressDetails, credentialToAddress, unixTimeToSlot, slotToUnixTime } from '@lucid-evolution/lucid';
+import { CML, Constr, Data, getAddressDetails, credentialToAddress, unixTimeToSlot, slotToUnixTime, validatorToScriptHash } from '@lucid-evolution/lucid';
 import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
-import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS, FIXTURE_TXHASH } from './fixtures/fixture-provider.ts';
+import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS, FOREIGN_ADDRESS, FIXTURE_TXHASH, FIXTURE_TOKEN_UNIT } from './fixtures/fixture-provider.ts';
 import { lucidForAddress } from '../src/vector/build.ts';
 import {
-  ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_EXPECTED, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX,
+  ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_EXPECTED, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX, ESCROW_REF,
 } from './fixtures/marketplace.fixture.ts';
+import { ESCROW_SCRIPT_CBOR } from './fixtures/escrow-script.fixture.ts';
 import {
-  ADVERT_ADDRESS, ESCROW_ADDRESS, DELIVER_BY_BUFFER_MS, ACCEPT_WINDOW_MS, MARKETPLACE_MIN_FEE, MAX_PROCESSING_MS_CEILING,
+  ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_REF_UTXO, ESCROW_SCRIPT_HASH, DELIVER_BY_BUFFER_MS, ACCEPT_WINDOW_MS, MARKETPLACE_MIN_FEE,
+  MAX_PROCESSING_MS_CEILING, COLLATERAL_MIN_LOVELACE,
 } from '../src/vector/marketplace-constants.ts';
 import { ensureSlotConfig, paymentKeyHashOf as govPaymentKeyHashOf } from '../src/vector/gov-build.ts';
-import { decodeAdvertDatum, decodeEscrowDatum, encodeEscrowDatum, promptHashForPayload } from '../src/vector/marketplace-datum.ts';
+import { decodeAdvertDatum, decodeEscrowDatum, encodeEscrowDatum, formatOutRef, promptHashForPayload } from '../src/vector/marketplace-datum.ts';
+import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
 import {
   planPostEscrow, buildPostEscrow, reserveCollateralInputs, planAccept, planReclaim, paymentKeyHashOf, enterpriseAddressOf,
-  assertEscrowIsOutputZero,
+  assertEscrowIsOutputZero, resolveEscrowLineage, buildAccept, buildReclaim,
 } from '../src/vector/marketplace-build.ts';
 
 const OWN_PKH = getAddressDetails(OWN_ADDRESS).paymentCredential!.hash;
@@ -603,5 +606,443 @@ describe('planReclaim validity range', () => {
       assert.ok(lowerBoundMs(p.validFrom) >= d.deliver_by, `deliver_by ${d.deliver_by}`);
       assert.ok(opensAt - d.deliver_by <= 1000, `deliver_by ${d.deliver_by}`);
     }
+  });
+});
+
+// ─── Escrow lineage ──────────────────────────────────────────────────────────
+// Koios utxo_info for the Post output of the live escrow fixture. A `null` option leaves that field out, as Koios does when it
+// does not know it. `status` answers with an error whose body carries things a caller must never see; `raw` is the response text.
+const ESCROW_TX = ESCROW_REF.slice(0, 64);
+function escrowKoios(o: { datumHex?: string | null; address?: string | null; spent?: boolean | null; rows?: unknown[]; status?: number; raw?: string } = {}): KoiosFake {
+  const calls: KoiosFake['calls'] = [];
+  const f = (async (url: string, init: any) => {
+    calls.push({ path: '/' + new URL(url).pathname.split('/').slice(-3).join('/'), body: JSON.parse(init.body) });
+    if (o.status) return new Response('{"error":"db password=hunter2 at https://internal.koios.example"}', { status: o.status });
+    if (o.raw !== undefined) return new Response(o.raw, { status: 200 });
+    const row = {
+      tx_hash: ESCROW_TX, tx_index: 0, value: '2261030',
+      ...(o.address === null ? {} : { address: o.address ?? ESCROW_ADDRESS }),
+      ...(o.spent === null ? {} : { is_spent: o.spent ?? true }),
+      inline_datum: o.datumHex === null ? null : { bytes: o.datumHex ?? ESCROW_OPEN_DATUM_HEX },
+    };
+    return new Response(JSON.stringify(o.rows ?? [row]), { status: 200 });
+  }) as unknown as typeof fetch;
+  return { f, calls };
+}
+
+/** An output at the escrow address holding the live escrow's lock and the given datum. */
+const escrowAt = (txHash: string, datum: EscrowDatum, over: Partial<UTxO> = {}): UTxO =>
+  ({ txHash, outputIndex: 0, address: ESCROW_ADDRESS, assets: { lovelace: ESCROW_LOCKED_LOVELACE }, datum: encodeEscrowDatum(datum), ...over });
+
+describe('resolveEscrowLineage', () => {
+  const posted = decodeEscrowDatum(ESCROW_OPEN_DATUM_HEX);
+  const submitted = { ...posted, submitted_at: posted.posted_at + 60_000, result_receipt_hash: 'cd'.repeat(32), state: 'Submitted' as const };
+  const at = escrowAt;
+  const current = at('ee'.repeat(32), submitted);
+  const stranger = at('ff'.repeat(32), { ...submitted, posted_at: 1 });
+  const postOutput = at(ESCROW_TX, posted); // the Post output itself, as the node lists it while it is unspent
+  const koios = escrowKoios().f;
+  const lineage = (utxos: UTxO[], k: KoiosFake = escrowKoios()) => resolveEscrowLineage(new FixtureProvider(utxos), 'https://koios.example', ESCROW_REF, k.f);
+  /** The error names the escrow it was asked about, in the words of `message`. */
+  const refusal = (message: RegExp) => (err: unknown) => {
+    assert.ok(err instanceof Error);
+    assert.match(err.message, message);
+    assert.ok(err.message.includes(ESCROW_REF), `the escrow ref is missing from: ${err.message}`);
+    return true;
+  };
+
+  test('finds the current UTxO by advert_ref, buyer, posted_at and prompt_hash', async () => {
+    const r = await resolveEscrowLineage(new FixtureProvider([current, stranger]), 'https://koios.example', ESCROW_REF, koios);
+    assert.equal(r.spent, true);
+    assert.equal(r.current?.utxo.txHash, 'ee'.repeat(32));
+    assert.equal(r.current?.datum.state, 'Submitted');
+    assert.deepEqual(r.posted, posted, 'posted stays the datum of the output the ref names');
+  });
+  test('every field of the lineage rule matters: a UTxO that differs in any one of them belongs to another escrow', async () => {
+    const differing: Array<[string, Partial<EscrowDatum>]> = [
+      ['advert_ref.txHash', { advert_ref: { ...submitted.advert_ref, txHash: 'aa'.repeat(32) } }],
+      ['advert_ref.index', { advert_ref: { ...submitted.advert_ref, index: submitted.advert_ref.index + 1 } }],
+      ['buyer_pkh', { buyer_pkh: 'aa'.repeat(28) }],
+      ['posted_at', { posted_at: submitted.posted_at + 1 }],
+      ['prompt_hash', { prompt_hash: 'aa'.repeat(32) }],
+    ];
+    for (const [field, change] of differing) {
+      assert.equal((await lineage([at('dd'.repeat(32), { ...submitted, ...change })])).current, null, field);
+    }
+    // what Claim and Submit do change (state, submitted_at, the receipt hash) does not make it another escrow
+    assert.equal((await lineage([at('dd'.repeat(32), { ...submitted, state: 'Claimed', submitted_at: null, result_receipt_hash: null })])).current?.datum.state, 'Claimed');
+  });
+  test('returns current = null when the lineage is finished', async () => {
+    const r = await resolveEscrowLineage(new FixtureProvider([stranger]), 'https://koios.example', ESCROW_REF, koios);
+    assert.equal(r.current, null);
+    assert.equal(r.spent, true);
+  });
+  test('while the Post output is unspent it is the live escrow: the node\'s copy of it is current', async () => {
+    const r = await lineage([postOutput], escrowKoios({ spent: false }));
+    assert.equal(r.spent, false);
+    assert.equal(r.current?.utxo, postOutput);
+    assert.equal(r.current?.datum.state, 'Open');
+  });
+  test('asks Koios for the canonical lowercase ref, and a malformed ref is refused without calling Koios', async () => {
+    const k = escrowKoios({ spent: false });
+    await resolveEscrowLineage(new FixtureProvider([postOutput]), 'https://koios.example', `  ${ESCROW_TX.toUpperCase()}#0 `, k.f);
+    assert.deepEqual(k.calls.map((c) => c.body), [{ _utxo_refs: [ESCROW_REF], _extended: true }]);
+    const unused = escrowKoios();
+    await assert.rejects(() => resolveEscrowLineage(new FixtureProvider([]), 'https://koios.example', 'nope#1', unused.f), /Invalid out ref/);
+    assert.equal(unused.calls.length, 0);
+  });
+  test('UTxOs at the escrow address that hold no datum or one that is not an escrow are ignored', async () => {
+    const noDatum = at('aa'.repeat(32), submitted, { datum: undefined });
+    const junk = at('bb'.repeat(32), submitted, { datum: 'ff' });
+    const r = await lineage([noDatum, junk, current]);
+    assert.equal(r.current?.utxo.txHash, 'ee'.repeat(32));
+  });
+
+  // Fail closed. Tool output goes to anonymous callers: a Koios failure names the escrow and the failure, never the
+  // (operator-configured) endpoint or a snippet of a response body.
+  test('a Koios failure is an Error that names the escrow and carries neither the endpoint nor a response body', async () => {
+    const LEAKS = ['http://', 'https://', 'koios.example', 'internal', 'hunter2', 'Bad Gateway', '<html', 'ECONNREFUSED'];
+    const rejecting = (error: Error) => (async () => { throw error; }) as unknown as typeof fetch;
+    const timeout = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+    const cases: Array<[string, typeof fetch, RegExp]> = [
+      ['an HTTP error whose body names internals', escrowKoios({ status: 503 }).f, /: Koios utxo_info answered 503$/],
+      ['a 200 that is not JSON', escrowKoios({ raw: '<html>502 Bad Gateway from internal.koios.example</html>' }).f, /: Koios utxo_info: response was not valid JSON$/],
+      ['a 200 that is not a list', escrowKoios({ raw: '{"error":"internal.koios.example is down"}' }).f, /: Koios utxo_info: Koios returned a non-list response$/],
+      ['a transport error that names the endpoint', rejecting(new TypeError('connect ECONNREFUSED https://koios.example:8443/api/v1/utxo_info')), /: Koios request failed \(network error or timeout\)$/],
+      ['a timeout', rejecting(timeout), /: Koios request failed \(network error or timeout\)$/],
+    ];
+    for (const [name, f, message] of cases) {
+      await assert.rejects(() => resolveEscrowLineage(new FixtureProvider([current]), 'https://koios.example', ESCROW_REF, f), (err: unknown) => {
+        assert.ok(err instanceof Error, name);
+        assert.ok(err.message.startsWith(`Could not read escrow ${ESCROW_REF}: `), `${name}: ${err.message}`);
+        assert.match(err.message, message, name);
+        for (const leak of LEAKS) assert.ok(!err.message.includes(leak), `${name}: "${leak}" leaked into: ${err.message}`);
+        return true;
+      }, name);
+    }
+  });
+  test('an output Koios does not know, or answers for a different output, is not found', async () => {
+    const other = [{ tx_hash: 'ab'.repeat(32), tx_index: 0, address: ESCROW_ADDRESS, value: '1', is_spent: false, inline_datum: { bytes: ESCROW_OPEN_DATUM_HEX } }];
+    for (const rows of [[], other]) await assert.rejects(() => lineage([current], escrowKoios({ rows })), refusal(/not found on the ledger/));
+  });
+  test('refuses a Post output that is not at the escrow script address, or whose address Koios leaves out', async () => {
+    for (const address of [ADVERT_ADDRESS, OWN_ADDRESS, null]) {
+      await assert.rejects(() => lineage([current], escrowKoios({ address })), refusal(/^UTxO .* is not at the escrow script address\.$/), String(address));
+    }
+  });
+  test('refuses an output that holds no escrow datum', async () => {
+    for (const datumHex of [null, ADVERT_DATUM_HEX, 'ff', 'zz']) {
+      await assert.rejects(() => lineage([current], escrowKoios({ datumHex })), refusal(/^UTxO .* does not hold an escrow datum\.$/), String(datumHex).slice(0, 8));
+    }
+  });
+  test('fails closed when Koios does not say whether the Post output is spent, whatever the node holds', async () => {
+    for (const held of [[], [postOutput], [current], [postOutput, current]]) {
+      await assert.rejects(() => lineage(held, escrowKoios({ spent: null })), refusal(/did not report whether escrow .* is spent/));
+    }
+  });
+  test('fails closed when Koios says the Post output is unspent but the node does not list it as an escrow output', async () => {
+    const noDatum = at(ESCROW_TX, posted, { datum: undefined });
+    const elsewhere = at(ESCROW_TX, posted, { address: OWN_ADDRESS });
+    for (const held of [[], [noDatum], [elsewhere], [current]]) {
+      await assert.rejects(() => lineage(held, escrowKoios({ spent: false })), refusal(/unspent, but the node does not list it as a live escrow output/));
+    }
+  });
+
+  // Anyone can lock a UTxO at the escrow address with any datum. Accept pays the datum's amounts, and the wallet makes up what
+  // the escrow output does not cover, so an output that holds less than its datum owes must never count as an escrow.
+  test('skips a copy of the escrow that holds less than its datum says it owes, wherever it is listed', async () => {
+    const inflated = at('dd'.repeat(32), { ...submitted, payment_lovelace: 500_000_000n });
+    assert.equal((await lineage([inflated])).current, null, 'only the decoy: nothing live');
+    assert.equal((await lineage([inflated, current])).current?.utxo.txHash, 'ee'.repeat(32));
+    assert.equal((await lineage([current, inflated])).current?.utxo.txHash, 'ee'.repeat(32));
+  });
+  test('holding exactly what it owes is enough, one lovelace short is not', async () => {
+    const owed = posted.payment_lovelace + posted.buyer_bond_lovelace + posted.supplier_bond_lovelace;
+    assert.equal(owed, 2_200_000n);
+    assert.equal((await lineage([{ ...current, assets: { lovelace: owed } }])).current?.utxo.txHash, 'ee'.repeat(32));
+    assert.equal((await lineage([{ ...current, assets: { lovelace: owed - 1n } }])).current, null);
+  });
+  test('refuses an unspent Post output that holds less than its datum owes', async () => {
+    const thin = at(ESCROW_TX, posted, { assets: { lovelace: 1_000_000n } });
+    await assert.rejects(() => lineage([thin], escrowKoios({ spent: false })), refusal(/is not funded: its datum owes 2200000 lovelace but the output holds 1000000/));
+  });
+  test('refuses to choose between two funded UTxOs that both claim to continue the escrow', async () => {
+    const twin = at('dd'.repeat(32), submitted);
+    await assert.rejects(() => lineage([current, twin]), refusal(/More than one live UTxO at the escrow address continues escrow/));
+  });
+  test('the Post output is not its own continuation when a node that lags Koios still lists it', async () => {
+    assert.equal((await lineage([postOutput])).current, null);
+  });
+});
+
+// ─── Accept and Reclaim (offline) ────────────────────────────────────────────
+// In production the node (Ogmios) evaluates the script while the transaction is completed: the builders tell Lucid not to do it
+// locally. This provider answers that call with a fixed budget per redeemer and counts the calls. It lets Lucid finish assembling
+// the transaction and says nothing about whether the validator would accept it; that is for the first-party E2E before any deploy.
+// What these tests do check is what the validator reads off the transaction: the redeemer, the signer, the outputs to each key and
+// the validity range, plus the shape of a script spend (reference script, collateral, fee).
+const REF_SCRIPT_UTXO: UTxO = {
+  txHash: ESCROW_REF_UTXO.txHash, outputIndex: ESCROW_REF_UTXO.outputIndex, address: FOREIGN_ADDRESS,
+  assets: { lovelace: 60_000_000n }, scriptRef: { type: 'PlutusV3', script: ESCROW_SCRIPT_CBOR },
+};
+function evaluatingProvider(utxos: UTxO[]) {
+  const evaluations: string[] = [];
+  const evaluateTx = async (txCborHex: string) => {
+    evaluations.push(txCborHex);
+    const legacy = CML.Transaction.from_cbor_hex(txCborHex).witness_set().redeemers()?.as_arr_legacy_redeemer();
+    const out: Array<{ ex_units: { mem: number; steps: number }; redeemer_index: number; redeemer_tag: 'spend' }> = [];
+    for (let i = 0; legacy && i < legacy.len(); i++) out.push({ ex_units: { mem: 2_000_000, steps: 500_000_000 }, redeemer_index: Number(legacy.get(i).index()), redeemer_tag: 'spend' });
+    return out;
+  };
+  return Object.assign(new FixtureProvider(utxos), { evaluateTx, evaluations });
+}
+function redeemersOf(cborHex: string) {
+  const legacy = CML.Transaction.from_cbor_hex(cborHex).witness_set().redeemers()?.as_arr_legacy_redeemer();
+  const out: Array<{ tag: number; index: number; data: string; mem: bigint }> = [];
+  for (let i = 0; legacy && i < legacy.len(); i++) {
+    const r = legacy.get(i);
+    out.push({ tag: Number(r.tag()), index: Number(r.index()), data: r.data().to_cbor_hex(), mem: r.ex_units().mem() });
+  }
+  return out;
+}
+const refsOf = (list: CML.TransactionInputList | undefined): string[] => {
+  const r: string[] = [];
+  for (let i = 0; list && i < list.len(); i++) r.push(`${list.get(i).transaction_id().to_hex()}#${list.get(i).index()}`);
+  return r.sort();
+};
+/** escrow.ak lovelace_paid_to_pkh: every output whose payment credential is that key hash, whatever its stake part. */
+const lovelacePaidTo = (cborHex: string, pkh: string): bigint =>
+  outputs(cborHex).filter((o) => getAddressDetails(o.address).paymentCredential?.hash === pkh).reduce((sum, o) => sum + o.lovelace, 0n);
+const slotOf = (ms: number) => BigInt(unixTimeToSlot('Mainnet', ms));
+const msOfSlot = (slot: bigint | undefined) => slotToUnixTime('Mainnet', Number(slot));
+
+describe('buildAccept / buildReclaim (offline)', () => {
+  before(async () => { await ensureSlotConfig(new FixtureProvider([])); });
+  const POSTED: EscrowDatum = { ...decodeEscrowDatum(ESCROW_OPEN_DATUM_HEX), buyer_pkh: OWN_PKH }; // the live escrow, as the test wallet posted it
+  const SUBMITTED_AT = POSTED.posted_at + 60_000;
+  const SUBMITTED: EscrowDatum = { ...POSTED, submitted_at: SUBMITTED_AT, result_receipt_hash: 'cd'.repeat(32), state: 'Submitted' };
+  const CLAIMED: EscrowDatum = { ...POSTED, state: 'Claimed' };
+  const LIVE_TX = 'ee'.repeat(32);
+  const ACCEPT_NOW = SUBMITTED_AT + 120_000;
+  const OPENS = Math.ceil((POSTED.deliver_by + 1) / 1000) * 1000; // the first moment a Reclaim of POSTED is accepted
+  const KOIOS = 'https://koios.example';
+  const keyAddress = (pkh: string) => credentialToAddress('Mainnet', { type: 'Key', hash: pkh });
+
+  async function setup(chain: UTxO[], wallet: UTxO[] = FIXTURE_UTXOS) {
+    const provider = evaluatingProvider([...wallet, ...chain]);
+    return { provider, lucid: await lucidForAddress(provider, OWN_ADDRESS) };
+  }
+  type World = Awaited<ReturnType<typeof setup>>;
+  /** The Post output is spent and the escrow lives on at LIVE_TX in the given state. */
+  const afterSubmit = (datum: EscrowDatum = SUBMITTED, wallet?: UTxO[]) => setup([REF_SCRIPT_UTXO, escrowAt(LIVE_TX, datum)], wallet);
+  /** Nobody has touched the Post output: it is still Open. */
+  const untouched = (wallet?: UTxO[]) => setup([REF_SCRIPT_UTXO, escrowAt(ESCROW_TX, POSTED)], wallet);
+  const postedOn = (spent: boolean) => escrowKoios({ datumHex: encodeEscrowDatum(POSTED), spent });
+  type Over = Partial<{ changeAddress: string; escrowRef: string; nowMs: number }>;
+  const accept = (w: World, over: Over = {}, k: KoiosFake = postedOn(true)) =>
+    buildAccept(w.lucid, w.provider, KOIOS, { changeAddress: OWN_ADDRESS, escrowRef: ESCROW_REF, nowMs: ACCEPT_NOW, ...over }, k.f);
+  const reclaim = (w: World, over: Over = {}, k: KoiosFake = postedOn(false)) =>
+    buildReclaim(w.lucid, w.provider, KOIOS, { changeAddress: OWN_ADDRESS, escrowRef: ESCROW_REF, nowMs: OPENS + 3_600_123, ...over }, k.f);
+  /** A refusal that comes before anything is built: the node was never asked to evaluate a script. */
+  const refused = (w: World) => assert.equal(w.provider.evaluations.length, 0, 'nothing was built');
+
+  test('the reference-script fixture is the deployed escrow validator: its hash is the escrow script hash', () => {
+    assert.equal(validatorToScriptHash({ type: 'PlutusV3', script: ESCROW_SCRIPT_CBOR }), ESCROW_SCRIPT_HASH);
+  });
+
+  describe('Accept', () => {
+    test('spends the live Submitted UTxO with the Accept redeemer and reads the validator from the reference script', async () => {
+      const w = await afterSubmit();
+      const r = await accept(w);
+      const t = CML.Transaction.from_cbor_hex(r.txCbor);
+      const inputs = inputRefs(r.txCbor);
+      assert.ok(inputs.includes(`${LIVE_TX}#0`), 'the live escrow output is spent');
+      assert.deepEqual(refsOf(t.body().reference_inputs()), [formatOutRef(ESCROW_REF_UTXO.txHash, ESCROW_REF_UTXO.outputIndex)]);
+      assert.equal(t.witness_set().plutus_v3_scripts()?.len() ?? 0, 0, 'the validator is read from the reference input, not carried in the witness set');
+      const reds = redeemersOf(r.txCbor);
+      assert.equal(reds.length, 1);
+      assert.equal(reds[0].tag, 0, 'a spend');
+      assert.equal(reds[0].data, 'd87b80', 'Accept');
+      assert.equal(inputs[reds[0].index], `${LIVE_TX}#0`, 'the redeemer points at the escrow input');
+      assert.ok(reds[0].mem > 0n, 'the budget the node answered is on the redeemer');
+      assert.equal(w.provider.evaluations.length > 0, true, 'the node, not Lucid, evaluates the script');
+    });
+    test('pays the supplier price + supplier bond at its key address and the buyer bond back to the buyer', async () => {
+      const r = await accept(await afterSubmit());
+      const outs = outputs(r.txCbor);
+      assert.ok(outs.some((o) => o.address === SUPPLIER_ADDRESS && o.lovelace === 1_200_000n), 'supplier: price 0.2 + supplier bond 1');
+      assert.ok(outs.some((o) => o.address === OWN_ADDRESS && o.lovelace === 1_000_000n), 'buyer: the bond');
+      // what escrow.ak handle_accept adds up
+      assert.ok(lovelacePaidTo(r.txCbor, SUBMITTED.supplier_pkh) >= SUBMITTED.payment_lovelace + SUBMITTED.supplier_bond_lovelace);
+      assert.ok(lovelacePaidTo(r.txCbor, OWN_PKH) >= SUBMITTED.buyer_bond_lovelace);
+      assert.deepEqual([r.supplierLovelace, r.buyerLovelace], [1_200_000n, 1_000_000n]);
+      assert.equal(r.secondsLeft, Math.floor((SUBMITTED_AT + ACCEPT_WINDOW_MS - ACCEPT_NOW) / 1000));
+    });
+    test('needs the buyer key, and its validity range is the plan\'s, which ends inside the accept window', async () => {
+      const r = await accept(await afterSubmit());
+      const body = CML.Transaction.from_cbor_hex(r.txCbor).body();
+      const signers = body.required_signers();
+      assert.ok(signers && signers.len() === 1 && signers.get(0).to_hex() === OWN_PKH);
+      const plan = planAccept(SUBMITTED, OWN_PKH, ACCEPT_NOW);
+      assert.equal(body.validity_interval_start(), slotOf(plan.validFrom));
+      assert.equal(body.ttl(), slotOf(plan.validTo));
+      assert.ok(msOfSlot(body.ttl()) <= SUBMITTED_AT + ACCEPT_WINDOW_MS, 'as the script sees it, the range ends within 600 s of Submit');
+    });
+    test('is a script spend: collateral comes from the wallet, and the fee is at least the minimum', async () => {
+      const r = await accept(await afterSubmit());
+      const body = CML.Transaction.from_cbor_hex(r.txCbor).body();
+      const collateral = refsOf(body.collateral_inputs());
+      assert.ok(collateral.length >= 1 && collateral.every((c) => FIXTURE_UTXOS.some((u) => c === `${u.txHash}#${u.outputIndex}`)), `collateral ${collateral} is a wallet output`);
+      assert.ok(body.collateral_return() !== undefined, 'what the collateral holds beyond the required amount comes back');
+      assert.ok(BigInt(String(body.total_collateral())) >= COLLATERAL_MIN_LOVELACE);
+      assert.ok(BigInt(r.fee) >= MARKETPLACE_MIN_FEE, `fee ${r.fee} is below the marketplace minimum`);
+    });
+
+    test('refuses a caller who is not the buyer', async () => {
+      const w = await afterSubmit();
+      await assert.rejects(() => accept(w, { changeAddress: keyAddress('cc'.repeat(28)) }), /not the buyer/);
+      refused(w);
+    });
+    test('refuses an escrow that is not Submitted, and one whose accept window has closed', async () => {
+      const claimed = await afterSubmit(CLAIMED);
+      await assert.rejects(() => accept(claimed), /Escrow state is Claimed; Accept needs Submitted/);
+      refused(claimed);
+      const w = await afterSubmit();
+      await assert.rejects(() => accept(w, { nowMs: SUBMITTED_AT + ACCEPT_WINDOW_MS + 1 }), /Accept window closed/);
+      refused(w);
+      // with no nowMs the clock decides, and the window of this August escrow closed long ago
+      const { nowMs: _omitted, ...withoutNow } = { changeAddress: OWN_ADDRESS, escrowRef: ESCROW_REF, nowMs: 0 };
+      await assert.rejects(() => buildAccept(w.lucid, w.provider, KOIOS, withoutNow, postedOn(true).f), /Accept window closed/);
+      refused(w);
+    });
+    test('refuses an escrow with no live UTxO, saying so and naming it', async () => {
+      const w = await setup([REF_SCRIPT_UTXO]);
+      await assert.rejects(() => accept(w), (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /has no live UTxO: it was already accepted, released or reclaimed/);
+        assert.ok(err.message.includes(ESCROW_REF));
+        return true;
+      });
+      refused(w);
+    });
+    test('a script change address or a malformed ref is refused before Koios is asked', async () => {
+      const w = await afterSubmit();
+      const k = postedOn(true);
+      await assert.rejects(() => accept(w, { changeAddress: ESCROW_ADDRESS }, k), /verification key/);
+      await assert.rejects(() => accept(w, { escrowRef: 'nope#1' }, k), /Invalid out ref/);
+      assert.equal(k.calls.length, 0);
+      refused(w);
+    });
+    test('a Koios failure surfaces as an error that names the escrow; nothing is built', async () => {
+      const w = await afterSubmit();
+      await assert.rejects(() => accept(w, {}, escrowKoios({ status: 502 })), (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.equal(err.message, `Could not read escrow ${ESCROW_REF}: Koios utxo_info answered 502`);
+        return true;
+      });
+      refused(w);
+    });
+    test('refuses a wallet without a pure output of at least 5 units, before building', async () => {
+      const at = (outputIndex: number, assets: UTxO['assets']): UTxO => ({ txHash: FIXTURE_TXHASH, outputIndex, address: OWN_ADDRESS, assets });
+      for (const wallet of [
+        [at(0, { lovelace: 4_900_000n }), at(1, { lovelace: 4_000_000n })],
+        [at(0, { lovelace: 900_000_000n, [FIXTURE_TOKEN_UNIT]: 5n })], // plenty of funds, but nothing pure to be the collateral
+      ]) {
+        const w = await afterSubmit(SUBMITTED, wallet);
+        await assert.rejects(() => accept(w), /Collateral required: the wallet must hold one pure output of at least 5 units/);
+        refused(w);
+      }
+    });
+    test('refuses when the reference script cannot be read, saying the marketplace has to republish it', async () => {
+      const bare = { ...REF_SCRIPT_UTXO, scriptRef: undefined };
+      for (const chain of [[escrowAt(LIVE_TX, SUBMITTED)], [bare, escrowAt(LIVE_TX, SUBMITTED)]]) {
+        const w = await setup(chain);
+        await assert.rejects(() => accept(w), new RegExp(`Escrow reference script ${ESCROW_REF_UTXO.txHash}#0 not found; the marketplace needs to republish it`));
+        refused(w);
+      }
+    });
+  });
+
+  describe('Reclaim', () => {
+    test('spends the Open Post output with the Reclaim redeemer and gives payment and both bonds back to the buyer', async () => {
+      const w = await untouched();
+      const r = await reclaim(w);
+      const inputs = inputRefs(r.txCbor);
+      assert.ok(inputs.includes(`${ESCROW_TX}#0`), 'the Post output is spent');
+      const reds = redeemersOf(r.txCbor);
+      assert.equal(reds.length, 1);
+      assert.deepEqual([reds[0].tag, reds[0].data, inputs[reds[0].index]], [0, 'd87c80', `${ESCROW_TX}#0`]);
+      assert.deepEqual(refsOf(CML.Transaction.from_cbor_hex(r.txCbor).body().reference_inputs()), [formatOutRef(ESCROW_REF_UTXO.txHash, ESCROW_REF_UTXO.outputIndex)]);
+      assert.ok(outputs(r.txCbor).some((o) => o.address === OWN_ADDRESS && o.lovelace === 2_200_000n), 'payment 0.2 + both bonds, to the buyer');
+      assert.ok(lovelacePaidTo(r.txCbor, OWN_PKH) >= POSTED.payment_lovelace + POSTED.buyer_bond_lovelace + POSTED.supplier_bond_lovelace, 'what escrow.ak handle_reclaim adds up');
+      assert.equal(r.buyerLovelace, 2_200_000n);
+      assert.ok(w.provider.evaluations.length > 0);
+      assert.ok(BigInt(r.fee) >= MARKETPLACE_MIN_FEE);
+    });
+    test('needs the buyer key and names collateral from the wallet', async () => {
+      const r = await reclaim(await untouched());
+      const body = CML.Transaction.from_cbor_hex(r.txCbor).body();
+      const signers = body.required_signers();
+      assert.ok(signers && signers.len() === 1 && signers.get(0).to_hex() === OWN_PKH);
+      assert.ok(refsOf(body.collateral_inputs()).length >= 1);
+      assert.ok(BigInt(String(body.total_collateral())) >= COLLATERAL_MIN_LOVELACE);
+    });
+    test('the transaction\'s lower bound is the plan\'s and, as the script sees it, is not before deliver_by - from the first accepted second on', async () => {
+      for (const later of [0, 1, 30_000, 59_999, 60_000, 60_001, 3_600_123]) {
+        const nowMs = OPENS + later;
+        const r = await reclaim(await untouched(), { nowMs });
+        const body = CML.Transaction.from_cbor_hex(r.txCbor).body();
+        const plan = planReclaim(POSTED, OWN_PKH, nowMs);
+        assert.equal(body.validity_interval_start(), slotOf(plan.validFrom), `later = ${later}`);
+        assert.equal(body.ttl(), slotOf(plan.validTo), `later = ${later}`);
+        assert.ok(msOfSlot(body.validity_interval_start()) >= POSTED.deliver_by, `later = ${later}: the lower bound is before deliver_by`);
+        assert.ok(msOfSlot(body.validity_interval_start()) >= OPENS, `later = ${later}`);
+      }
+    });
+    test('reclaims a Claimed escrow too, after the supplier took it and went quiet', async () => {
+      const w = await afterSubmit(CLAIMED);
+      const r = await reclaim(w, {}, postedOn(true));
+      assert.ok(inputRefs(r.txCbor).includes(`${LIVE_TX}#0`));
+      assert.equal(redeemersOf(r.txCbor)[0].data, 'd87c80');
+    });
+    test('stamps the validity range from the clock when nowMs is not given', async () => {
+      const before = Date.now();
+      const w = await untouched();
+      const { nowMs: _omitted, ...withoutNow } = { changeAddress: OWN_ADDRESS, escrowRef: ESCROW_REF, nowMs: 0 };
+      const r = await buildReclaim(w.lucid, w.provider, KOIOS, withoutNow, postedOn(false).f);
+      const after = Date.now();
+      const ttl = msOfSlot(CML.Transaction.from_cbor_hex(r.txCbor).body().ttl());
+      assert.ok(ttl >= before + 600_000 - 1000 && ttl <= after + 600_000, `ttl ${ttl} is not about ten minutes after ${before}..${after}`);
+    });
+
+    test('refuses before deliver_by has passed on a whole second, naming when it opens', async () => {
+      const w = await untouched();
+      await assert.rejects(() => reclaim(w, { nowMs: OPENS - 1 }), (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /Reclaim opens at/);
+        assert.ok(err.message.includes(new Date(OPENS).toISOString()));
+        return true;
+      });
+      refused(w);
+    });
+    test('refuses a Submitted escrow, a caller who is not the buyer, and an escrow with no live UTxO', async () => {
+      const submitted = await afterSubmit();
+      await assert.rejects(() => reclaim(submitted, {}, postedOn(true)), /Escrow state is Submitted; Reclaim needs Open or Claimed/);
+      refused(submitted);
+      const w = await untouched();
+      await assert.rejects(() => reclaim(w, { changeAddress: keyAddress('cc'.repeat(28)) }), /not the buyer/);
+      refused(w);
+      const finished = await setup([REF_SCRIPT_UTXO]);
+      await assert.rejects(() => reclaim(finished, {}, postedOn(true)), new RegExp(`Escrow ${ESCROW_REF} has no live UTxO: nothing to reclaim`));
+      refused(finished);
+    });
+    test('refuses a wallet without a pure output of at least 5 units, and an unreadable reference script, before building', async () => {
+      const lean = await untouched([{ txHash: FIXTURE_TXHASH, outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 4_000_000n } }]);
+      await assert.rejects(() => reclaim(lean), /Collateral required/);
+      refused(lean);
+      const noScript = await setup([escrowAt(ESCROW_TX, POSTED)]);
+      await assert.rejects(() => reclaim(noScript), /Escrow reference script .* not found/);
+      refused(noScript);
+    });
   });
 });

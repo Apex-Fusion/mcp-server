@@ -10,15 +10,16 @@ import { toBuildResult } from './build.js';
 import { ensureSlotConfig, paymentKeyHashOf } from './gov-build.js';
 import type { SlotClockProvider } from './gov-build.js';
 import {
-  ESCROW_ADDRESS, ACCEPT_WINDOW_MS, DELIVER_BY_BUFFER_MS, MAX_PROCESSING_MS_CEILING, MARKETPLACE_MIN_FEE,
+  ESCROW_ADDRESS, ESCROW_REF_UTXO, ACCEPT_WINDOW_MS, DELIVER_BY_BUFFER_MS, MAX_PROCESSING_MS_CEILING, MARKETPLACE_MIN_FEE,
   COLLATERAL_MIN_LOVELACE, MIN_UTXO_LOVELACE, REDEEMER,
 } from './marketplace-constants.js';
 import {
-  advertTextFieldsRoundTrip, encodeEscrowDatum, requestSpecHash, promptHashForPayload,
+  advertTextFieldsRoundTrip, decodeEscrowDatum, encodeEscrowDatum, requestSpecHash, promptHashForPayload,
   escrowLockFloor, parseOutRef, formatOutRef,
 } from './marketplace-datum.js';
 import type { AdvertDatum, EscrowDatum } from './marketplace-datum.js';
-import { readAdvert, koiosTxInputCreds } from './marketplace-indexer.js';
+import { readAdvert, koiosTxInputCreds, koiosUtxoInfo } from './marketplace-indexer.js';
+import type { KoiosUtxo } from './marketplace-indexer.js';
 
 // One definition of "the payment key hash of a change address" for every builder family: gov-build's, re-exported.
 export { paymentKeyHashOf };
@@ -235,4 +236,166 @@ export function planReclaim(datum: EscrowDatum, callerPkh: string, nowMs: number
   if (nowMs < opens) throw new Error(`Reclaim opens at ${iso(opens)}: deliver_by is ${iso(datum.deliver_by)}, and the validity range may start only on a whole second after it.`);
   const due = datum.payment_lovelace + datum.buyer_bond_lovelace + datum.supplier_bond_lovelace;
   return { buyerLovelace: due < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : due, validFrom: Math.max(opens, nowMs - 60_000), validTo: nowMs + 600_000, redeemerHex: redeemerHex(REDEEMER.Reclaim) };
+}
+
+// ─── Lineage ────────────────────────────────────────────────────────────────
+
+export interface EscrowLineage {
+  /** The datum of the output `escrowRef` names: for the ref buildPostEscrow returns, the Post output as posted (state Open). */
+  posted: EscrowDatum;
+  /** The live UTxO and its datum; null when the escrow is finished (Accepted, Reclaimed or Released) or no UTxO at the escrow address carries it on. */
+  current: { utxo: UTxO; datum: EscrowDatum } | null;
+  /** Koios says the posted output has been spent. */
+  spent: boolean;
+}
+
+/**
+ * What a failed Koios call may tell a caller. koiosUtxoInfo's own messages name only the operation and the status; any other
+ * failure (a transport error can carry the endpoint's host or URL) becomes a fixed phrase.
+ */
+function koiosFailure(err: unknown): string {
+  const message = errorText(err);
+  return message.startsWith('Koios utxo_info') ? message : 'Koios request failed (network error or timeout)';
+}
+
+/** What an escrow's datum says is owed between the parties: the payment and both bonds, all that Accept and Reclaim pay out. */
+const owedLovelace = (d: EscrowDatum): bigint => d.payment_lovelace + d.buyer_bond_lovelace + d.supplier_bond_lovelace;
+const heldLovelace = (u: UTxO): bigint => u.assets.lovelace ?? 0n;
+/** The lineage rule: Claim and Submit leave advert_ref, buyer_pkh, posted_at and prompt_hash as they were posted. */
+const continuesEscrow = (posted: EscrowDatum, d: EscrowDatum): boolean =>
+  d.advert_ref.txHash === posted.advert_ref.txHash && d.advert_ref.index === posted.advert_ref.index
+  && d.buyer_pkh === posted.buyer_pkh && d.posted_at === posted.posted_at && d.prompt_hash === posted.prompt_hash;
+
+/**
+ * Where is this escrow now? `escrowRef` names the Post output (`<txHash>#0`, as buildPostEscrow returns it). Claim and Submit
+ * spend the escrow's UTxO and re-create it at the same address with the same value, so while the Post output is unspent it is the
+ * live escrow, and once it is spent the live one is the UTxO at the escrow address that carries the same advert_ref, buyer,
+ * posted_at and prompt_hash. `spent: true` with `current: null` means the escrow is finished.
+ *
+ * Fails closed. Anyone can lock a UTxO at the escrow address with any datum, and Accept pays what the datum says, with the
+ * wallet making up whatever the escrow output does not cover; so a UTxO counts as an escrow only when it is at ESCROW_ADDRESS,
+ * holds an escrow datum, and holds at least the payment and both bonds that datum owes. It throws, naming the escrow, when
+ * Koios cannot be read or does not say whether the Post output is spent, when Koios and the node disagree about it, and when
+ * two funded UTxOs both claim to be the live escrow. A Koios failure's message carries neither the endpoint nor a response body.
+ * `fetchImpl` stands in for fetch in the Koios call (tests).
+ */
+export async function resolveEscrowLineage(provider: Provider, koiosUrl: string, escrowRef: string, fetchImpl: typeof fetch = fetch): Promise<EscrowLineage> {
+  const ref = parseOutRef(escrowRef);
+  const canonical = formatOutRef(ref.txHash, ref.outputIndex);
+  let rows: KoiosUtxo[];
+  try { rows = await koiosUtxoInfo(koiosUrl, [canonical], fetchImpl); } catch (err) { throw new Error(`Could not read escrow ${canonical}: ${koiosFailure(err)}`); }
+  const row = rows.find((u) => String(u?.tx_hash).toLowerCase() === ref.txHash && u?.tx_index === ref.outputIndex);
+  if (!row) throw new Error(`Escrow ${canonical} not found on the ledger.`);
+  if (typeof row.address !== 'string' || row.address.toLowerCase() !== ESCROW_ADDRESS) throw new Error(`UTxO ${canonical} is not at the escrow script address.`);
+  let posted: EscrowDatum;
+  try { posted = decodeEscrowDatum(row.inline_datum?.bytes ?? ''); } catch { throw new Error(`UTxO ${canonical} does not hold an escrow datum.`); }
+  if (typeof row.is_spent !== 'boolean') throw new Error(`Koios did not report whether escrow ${canonical} is spent; refusing to guess where it is.`);
+
+  if (!row.is_spent) {
+    const [utxo] = await provider.getUtxosByOutRef([ref]);
+    if (!utxo || utxo.address !== ESCROW_ADDRESS || !utxo.datum) {
+      throw new Error(`Koios reports escrow ${canonical} as unspent, but the node does not list it as a live escrow output; the node may be behind Koios, retry in a few seconds.`);
+    }
+    if (heldLovelace(utxo) < owedLovelace(posted)) {
+      throw new Error(`Escrow ${canonical} is not funded: its datum owes ${owedLovelace(posted)} lovelace but the output holds ${heldLovelace(utxo)}; refusing to treat it as an escrow.`);
+    }
+    return { posted, current: { utxo, datum: posted }, spent: false };
+  }
+
+  const live: Array<{ utxo: UTxO; datum: EscrowDatum }> = [];
+  for (const u of await provider.getUtxos(ESCROW_ADDRESS)) {
+    if (!u.datum) continue;
+    // A node that lags Koios may still list the output Koios says is spent: that is where the escrow was, not where it is.
+    if (u.txHash.toLowerCase() === ref.txHash && u.outputIndex === ref.outputIndex) continue;
+    let d: EscrowDatum;
+    try { d = decodeEscrowDatum(u.datum); } catch { continue; }
+    if (continuesEscrow(posted, d) && heldLovelace(u) >= owedLovelace(d)) live.push({ utxo: u, datum: d });
+  }
+  if (live.length > 1) throw new Error(`More than one live UTxO at the escrow address continues escrow ${canonical}; refusing to choose between them.`);
+  return { posted, current: live[0] ?? null, spent: true };
+}
+
+// ─── Accept / Reclaim builders ──────────────────────────────────────────────
+
+/**
+ * Lucid turns validFrom and validTo into the slots that contain them, and the Reclaim plan opens on a whole second so that the
+ * slot it lands in starts at or after deliver_by. That holds only while slots start on whole seconds, which is when the chain's
+ * slot zero time is a whole number of seconds; on any other clock the plan's argument does not hold, so nothing is built.
+ */
+function assertWholeSecondSlots(zeroTime: number): void {
+  if (zeroTime % 1000 !== 0) {
+    throw new Error(`The chain's slot zero time (${zeroTime} ms) is not a whole number of seconds, so the validity range cannot be placed on slot boundaries the way Accept and Reclaim need; nothing was built.`);
+  }
+}
+
+/** The escrow validator is read from its live reference-script UTxO instead of being attached, which keeps the transaction small. If that UTxO is ever spent, the marketplace has to publish the script again. */
+async function escrowRefScript(provider: Provider): Promise<UTxO> {
+  const [u] = await provider.getUtxosByOutRef([ESCROW_REF_UTXO]);
+  if (!u?.scriptRef) throw new Error(`Escrow reference script ${formatOutRef(ESCROW_REF_UTXO.txHash, ESCROW_REF_UTXO.outputIndex)} not found; the marketplace needs to republish it.`);
+  return u;
+}
+
+/** Lucid picks the collateral itself. This only turns a wallet with nothing suitable into a readable refusal instead of a ledger error. */
+function assertCollateral(utxos: UTxO[]) {
+  if (!utxos.some((u) => Object.keys(u.assets).every((k) => k === 'lovelace') && u.assets.lovelace >= COLLATERAL_MIN_LOVELACE)) {
+    throw new Error('Collateral required: the wallet must hold one pure output of at least 5 units.');
+  }
+}
+
+/**
+ * Builds the unsigned Accept of a Submitted escrow: pays the supplier price + supplier bond, returns the buyer bond to the
+ * change address, and must land within 600 s of Submit. Only the buyer can accept; that and the escrow's state and window are
+ * checked (planAccept) before anything is built. The escrow's live UTxO comes from resolveEscrowLineage, which fails closed.
+ *
+ * A script spend needs collateral, and Lucid takes it from the wallet: a pure-lovelace output of at least 5 units must exist
+ * (checked first, so the refusal reads as one instead of as a ledger error); buildPostEscrow's `collateralKept` says whether the
+ * Post left one. The validator is read from the reference script at ESCROW_REF_UTXO, the node evaluates it
+ * (`localUPLCEval: false`), the plan's validity bounds reach the transaction unchanged, and nothing is signed or submitted.
+ * `fetchImpl` stands in for fetch in the Koios call (tests).
+ */
+export async function buildAccept(lucid: LucidEvolution, provider: Provider, koiosUrl: string, p: { changeAddress: string; escrowRef: string; nowMs?: number }, fetchImpl: typeof fetch = fetch)
+  : Promise<VectorUnsignedBuildResult & { supplierLovelace: bigint; buyerLovelace: bigint; secondsLeft: number }> {
+  const callerPkh = paymentKeyHashOf(p.changeAddress);
+  const lineage = await resolveEscrowLineage(provider, koiosUrl, p.escrowRef, fetchImpl);
+  if (!lineage.current) throw new Error(`Escrow ${p.escrowRef} has no live UTxO: it was already accepted, released or reclaimed.`);
+  const plan = planAccept(lineage.current.datum, callerPkh, p.nowMs ?? Date.now());
+  assertWholeSecondSlots(await ensureSlotConfig(provider as unknown as SlotClockProvider));
+  assertCollateral(await lucid.wallet().getUtxos());
+  const completed = await lucid.newTx()
+    .readFrom([await escrowRefScript(provider)])
+    .collectFrom([lineage.current.utxo], plan.redeemerHex)
+    .pay.ToAddress(plan.supplierAddress, { lovelace: plan.supplierLovelace })
+    .pay.ToAddress(p.changeAddress, { lovelace: plan.buyerLovelace })
+    .addSignerKey(callerPkh)
+    .validFrom(plan.validFrom)
+    .validTo(plan.validTo)
+    .setMinFee(MARKETPLACE_MIN_FEE)
+    .complete({ localUPLCEval: false });
+  return { ...toBuildResult(completed), supplierLovelace: plan.supplierLovelace, buyerLovelace: plan.buyerLovelace, secondsLeft: plan.secondsLeft };
+}
+
+/**
+ * Builds the unsigned Reclaim of an Open or Claimed escrow whose deliver_by has passed: payment and both bonds go back to the
+ * change address. Only the buyer can reclaim; that, the state and the opening time are checked (planReclaim) before anything is
+ * built. Collateral, reference script, evaluation and the plan's validity bounds are as for buildAccept: a pure-lovelace output
+ * of at least 5 units must exist in the wallet, and `fetchImpl` is for tests.
+ */
+export async function buildReclaim(lucid: LucidEvolution, provider: Provider, koiosUrl: string, p: { changeAddress: string; escrowRef: string; nowMs?: number }, fetchImpl: typeof fetch = fetch)
+  : Promise<VectorUnsignedBuildResult & { buyerLovelace: bigint }> {
+  const callerPkh = paymentKeyHashOf(p.changeAddress);
+  const lineage = await resolveEscrowLineage(provider, koiosUrl, p.escrowRef, fetchImpl);
+  if (!lineage.current) throw new Error(`Escrow ${p.escrowRef} has no live UTxO: nothing to reclaim.`);
+  const plan = planReclaim(lineage.current.datum, callerPkh, p.nowMs ?? Date.now());
+  assertWholeSecondSlots(await ensureSlotConfig(provider as unknown as SlotClockProvider));
+  assertCollateral(await lucid.wallet().getUtxos());
+  const completed = await lucid.newTx()
+    .readFrom([await escrowRefScript(provider)])
+    .collectFrom([lineage.current.utxo], plan.redeemerHex)
+    .pay.ToAddress(p.changeAddress, { lovelace: plan.buyerLovelace })
+    .addSignerKey(callerPkh)
+    .validFrom(plan.validFrom)
+    .validTo(plan.validTo)
+    .setMinFee(MARKETPLACE_MIN_FEE)
+    .complete({ localUPLCEval: false });
+  return { ...toBuildResult(completed), buyerLovelace: plan.buyerLovelace };
 }
