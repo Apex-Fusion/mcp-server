@@ -1,8 +1,10 @@
 // packages/builder/src/vector/marketplace-datum.ts
-// Marketplace datum codecs on Lucid's Data/Constr. Field order is the on-chain order
-// (agents-marketplace packages/shared/src/cbor/{AdvertDatum,EscrowDatum}.ts). Semantic
-// equality with the marketplace's cbor-x encoder is pinned by test/marketplace-datum.test.ts;
-// byte framing of lists may differ (indefinite vs definite), which the validator ignores.
+// Marketplace datum codecs. Field order is the on-chain order (agents-marketplace
+// packages/shared/src/cbor/{AdvertDatum,EscrowDatum}.ts). Decoding is lenient and runs on
+// Lucid's Data.from. encodeEscrowDatum is a hand-rolled writer whose output is byte-identical
+// to the marketplace's cbor-x encoder (pinned against the live datum by
+// test/marketplace-datum.test.ts), because escrowLockFloor sizes the Submitted datum from
+// these bytes and Lucid's Data.to frames lists and integers more compactly, which under-sizes the lock.
 import { Data, Constr, fromText, toText } from '@lucid-evolution/lucid';
 import { createHash } from 'node:crypto';
 
@@ -59,8 +61,6 @@ function optionBytes(x: unknown, where: string): string | null {
   if (c.index === 0 && c.fields.length === 1) return asBytes(c.fields[0], where);
   throw new Error(`${where}: malformed option`);
 }
-const some = (v: Data) => new Constr(0, [v]);
-const none = () => new Constr(1, []);
 
 export function decodeAdvertDatum(hex: string): AdvertDatum {
   const c = asConstr(Data.from(hex), 'advert');
@@ -112,18 +112,41 @@ export function decodeEscrowDatum(hex: string): EscrowDatum {
   };
 }
 
+// Hand-rolled writer for the escrow datum, byte-identical to the marketplace's cbor-x encoder:
+// definite-length arrays, every integer as 1b + 8 bytes big-endian whatever its magnitude,
+// definite bytestrings, Plutus constructors as tag 121 + alternative. Only the shapes an
+// escrow datum needs (arrays here always have fewer than 24 fields).
+const HEX_BYTES = /^(?:[0-9a-fA-F]{2})*$/;
+const byteHex = (n: number): string => n.toString(16).padStart(2, '0');
+function cborUint(n: bigint): string {
+  if (n < 0n || n > 0xffffffffffffffffn) throw new RangeError(`datum integer out of uint64 range: ${n}`);
+  return '1b' + n.toString(16).padStart(16, '0');
+}
+function cborBytes(hex: string): string {
+  if (!HEX_BYTES.test(hex)) throw new Error('datum bytes: expected even-length hex');
+  const n = hex.length / 2;
+  if (n >= 65536) throw new RangeError(`datum bytestring too long: ${n} bytes`);
+  const head = n < 24 ? byteHex(0x40 + n) : n < 256 ? '58' + byteHex(n) : '59' + byteHex(n >> 8) + byteHex(n & 0xff);
+  return head + hex.toLowerCase();
+}
+const cborConstr = (alt: number, fields: string[]): string => 'd8' + byteHex(0x79 + alt) + byteHex(0x80 + fields.length) + fields.join('');
+const some = (field: string): string => cborConstr(0, [field]);
+const none = (): string => cborConstr(1, []);
+
 export function encodeEscrowDatum(d: EscrowDatum): string {
-  return Data.to(new Constr(0, [
-    d.buyer_pkh, d.supplier_pkh,
-    new Constr(0, [d.advert_ref.txHash, BigInt(d.advert_ref.index)]),
-    fromText(d.capability_id),
-    d.request_spec_hash, d.prompt_hash,
-    d.payment_lovelace, d.buyer_bond_lovelace, d.supplier_bond_lovelace,
-    BigInt(d.deliver_by), BigInt(d.posted_at),
-    d.submitted_at === null ? none() : some(BigInt(d.submitted_at)),
-    d.result_receipt_hash === null ? none() : some(d.result_receipt_hash),
-    new Constr(STATES.indexOf(d.state), []),
-  ]));
+  const stateAlt = STATES.indexOf(d.state);
+  if (stateAlt < 0) throw new Error(`escrow.state: unknown state "${String(d.state)}"`);
+  return cborConstr(0, [
+    cborBytes(d.buyer_pkh), cborBytes(d.supplier_pkh),
+    cborConstr(0, [cborBytes(d.advert_ref.txHash), cborUint(BigInt(d.advert_ref.index))]),
+    cborBytes(fromText(d.capability_id)),
+    cborBytes(d.request_spec_hash), cborBytes(d.prompt_hash),
+    cborUint(d.payment_lovelace), cborUint(d.buyer_bond_lovelace), cborUint(d.supplier_bond_lovelace),
+    cborUint(BigInt(d.deliver_by)), cborUint(BigInt(d.posted_at)),
+    d.submitted_at === null ? none() : some(cborUint(BigInt(d.submitted_at))),
+    d.result_receipt_hash === null ? none() : some(cborBytes(d.result_receipt_hash)),
+    cborConstr(stateAlt, []),
+  ]);
 }
 
 /** RFC 8785 subset used by the marketplace: sorted keys, NFC strings, no whitespace. */
@@ -148,6 +171,7 @@ export function wirePayloadFor(payload: string): string { return canonicalize([{
 export function promptHashForPayload(payload: string): string { return sha256Utf8Hex(wirePayloadFor(payload)); }
 
 // Min-ada floor for the escrow's largest future datum (Submitted). Port of minAdaFloor.ts.
+// Sized from encodeEscrowDatum, which is byte-identical to the marketplace's encoder, so it matches minAdaFloor.ts exactly.
 const UTXO_COST_PER_BYTE = 4310n;
 const OUTPUT_OVERHEAD_BYTES = 160n;
 const SAFETY_MARGIN_LOVELACE = 50_000n;

@@ -24,6 +24,11 @@ describe('escrow datum', () => {
   test('decodes the live Open escrow field by field', () => {
     assert.deepEqual(decodeEscrowDatum(ESCROW_OPEN_DATUM_HEX), ESCROW_EXPECTED);
   });
+  test('re-encoding reproduces the on-chain bytes exactly', () => {
+    assert.equal(encodeEscrowDatum(decodeEscrowDatum(ESCROW_OPEN_DATUM_HEX)), ESCROW_OPEN_DATUM_HEX);
+    // the case of hex input never leaks into the output
+    assert.equal(encodeEscrowDatum({ ...ESCROW_EXPECTED, buyer_pkh: ESCROW_EXPECTED.buyer_pkh.toUpperCase() }), ESCROW_OPEN_DATUM_HEX);
+  });
   test('re-encoding is semantically identical to the on-chain bytes', () => {
     const ours = encodeEscrowDatum(decodeEscrowDatum(ESCROW_OPEN_DATUM_HEX));
     assert.deepEqual(Data.from(ours), Data.from(ESCROW_OPEN_DATUM_HEX));
@@ -32,11 +37,41 @@ describe('escrow datum', () => {
     const d = { ...ESCROW_EXPECTED, submitted_at: 1786530100000, result_receipt_hash: 'ab'.repeat(32), state: 'Submitted' as const };
     assert.deepEqual(decodeEscrowDatum(encodeEscrowDatum(d)), d);
   });
+  test('encodes Option Some fields and the Submitted tag byte-for-byte', () => {
+    const submittedAt = 1786530100000;
+    const receipt = 'ab'.repeat(32);
+    const tail = 'd87a80d87a80d87980'; // submitted_at None, result_receipt_hash None, state Open
+    assert.ok(ESCROW_OPEN_DATUM_HEX.endsWith(tail));
+    const expected = ESCROW_OPEN_DATUM_HEX.slice(0, -tail.length)
+      + 'd87981' + '1b' + submittedAt.toString(16).padStart(16, '0') // Some(submitted_at)
+      + 'd87981' + '5820' + receipt // Some(result_receipt_hash)
+      + 'd87b80'; // Submitted
+    const d = { ...ESCROW_EXPECTED, submitted_at: submittedAt, result_receipt_hash: receipt, state: 'Submitted' as const };
+    assert.equal(encodeEscrowDatum(d), expected);
+  });
+  test('bytestring headers use the shortest definite form across the 24 / 256 boundaries', () => {
+    const capHex = '5821' + Buffer.from(ESCROW_EXPECTED.capability_id, 'utf8').toString('hex');
+    const at = ESCROW_OPEN_DATUM_HEX.indexOf(capHex);
+    assert.ok(at > 0);
+    const head = ESCROW_OPEN_DATUM_HEX.slice(0, at);
+    const tail = ESCROW_OPEN_DATUM_HEX.slice(at + capHex.length);
+    for (const [len, header] of [[0, '40'], [23, '57'], [24, '5818'], [255, '58ff'], [256, '590100']] as const) {
+      const d = { ...ESCROW_EXPECTED, capability_id: 'a'.repeat(len) };
+      assert.equal(encodeEscrowDatum(d), head + header + '61'.repeat(len) + tail, `${len}-byte capability_id`);
+    }
+  });
+  test('refuses values it cannot frame instead of emitting a corrupt datum', () => {
+    assert.throws(() => encodeEscrowDatum({ ...ESCROW_EXPECTED, payment_lovelace: -1n }), /uint64/);
+    assert.throws(() => encodeEscrowDatum({ ...ESCROW_EXPECTED, payment_lovelace: 2n ** 64n }), /uint64/);
+    assert.throws(() => encodeEscrowDatum({ ...ESCROW_EXPECTED, prompt_hash: 'abc' }), /even-length hex/);
+    assert.throws(() => encodeEscrowDatum({ ...ESCROW_EXPECTED, state: 'Bogus' as never }), /unknown state/);
+  });
   test('lock floor never goes below the economic total and covers the live lock', () => {
     const open = decodeEscrowDatum(ESCROW_OPEN_DATUM_HEX);
     const economic = open.payment_lovelace + open.buyer_bond_lovelace + open.supplier_bond_lovelace;
     const floor = escrowLockFloor(open, economic);
     assert.ok(floor >= economic);
+    assert.equal(floor, ESCROW_LOCKED_LOVELACE, 'the floor must equal the lovelace the marketplace actually locked for this datum');
     assert.ok(floor >= ESCROW_LOCKED_LOVELACE - 100_000n, `floor ${floor} is far below the live lock ${ESCROW_LOCKED_LOVELACE}`);
     assert.ok(floor <= ESCROW_LOCKED_LOVELACE + 200_000n, `floor ${floor} over-locks against the live lock ${ESCROW_LOCKED_LOVELACE}`);
   });
