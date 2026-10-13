@@ -827,7 +827,7 @@
     }
   },
   "vector_marketplace_list_suppliers": {
-    "description": "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only. Pick an advert_ref here, then hire it with vector_build_marketplace_post_escrow.",
+    "description": "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only.",
     "inputSchema": {
       "type": "object",
       "properties": {

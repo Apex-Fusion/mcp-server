@@ -1,8 +1,9 @@
 // packages/builder/test/marketplace-indexer.test.ts
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, withJson } from '../src/vector/marketplace-indexer.ts';
-import { INDEXER_URL } from '../src/vector/marketplace-constants.ts';
+import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
+import { ADVERT_ADDRESS, ESCROW_ADDRESS, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
+import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
 
 const fakeFetch = (body: unknown, status = 200) => (async () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
 
@@ -88,5 +89,103 @@ describe('fetchSuppliers ordering', () => {
     assert.deepEqual(all.map((s) => s.utxo_ref.slice(65)), ['3', '2', '4', '1']);
     const free = await fetchSuppliers({ fetchImpl: fakeFetch(rows), onlyFree: true });
     assert.deepEqual(free.map((s) => s.utxo_ref.slice(65)), ['2', '4', '1']);
+  });
+});
+
+describe('non-list and non-object bodies', () => {
+  test('a list endpoint answering with a non-list body becomes a clear error, not a TypeError', async () => {
+    for (const body of [{}, { error: 'x' }, null, 'oops', 7]) {
+      await assert.rejects(() => fetchCapabilities({ fetchImpl: fakeFetch(body) }), safeMessage(/^list capabilities: indexer returned a non-list response$/));
+      await assert.rejects(() => fetchSuppliers({ fetchImpl: fakeFetch(body) }), safeMessage(/^list suppliers: indexer returned a non-list response$/));
+      await assert.rejects(() => koiosUtxoInfo('https://koios.example', ['a'.repeat(64) + '#0'], fakeFetch(body)), safeMessage(/^Koios utxo_info: Koios returned a non-list response$/));
+    }
+  });
+  test('the single-supplier endpoint answering with a list or null becomes a clear error', async () => {
+    for (const body of [[], [supplierRow()], null, 'oops']) {
+      await assert.rejects(() => fetchSupplier('b'.repeat(56), { fetchImpl: fakeFetch(body) }), safeMessage(/^get supplier: indexer returned a non-object response$/));
+    }
+  });
+});
+
+describe('koiosUtxoInfo URL', () => {
+  test('POSTs to <base>/api/v1/utxo_info however many slashes end the base', async () => {
+    const urls: string[] = [];
+    const f = (async (u: string) => { urls.push(u); return new Response('[]', { status: 200 }); }) as unknown as typeof fetch;
+    for (const base of ['https://koios.example/', 'https://koios.example', 'https://koios.example//']) await koiosUtxoInfo(base, [], f);
+    assert.deepEqual(urls, Array(3).fill('https://koios.example/api/v1/utxo_info'));
+  });
+});
+
+// readAdvert: the authenticity gate in front of every advert read. A UTxO is only an advert when it sits at the
+// advert script address and holds an advert datum; anyone can lock a UTxO elsewhere with a datum that merely
+// parses as one (and copies a real supplier_pkh).
+const utxoAt = (ref: string, address: string | undefined, datumHex: string | null, over: Record<string, unknown> = {}) => ({
+  tx_hash: ref.slice(0, 64), tx_index: Number(ref.slice(65)), address, value: '2000000', is_spent: false,
+  inline_datum: datumHex === null ? null : { bytes: datumHex }, ...over,
+});
+const koiosReturning = (entries: unknown[]) => {
+  const calls: { url: string; body: any }[] = [];
+  const f = (async (u: string, init: any) => { calls.push({ url: u, body: JSON.parse(init.body) }); return new Response(JSON.stringify(entries), { status: 200 }); }) as unknown as typeof fetch;
+  return { f, calls };
+};
+const errorOf = (r: Awaited<ReturnType<typeof readAdvert>>): string => {
+  if (!('error' in r)) throw new assert.AssertionError({ message: 'expected a refusal, got an advert' });
+  return r.error;
+};
+
+describe('readAdvert', () => {
+  test('returns the decoded advert, the UTxO and the spent flag for an advert at the advert script address', async () => {
+    const { f, calls } = koiosReturning([utxoAt(ADVERT_REF, ADVERT_ADDRESS, ADVERT_DATUM_HEX)]);
+    const r = await readAdvert(ADVERT_REF, f);
+    if ('error' in r) throw new assert.AssertionError({ message: `expected an advert, got: ${r.error}` });
+    assert.deepEqual(r.advert, ADVERT_EXPECTED);
+    assert.equal(r.spent, false);
+    assert.equal(r.utxo.address, ADVERT_ADDRESS);
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.endsWith('/api/v1/utxo_info'));
+    assert.deepEqual(calls[0].body, { _utxo_refs: [ADVERT_REF], _extended: true });
+  });
+  test('flags a spent advert (Koios still returns its datum) without refusing it', async () => {
+    const r = await readAdvert(ADVERT_REF, koiosReturning([utxoAt(ADVERT_REF, ADVERT_ADDRESS, ADVERT_DATUM_HEX, { is_spent: true })]).f);
+    if ('error' in r) throw new assert.AssertionError({ message: `expected an advert, got: ${r.error}` });
+    assert.equal(r.spent, true);
+    assert.deepEqual(r.advert, ADVERT_EXPECTED);
+  });
+  test('asks Koios for the canonical lowercase ref and reports that ref', async () => {
+    const upper = ADVERT_REF.slice(0, 64).toUpperCase() + '#0';
+    const { f, calls } = koiosReturning([]);
+    assert.equal(errorOf(await readAdvert(upper, f)), `No UTxO at ${ADVERT_REF}.`);
+    assert.deepEqual(calls[0].body._utxo_refs, [ADVERT_REF]);
+  });
+  test('no UTxO at the ref: an empty answer, or an answer for some other output', async () => {
+    for (const entries of [[], [utxoAt(ESCROW_REF, ADVERT_ADDRESS, ADVERT_DATUM_HEX)]]) {
+      assert.equal(errorOf(await readAdvert(ADVERT_REF, koiosReturning(entries).f)), `No UTxO at ${ADVERT_REF}.`);
+    }
+  });
+  test('refuses a forged advert: the right datum shape at the wrong address (or with no address at all)', async () => {
+    const forged = 'addr1' + 'q'.repeat(54);
+    for (const address of [forged, ESCROW_ADDRESS, undefined]) {
+      const r = await readAdvert(ADVERT_REF, koiosReturning([utxoAt(ADVERT_REF, address, ADVERT_DATUM_HEX)]).f);
+      assert.equal(errorOf(r), `UTxO ${ADVERT_REF} is not at the advert script address.`);
+    }
+  });
+  test('refuses the live escrow UTxO: the escrow datum at the escrow address', async () => {
+    const r = await readAdvert(ESCROW_REF, koiosReturning([utxoAt(ESCROW_REF, ESCROW_ADDRESS, ESCROW_OPEN_DATUM_HEX)]).f);
+    assert.equal(errorOf(r), `UTxO ${ESCROW_REF} is not at the advert script address.`);
+  });
+  test('refuses a UTxO at the advert address that does not hold an advert datum', async () => {
+    for (const datum of [ESCROW_OPEN_DATUM_HEX, null, 'ff', 'zz']) {
+      const r = await readAdvert(ESCROW_REF, koiosReturning([utxoAt(ESCROW_REF, ADVERT_ADDRESS, datum)]).f);
+      assert.equal(errorOf(r), `UTxO ${ESCROW_REF} does not hold an advert datum.`, `datum ${String(datum).slice(0, 12)}`);
+    }
+  });
+  test('a malformed ref is refused without calling Koios', async () => {
+    const { f, calls } = koiosReturning([]);
+    assert.match(errorOf(await readAdvert('nope#1', f)), /^Invalid out ref/);
+    assert.equal(calls.length, 0);
+  });
+  test('Koios failures still throw, with the safe messages', async () => {
+    await assert.rejects(() => readAdvert(ADVERT_REF, fakeFetch({}, 500)), safeMessage(/^Koios utxo_info answered 500$/));
+    await assert.rejects(() => readAdvert(ADVERT_REF, fakeFetch({ not: 'a list' })), safeMessage(/^Koios utxo_info: Koios returned a non-list response$/));
   });
 });
