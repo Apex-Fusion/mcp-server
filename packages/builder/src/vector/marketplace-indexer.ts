@@ -1,6 +1,6 @@
 // packages/builder/src/vector/marketplace-indexer.ts
 // Read-only clients for the public marketplace indexer and Koios utxo_info.
-// No supplier URLs are contacted here (that is PR 3's safeFetch).
+// No supplier URLs are contacted here (marketplace-transport.ts does that, through safeFetch).
 import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { ADVERT_ADDRESS, INDEXER_URL } from './marketplace-constants.js';
 import { decodeAdvertDatum, formatOutRef, parseOutRef } from './marketplace-datum.js';

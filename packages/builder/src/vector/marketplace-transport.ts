@@ -1,7 +1,8 @@
 // packages/builder/src/vector/marketplace-transport.ts
-// Job transport to supplier endpoints, through safeFetch only. A supplier is reached at the endpoint_url of the advert its escrow
-// names (the escrow's Post output, then its advert_ref, then readAdvert), never at a URL the caller gives. Nothing here builds, signs
-// or submits a transaction, and no error carries a supplier URL: they name the escrow and what happened.
+// Job transport to supplier endpoints, through safeFetch only: send a job, poll it, and check the receipt that comes back (verifyReceipt,
+// verifyJob), plus the fetch of an advert's manifest (fetchManifest). A supplier is reached at the endpoint_url of the advert its
+// escrow names (the escrow's Post output, then its advert_ref, then readAdvert), never at a URL the caller gives. Nothing here builds,
+// signs or submits a transaction, and no error carries a supplier URL: they name the escrow and what happened.
 //
 // The routes are pinned from Apex-Fusion/agents-marketplace origin/main e847a55 (2026-10-13), supplier/src/server.ts. A supplier is a
 // single-capability process and mounts the ONE route shape its capability kind serves:
@@ -42,14 +43,16 @@
 // who funded the escrow can produce offline, because that attacker holds the buyer_pkh the escrow names. The closure is client-side:
 // the local signer refuses to send for an escrow whose buyer_pkh is not its own key, or a send is mediated by the signer with a
 // nonce the server issues. Until it exists the tool text has to say what the tool cannot know.
+import { CML } from '@lucid-evolution/lucid';
 import type { Provider } from '@lucid-evolution/lucid';
 import { safeFetch } from './safe-fetch.js';
 import { readAdvert, koiosTxInputCreds } from './marketplace-indexer.js';
 import type { AdvertRead } from './marketplace-indexer.js';
-import { formatOutRef, parseOutRef, promptHashForPayload, wirePayloadFor } from './marketplace-datum.js';
+import { canonicalize, formatOutRef, parseOutRef, promptHashForPayload, sha256Utf8Hex, wirePayloadFor } from './marketplace-datum.js';
 import type { AdvertDatum, EscrowDatum } from './marketplace-datum.js';
 import { paymentKeyHashOf } from './gov-build.js';
 import { resolveEscrowLineage, readEscrowOutput, koiosFailure } from './marketplace-lineage.js';
+import type { EscrowLineage } from './marketplace-lineage.js';
 import { cell } from './marketplace-shared.js';
 
 // ─── Routes ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -255,6 +258,9 @@ function buyerKeyHash(buyerAddress: unknown, refuse: (why: string) => Error): st
 
 /** "a Claimed output", "an Accepted output". */
 const withArticle = (word: string): string => `${/^[AEIOU]/i.test(word) ? 'an' : 'a'} ${word}`;
+/** Why a ref is not the Post output of an escrow (a later output has the supplier's transactions behind it, not the buyer's), or null when it is. */
+const notThePostOutput = (posted: EscrowDatum): string | null =>
+  posted.state === 'Open' ? null : `it is ${withArticle(posted.state)} output, not the output its Post made: use the escrow ref the Post returned.`;
 
 /**
  * Rules out the wrong escrow and the wrong person for the Post output `posted` that a caller has read. Refused, naming the escrow
@@ -272,7 +278,8 @@ async function checkBuyer(
   o: { refuse: (why: string) => Error; buyerPkh: string; buyerAddress: string },
 ): Promise<void> {
   const { refuse } = o;
-  if (posted.state !== 'Open') throw refuse(`it is ${withArticle(posted.state)} output, not the output its Post made: use the escrow ref the Post returned.`);
+  const notPost = notThePostOutput(posted);
+  if (notPost !== null) throw refuse(notPost);
   if (posted.buyer_pkh !== o.buyerPkh) throw refuse(`it was not posted by ${cell(o.buyerAddress, 120)}.`);
   let funders: string[];
   try { funders = await koiosTxInputCreds(koiosUrl, canonical.slice(0, 64), fetchImpl); } catch (err) { throw refuse(`could not check who funded it (${koiosFailure(err)}).`); }
@@ -400,4 +407,219 @@ export async function getJob(koiosUrl: string, p: { escrowRef: string; jobId: st
   }
   const view = wrongEscrow(res.text, canonical) ?? parseJobResponse(res.status, res.text);
   return { view, route: route.kind, endpoint: advert.endpoint_url, supplierPkh: advert.supplier_pkh, capabilityId: advert.capability_id };
+}
+
+// ─── Verifying a receipt ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+// A receipt is the supplier's own account of a job. Five questions make it more than that, and none of them takes the supplier at its
+// word. The template's own buyer (vector-agent-template c4c378a, try-it/src/verify-receipt.ts, the strict one) asks the same; the
+// SDK's shape-only check is not used.
+//   (1) escrow_ref_matches      receipt.escrow_ref equals the escrow ref: the receipt is for this escrow and not another job's.
+//   (2) response_hash_matches   with the report text given, sha256(result) equals receipt.response_hash. Without it the check is skipped.
+//   (3) supplier_key_matches    the supplier's public key hashes to receipt.supplier_pkh AND to the supplier_pkh of the escrow's datum,
+//                               the key hash the buyer paid against. A dishonest endpoint can serve a matching receipt, report text and
+//                               key; it cannot serve the key hash that is in the buyer's escrow.
+//   (4) signature_valid         Ed25519 over canonicalize(receipt) verifies under that key.
+//   (5) on_chain_hash_matches   the result_receipt_hash in the escrow's Submitted output equals sha256(canonicalize({receipt, signature})):
+//                               the bytes verified here are the bytes the supplier committed on chain in its Submit.
+// "verified" is said only when all five pass. A check that was not run is `skipped` and a verdict with one is `incomplete`, never
+// "verified".
+
+/** `skipped` is a check that was not run, with the reason in its note; `fail` is a check that ran and did not pass, or could not. */
+export type CheckState = 'pass' | 'fail' | 'skipped';
+/** The outcome of one check. `note` says why when it did not pass, and is '' when it did. */
+export interface Check { state: CheckState; note: string }
+export interface ReceiptChecks {
+  escrow_ref_matches: Check; response_hash_matches: Check; supplier_key_matches: Check; signature_valid: Check; on_chain_hash_matches: Check;
+}
+export type Verdict = 'verified' | 'failed' | 'incomplete';
+export interface ReceiptVerdict { verdict: Verdict; checks: ReceiptChecks }
+
+export interface VerifyInput {
+  /** The receipt as the supplier gave it. Any JSON value: one that is not an object fails the checks that read it. */
+  receipt: unknown;
+  /** The hex Ed25519 signature the supplier gave with it, as the supplier wrote it (the on-chain hash is over that exact string). */
+  signature: string;
+  /** The escrow ref the receipt must name, in canonical form (lower case, no padding). */
+  escrowRef: string;
+  /** The report text the buyer was given, byte for byte, when the buyer has it. */
+  result?: string;
+  /** The supplier's public key: 32 bytes of hex. */
+  supplierPubKeyHex: string;
+  /** The supplier_pkh of the escrow's datum. */
+  escrowSupplierPkh: string;
+  /** The result_receipt_hash of the escrow's Submitted output, or null when there is none to compare. */
+  resultReceiptHashOnChain: string | null;
+  /** Why there is none, when `resultReceiptHashOnChain` is null. */
+  onChainNote?: string;
+}
+
+const HEX64 = /^[0-9a-f]{64}$/i;
+const HEX128 = /^[0-9a-f]{128}$/i;
+const passed = (): Check => ({ state: 'pass', note: '' });
+const failed = (note: string): Check => ({ state: 'fail', note });
+const skipped = (note: string): Check => ({ state: 'skipped', note });
+const NOT_AN_OBJECT = 'the receipt is not a JSON object';
+
+/** Runs the five checks on what it is given. Pure: nothing is read, and nothing throws, whatever the receipt and the signature are. */
+export function verifyReceipt(i: VerifyInput): ReceiptVerdict {
+  const receipt = i.receipt !== null && typeof i.receipt === 'object' && !Array.isArray(i.receipt) ? (i.receipt as Record<string, unknown>) : null;
+  const signature = typeof i.signature === 'string' ? i.signature : null;
+
+  // (1)
+  const escrowRef = receipt === null ? failed(NOT_AN_OBJECT) : receipt.escrow_ref === i.escrowRef ? passed() : failed('the receipt names another escrow');
+
+  // (2) the report text is hashed as UTF-8 exactly as given: no normalisation, as the supplier hashes the bytes it returns
+  let responseHash: Check;
+  if (i.result === undefined) responseHash = skipped('no report text given');
+  else if (receipt === null) responseHash = failed(NOT_AN_OBJECT);
+  else if (typeof receipt.response_hash !== 'string' || !HEX64.test(receipt.response_hash)) responseHash = failed('the receipt has no response_hash');
+  else responseHash = receipt.response_hash.toLowerCase() === sha256Utf8Hex(i.result) ? passed() : failed("the hash of the text given is not the receipt's response_hash; pass the result exactly as vector_marketplace_get_job returned it");
+
+  // (3) and (4) need a key that can be parsed
+  let pub: CML.PublicKey | null = null;
+  if (typeof i.supplierPubKeyHex === 'string' && HEX64.test(i.supplierPubKeyHex)) {
+    try { pub = CML.PublicKey.from_bytes(Buffer.from(i.supplierPubKeyHex, 'hex')); } catch { /* not a key: refused below */ }
+  }
+  let supplierKey: Check;
+  if (receipt === null) supplierKey = failed(NOT_AN_OBJECT);
+  else if (pub === null) supplierKey = failed('the supplier public key is not 32 bytes of hex');
+  else {
+    const keyHash = pub.hash().to_hex();
+    const isReceiptsSupplier = typeof receipt.supplier_pkh === 'string' && receipt.supplier_pkh.toLowerCase() === keyHash;
+    const isEscrowsSupplier = typeof i.escrowSupplierPkh === 'string' && i.escrowSupplierPkh.toLowerCase() === keyHash;
+    supplierKey = isReceiptsSupplier && isEscrowsSupplier ? passed()
+      : !isReceiptsSupplier && !isEscrowsSupplier ? failed("the key hashes to neither receipt.supplier_pkh nor the escrow's supplier_pkh")
+      : failed(isReceiptsSupplier ? "the key does not hash to the escrow's supplier_pkh" : 'the key does not hash to receipt.supplier_pkh');
+  }
+
+  // (4)
+  let signatureValid: Check;
+  if (receipt === null) signatureValid = failed(NOT_AN_OBJECT);
+  else if (signature === null || !HEX128.test(signature)) signatureValid = failed('the signature is not 64 bytes of hex');
+  else if (pub === null) signatureValid = failed('there is no usable public key to check it with');
+  else {
+    let ok = false;
+    try { ok = pub.verify(Buffer.from(canonicalize(receipt), 'utf8'), CML.Ed25519Signature.from_hex(signature)); } catch { /* a signature that cannot be read does not verify */ }
+    signatureValid = ok ? passed() : failed('the signature does not verify against that key and this receipt');
+  }
+
+  // (5)
+  let onChainHash: Check;
+  if (i.resultReceiptHashOnChain === null) onChainHash = skipped(i.onChainNote ?? 'no Submitted escrow output was found');
+  else if (receipt === null) onChainHash = failed(NOT_AN_OBJECT);
+  else if (signature === null) onChainHash = failed('there is no signature to hash');
+  else onChainHash = sha256Utf8Hex(canonicalize({ receipt, signature })) === i.resultReceiptHashOnChain.toLowerCase() ? passed() : failed('the hash on chain is not the hash of this signed receipt');
+
+  const checks: ReceiptChecks = { escrow_ref_matches: escrowRef, response_hash_matches: responseHash, supplier_key_matches: supplierKey, signature_valid: signatureValid, on_chain_hash_matches: onChainHash };
+  const states = Object.values(checks).map((c) => c.state);
+  const verdict: Verdict = states.includes('fail') ? 'failed' : states.includes('skipped') ? 'incomplete' : 'verified';
+  return { verdict, checks };
+}
+
+/** What a verification came to, with what it was made of. */
+export interface VerifiedJob extends ReceiptVerdict {
+  /** The escrow's Post output, in canonical form. */
+  escrowRef: string;
+  /** The supplier_pkh of the escrow's datum: the key hash the buyer paid against. */
+  supplierPkh: string;
+  /** Where the key the signature was checked with came from: the caller, or the supplier's own GET /capability. */
+  keyFrom: 'argument' | 'capability';
+  /** The Submitted output whose result_receipt_hash was compared, or null when none was found. */
+  submittedRef: string | null;
+}
+
+/** GET /capability answers with the advert and the supplier's key. A few hundred bytes of it matter, and it has no business being large. */
+const CAPABILITY_CALL = { maxResponseBytes: 64 * 1024, timeoutMs: 20_000 } as const;
+
+/**
+ * The public key of the supplier of an escrow, as the supplier's own GET /capability serves it (`pub_key_hex`), at the endpoint of the
+ * advert the escrow names. The endpoint is resolved as a poll resolves it (readTargetAdvert: the advert whatever its state, https, a
+ * template-contract capability), and the call is made as every call to a supplier is: through safeFetch, with a 64 KiB cap and a
+ * 20 s budget, carrying nothing about the escrow or the job. The key is the supplier's word and nothing more: check (3) holds it to
+ * the escrow's supplier_pkh.
+ */
+async function capabilityKey(posted: EscrowDatum, koiosUrl: string, fetchImpl: typeof fetch, refuse: (why: string) => Error): Promise<string> {
+  const advert = await readTargetAdvert(posted, koiosUrl, fetchImpl, { refuse, forSend: false });
+  const unreadable = (why: string) => refuse(`the supplier's public key could not be read (${why}); pass supplier_pub_key_hex.`);
+  let res: Awaited<ReturnType<typeof safeFetch>>;
+  try {
+    res = await safeFetch(`${trim(advert.endpoint_url)}/capability`, { headers: { accept: 'application/json' } }, { ...CAPABILITY_CALL, fetchImpl });
+  } catch (err) {
+    throw unreadable(callFailure(err, CAPABILITY_CALL));
+  }
+  if (res.status !== 200) throw unreadable(`the supplier answered ${res.status}`);
+  const key = jsonObject(res.text)?.pub_key_hex;
+  if (typeof key !== 'string' || !HEX64.test(key)) throw unreadable('its /capability answer has no usable pub_key_hex');
+  return key;
+}
+
+/**
+ * The receipt hash the escrow's Submitted output carries, or why there is none to compare. The Submitted output is found as every
+ * other output of the escrow is, by the lineage (resolveEscrowLineage: credential-checked, the spend chain from the Post output, the
+ * node's agreement), and then read by its ref from Koios utxo_info, which answers for a spent output too and keeps its datum after an
+ * Accept: nothing here requires it to be unspent, so an Accept that lands in between does not take the hash away. An output that is
+ * no longer live cannot be found this way (a settled escrow has no live output, and no index maps an escrow to its spent ones), so
+ * the check belongs before the Accept. Whatever stops the lookup stops this one check and nothing else.
+ */
+async function submittedReceiptHash(provider: Provider, koiosUrl: string, canonical: string, fetchImpl: typeof fetch): Promise<{ hash: string; ref: string } | { why: string }> {
+  const why = (text: string) => ({ why: text });
+  let lineage: EscrowLineage;
+  try { lineage = await resolveEscrowLineage(provider, koiosUrl, canonical, fetchImpl); } catch (err) {
+    return why(`the escrow's live output could not be resolved: ${cell(err instanceof Error ? err.message : String(err), 300)}`);
+  }
+  const live = lineage.current;
+  if (live === null) return why('no live Submitted output was found for the escrow (it may be settled, or its Submit may not be indexed yet); check before vector_build_marketplace_accept, while it is live');
+  if (live.datum.state !== 'Submitted') return why(`the escrow is ${live.datum.state}: the supplier has not put a receipt hash on chain`);
+  const ref = formatOutRef(live.utxo.txHash, live.utxo.outputIndex);
+  let output: Awaited<ReturnType<typeof readEscrowOutput>>;
+  try { output = await readEscrowOutput(koiosUrl, ref, fetchImpl); } catch (err) {
+    return why(`the Submitted output ${ref} could not be read by its ref: ${cell(err instanceof Error ? err.message : String(err), 300)}`);
+  }
+  const hash = output.datum.result_receipt_hash;
+  if (output.datum.state !== 'Submitted' || hash === null || hash !== live.datum.result_receipt_hash) return why(`Koios describes the Submitted output ${ref} differently when it is read by its ref; its receipt hash is not used`);
+  return { hash, ref };
+}
+
+/**
+ * Checks a receipt against the escrow it is for: reads the escrow's Post output (the supplier the buyer paid), the supplier's key
+ * (`supplierPubKeyHex` when the caller gives one, else the supplier's own GET /capability) and the receipt hash of the escrow's
+ * Submitted output, and runs verifyReceipt. It needs no buyer: it sends nothing but one GET for the key, and everything it reads
+ * is public. `signature` is the supplier's string exactly as it gave it. An escrow that cannot be read, a ref that names a later
+ * output, and a key that cannot be read are errors that name the escrow and say nothing of the supplier's host or its answer.
+ */
+export async function verifyJob(
+  provider: Provider, koiosUrl: string,
+  p: { escrowRef: string; receipt: unknown; signature: string; result?: string; supplierPubKeyHex?: string },
+  fetchImpl: typeof fetch = fetch,
+): Promise<VerifiedJob> {
+  const canonical = canonicalRef(p.escrowRef);
+  const refuse = (why: string) => new Error(`Cannot verify a receipt for escrow ${canonical}: ${why}`);
+  const { datum: posted } = await readEscrowOutput(koiosUrl, canonical, fetchImpl);
+  const notPost = notThePostOutput(posted);
+  if (notPost !== null) throw refuse(notPost);
+  const keyFrom = p.supplierPubKeyHex === undefined ? 'capability' : 'argument';
+  const supplierPubKeyHex = p.supplierPubKeyHex ?? await capabilityKey(posted, koiosUrl, fetchImpl, refuse);
+  const onChain = await submittedReceiptHash(provider, koiosUrl, canonical, fetchImpl);
+  const checked = verifyReceipt({
+    receipt: p.receipt, signature: p.signature, escrowRef: canonical, result: p.result, supplierPubKeyHex, escrowSupplierPkh: posted.supplier_pkh,
+    resultReceiptHashOnChain: 'hash' in onChain ? onChain.hash : null, onChainNote: 'why' in onChain ? onChain.why : undefined,
+  });
+  return { ...checked, escrowRef: canonical, supplierPkh: posted.supplier_pkh, keyFrom, submittedRef: 'hash' in onChain ? onChain.ref : null };
+}
+
+// ─── The manifest an advert points to ────────────────────────────────────────────────────────────────────────────────────────────
+// An advert's detail_uri is a URL its author chose: a description of what the supplier offers. It is fetched as every URL taken from
+// chain data is, through safeFetch, and is the supplier's own JSON: nothing here checks it against the advert's detail_hash.
+const MANIFEST_CALL = { maxResponseBytes: 256 * 1024, timeoutMs: 15_000 } as const;
+
+/** The JSON the detail_uri serves, or why it could not be fetched, in words that carry neither the URL nor anything the host said. */
+export async function fetchManifest(detailUri: string, fetchImpl: typeof fetch = fetch): Promise<{ manifest: unknown } | { error: string }> {
+  let res: Awaited<ReturnType<typeof safeFetch>>;
+  try {
+    res = await safeFetch(detailUri, { headers: { accept: 'application/json' } }, { ...MANIFEST_CALL, fetchImpl });
+  } catch (err) {
+    return { error: callFailure(err, MANIFEST_CALL) };
+  }
+  if (res.status !== 200) return { error: `the supplier answered ${res.status}` };
+  try { return { manifest: JSON.parse(res.text) as unknown }; } catch { return { error: 'its answer is not JSON' }; }
 }

@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks. The 30 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
+Hosted instances run on both networks. The 33 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
 
 | Network | Endpoint |
 |---------|----------|
@@ -100,7 +100,7 @@ limitations.
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
 - **Streamable HTTP transport** - the modern MCP transport at `/mcp`, with any-origin CORS for browser clients and an unauthenticated `GET /health` probe (the legacy SSE pair was removed in 2.0.0)
 
-## MCP Tools (30)
+## MCP Tools (33)
 
 ### Wallet & Queries
 
@@ -151,16 +151,19 @@ limitations.
 | `vector_build_self_improvement_critique` | Build an unsigned critique on a proposal - support, oppose, or propose amendments (keyless) |
 | `vector_build_self_improvement_endorse` | Build an unsigned endorsement of a proposal by staking AP3X (keyless) |
 
-### Marketplace (6)
+### Marketplace (9)
 
 | Tool | Description |
 |------|-------------|
 | `vector_marketplace_list_capabilities` | List the capability ids advertised on the agents marketplace, with supplier counts (read-only, no wallet needed) |
 | `vector_marketplace_list_suppliers` | List supplier adverts: advert ref, model, price, bonds, processing window, status. Filter by capability; free suppliers by default (read-only, no wallet needed) |
-| `vector_marketplace_get_supplier` | Read one advert from the ledger by advert ref (all 13 fields) plus the indexer's live status; refuses UTxOs that are not at the advert script address or hold no advert datum (read-only, no wallet needed) |
+| `vector_marketplace_get_supplier` | Read one advert from the ledger by advert ref (all 13 fields) plus the indexer's live status, and the manifest its Detail URI points to (fetched from the supplier's host and shown as the supplier's own JSON); refuses UTxOs that are not at the advert script address or hold no advert datum (read-only, no wallet needed) |
 | `vector_build_marketplace_post_escrow` | Build an unsigned escrow post that hires a supplier: locks price + supplier bond + buyer bond for an advert and commits a hash of your payload (keyless - sign with the local signer) |
 | `vector_build_marketplace_accept` | Build an unsigned accept of a Submitted job, within 600 s of the supplier's Submit: pays the supplier price + supplier bond and returns your buyer bond (keyless) |
 | `vector_build_marketplace_reclaim` | Build an unsigned reclaim of an Open or Claimed escrow once deliver_by has passed: everything returns to you (keyless) |
+| `vector_marketplace_send_job` | Send your payload to the supplier of a posted escrow and get a job id. Template-contract suppliers only; the wallet must have posted and funded the escrow; waits up to 90 s for the supplier to answer |
+| `vector_marketplace_get_job` | Poll a job: pending, failed, or done with the result and the supplier's signed receipt. Template-contract suppliers only; works after the escrow is accepted or released; waits up to 20 s |
+| `vector_marketplace_verify_receipt` | Check a receipt without trusting the supplier: the escrow, the result's hash, the supplier's key, the Ed25519 signature and the hash the supplier committed on chain. Run it before accepting (read-only; the supplier's key is read from its `/capability` unless you pass it) |
 
 Agent DIDs follow the format: `did:vector:agent:{policyId}:{nftAssetName}`
 

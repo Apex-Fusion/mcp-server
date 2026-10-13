@@ -3,6 +3,7 @@
 // and datums, the signer hand-off sentence, and the rate-limit gate. The gate takes its limiter as an argument, so a test can hand
 // in its own; marketplace.ts is where the caller's limiter is chosen.
 import type { RateLimiter } from './rate-limiter.js';
+import { ACCEPT_WINDOW_MS } from './marketplace-constants.js';
 
 export function text(t: string) { return { content: [{ type: "text" as const, text: t }] }; }
 /** Long enough for the longest refusal a builder writes (a list of five refs and its explanation), short enough to bound what an error can say. */
@@ -23,6 +24,11 @@ export function cell(s: unknown, max = 80): string {
   return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : flat;
 }
 export function isoOrRaw(ms: number): string { const d = new Date(ms); return Number.isNaN(d.getTime()) ? String(ms) : d.toISOString(); }
+
+/** The accept window, in seconds. */
+export const ACCEPT_WINDOW_S = ACCEPT_WINDOW_MS / 1000;
+/** What a missed accept window costs, in the one wording every tool uses. escrow.ak (handle_release) only bounds the supplier's take from below (the three amounts the datum names), so it may keep the floor excess of the lock as well. */
+export const RELEASE_TAKE = 'keep everything locked (price + both bonds + any floor excess)';
 
 export const SIGN_COPY = 'Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.';
 

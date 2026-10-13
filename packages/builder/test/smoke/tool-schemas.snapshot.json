@@ -160,7 +160,7 @@
     }
   },
   "vector_build_marketplace_accept": {
-    "description": "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. Verify the receipt first. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. Verify the receipt first with vector_marketplace_verify_receipt. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -181,7 +181,7 @@
     }
   },
   "vector_build_marketplace_post_escrow": {
-    "description": "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Takes no key material. After it confirms, send the job through the marketplace transport tool (PR 3) with the returned escrow_ref and the same payload. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref, the same payload and your wallet address as buyerAddress. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -877,8 +877,34 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
+  "vector_marketplace_get_job": {
+    "description": "Poll a marketplace job by escrow_ref and job_id. Returns pending, failed, or done with the result and the supplier's signed receipt. Template-contract suppliers only in this release. Works while the escrow is Open, Claimed or Submitted, and after it has been accepted or released. A failed answer can carry the reason malformed_response (the supplier said 200 without a receipt) or escrow_mismatch (its answer was for another escrow). buyerAddress is required, as for vector_marketplace_send_job. The poll waits up to 20 s. A job id is a bearer token for its result: pass it only with the escrow it came from. This tool trusts the buyer address and escrow ref your assistant passes; keep its tool use scoped to escrows you posted. A client-side binding to your signer key is planned.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "escrow_ref": {
+          "description": "The escrow_ref that vector_build_marketplace_post_escrow returned",
+          "type": "string"
+        },
+        "job_id": {
+          "description": "The job_id that vector_marketplace_send_job returned",
+          "type": "string"
+        },
+        "buyerAddress": {
+          "description": "The wallet address that posted AND funded the escrow (vector_signer_get_address). Escrows funded from another key are refused",
+          "type": "string"
+        }
+      },
+      "required": [
+        "escrow_ref",
+        "job_id",
+        "buyerAddress"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
   "vector_marketplace_get_supplier": {
-    "description": "Read one supplier advert from the Vector ledger by advert_ref (all 13 advert fields) plus the indexer's live status. Read-only.",
+    "description": "Read one supplier advert from the Vector ledger by advert_ref (all 13 advert fields) plus the indexer's live status, and the manifest its detail_uri points to when it has one (fetched from the supplier's host; the supplier's own JSON, shown as such). Read-only.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -923,6 +949,78 @@
           "maximum": 50
         }
       },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_marketplace_send_job": {
+    "description": "Send the job payload to the supplier of a posted escrow and get back a job id. Call it once the post is confirmed (vector_await_transaction). Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). payload must be byte-identical to the one given at post time. The payload goes to the endpoint named by the escrow's advert, and the call waits up to 90 s for the supplier to answer. Then poll with vector_marketplace_get_job. This tool trusts the buyer address and escrow ref your assistant passes; keep its tool use scoped to escrows you posted. A client-side binding to your signer key is planned.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "escrow_ref": {
+          "description": "The escrow_ref that vector_build_marketplace_post_escrow returned, once its transaction is confirmed",
+          "type": "string"
+        },
+        "payload": {
+          "description": "The same payload string you gave vector_build_marketplace_post_escrow, byte for byte",
+          "type": "string",
+          "minLength": 1
+        },
+        "buyerAddress": {
+          "description": "The wallet address that posted AND funded the escrow (vector_signer_get_address). Escrows funded from another key are refused",
+          "type": "string"
+        }
+      },
+      "required": [
+        "escrow_ref",
+        "payload",
+        "buyerAddress"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_marketplace_verify_receipt": {
+    "description": "Check a template-contract supplier's receipt without trusting the supplier. Five checks, each reported pass, FAIL or skipped: (1) receipt.escrow_ref equals the escrow ref; (2) sha256 of the result text equals the receipt's response_hash; (3) the supplier's public key hashes to receipt.supplier_pkh and to the escrow's supplier_pkh; (4) the Ed25519 signature over the canonical receipt verifies; (5) the escrow's result_receipt_hash on chain equals the hash of the signed receipt. Says verified only when all five pass. Pass the result text exactly as vector_marketplace_get_job returned it (from its JSON block, not the shortened view), or check 2 is skipped. Run it before vector_build_marketplace_accept: check 5 reads the escrow's Submitted output, which is no longer there once the escrow is accepted. Read-only; the supplier's key is read from its /capability unless you pass supplier_pub_key_hex.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "escrow_ref": {
+          "description": "The escrow_ref that vector_build_marketplace_post_escrow returned",
+          "type": "string"
+        },
+        "receipt": {
+          "description": "The receipt object (or its JSON text) exactly as vector_marketplace_get_job returned it",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
+          ]
+        },
+        "receipt_signature": {
+          "description": "The hex Ed25519 signature exactly as vector_marketplace_get_job returned it",
+          "type": "string"
+        },
+        "result": {
+          "description": "The full result text exactly as vector_marketplace_get_job returned it (the JSON block, not the shortened view). Without it check 2 is skipped",
+          "type": "string"
+        },
+        "supplier_pub_key_hex": {
+          "description": "The supplier's public key, 64 hex characters. Normally read from the supplier's /capability; it has to hash to the escrow's supplier_pkh either way",
+          "type": "string"
+        }
+      },
+      "required": [
+        "escrow_ref",
+        "receipt",
+        "receipt_signature"
+      ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },

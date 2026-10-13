@@ -29,26 +29,18 @@
 import { describe, test, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { Constr, Data, fromText, getAddressDetails } from '@lucid-evolution/lucid';
-import type { UTxO } from '@lucid-evolution/lucid';
-import { ADVERT_ADDRESS, ESCROW_ADDRESS } from '../src/vector/marketplace-constants.ts';
-import { decodeEscrowDatum, encodeEscrowDatum, promptHashForPayload, wirePayloadFor } from '../src/vector/marketplace-datum.ts';
-import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
+import { ESCROW_ADDRESS } from '../src/vector/marketplace-constants.ts';
+import { canonicalize, decodeEscrowDatum, encodeEscrowDatum, promptHashForPayload, wirePayloadFor } from '../src/vector/marketplace-datum.ts';
 import { enterpriseAddressOf } from '../src/vector/marketplace-build.ts';
-import { ROUTES, routeFor, parseJobResponse, sendJob, getJob } from '../src/vector/marketplace-transport.ts';
-import type { Route } from '../src/vector/marketplace-transport.ts';
-import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
+import { ROUTES, routeFor, parseJobResponse, sendJob, getJob, verifyReceipt, verifyJob, fetchManifest } from '../src/vector/marketplace-transport.ts';
+import type { Route, VerifyInput, ReceiptVerdict } from '../src/vector/marketplace-transport.ts';
+import { ADVERT_EXPECTED, ADVERT_REF, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
 import { OWN_ADDRESS } from './fixtures/fixture-provider.ts';
-import { world, escrowAt, credentialRequests, ESCROW_TX, CLAIM_TX, SUBMIT_TX, DECOY_TX, SUPPLIER_ADDRESS, GENUINE_TXS, DECOY_TXS } from './fixtures/escrow-koios.fixture.ts';
-import type { SpentOutputs } from './fixtures/escrow-koios.fixture.ts';
+import { world, credentialRequests, ESCROW_TX, CLAIM_TX, SUBMIT_TX, SUPPLIER_ADDRESS } from './fixtures/escrow-koios.fixture.ts';
+import { KOIOS, PAYLOAD, SUPPLIER, JOB_ID, HOSTILE, reply, accepted, BUYER_PKH, MAY_HAVE_CLAIMED, scenario, SUPPLIER_KEY, OTHER_KEY, pkhOf, pubHexOf, RESULT, receiptOf, signWith, committedHash } from './fixtures/transport-world.fixture.ts';
+import type { Call, Scenario } from './fixtures/transport-world.fixture.ts';
 
-const KOIOS = 'https://koios.example';
-const PAYLOAD = 'summarise the filing';
-/** An IP literal in a public (documentation) range: safeFetch checks it directly, so no DNS is touched. */
-const SUPPLIER = 'https://203.0.113.7';
-const JOB_ID = '3f2b8c1e-5a47-4d6e-9b0a-7c1d2e3f4a5b';
 const SUBMITTED_REF = `${'ee'.repeat(32)}#0`;
-const HOSTILE = '{"error":"db password=hunter2 at https://internal.koios.example"}';
 const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
 
 describe('route table', () => {
@@ -231,119 +223,6 @@ describe('parseJobResponse', () => {
     assert.deepEqual(parseJobResponse(202, JSON.stringify({ status: 's'.repeat(300) })), { state: 'pending', status: 's'.repeat(100) });
   });
 });
-
-// ─── the world sendJob and getJob run in ─────────────────────────────────────────────────────────────────────────────────────────
-type Call = { url: string; method: string; headers: Record<string, string>; body: string };
-type Answer = Response | Promise<Response>;
-const reply = (status: number, body: unknown) => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
-const accepted = (over: Record<string, unknown> = {}) => reply(202, { job_id: JOB_ID, status: 'accepted', escrow_ref: ESCROW_REF, ...over });
-
-/** A fake supplier: records every request it is sent and answers with `answer` (the init safeFetch gave the request comes second). */
-function supplier(answer: (call: Call, init: RequestInit) => Answer = () => accepted()) {
-  const calls: Call[] = [];
-  const f = (async (url: string, init: RequestInit) => {
-    const call: Call = { url: String(url), method: String(init?.method ?? 'GET'), headers: { ...((init?.headers ?? {}) as Record<string, string>) }, body: typeof init?.body === 'string' ? init.body : '' };
-    calls.push(call);
-    return answer(call, init);
-  }) as unknown as typeof fetch;
-  return { f, calls };
-}
-
-/** The wallet the escrows of these tests were posted from: a base address, so the buyer key is the payment part of it. */
-const BUYER_PKH = getAddressDetails(OWN_ADDRESS).paymentCredential!.hash;
-const POSTED_BASE: EscrowDatum = { ...decodeEscrowDatum(ESCROW_OPEN_DATUM_HEX), buyer_pkh: BUYER_PKH };
-const ADVERT_TX = ADVERT_REF.slice(0, 64);
-const FUNDING_INPUT = `${'ac'.repeat(32)}#0`;
-/** The inputs of the Post transaction, as Koios tx_info lists them, for the funders that have any. */
-const POST_INPUTS: Record<string, SpentOutputs | undefined> = {
-  buyer: [[FUNDING_INPUT, OWN_ADDRESS]],
-  stranger: [[FUNDING_INPUT, SUPPLIER_ADDRESS]],
-  'stranger-and-buyer': [[FUNDING_INPUT, SUPPLIER_ADDRESS], [`${'ad'.repeat(32)}#1`, OWN_ADDRESS]],
-};
-const MAY_HAVE_CLAIMED = ' It may have claimed the escrow anyway, so check its state before sending again; if it stays Open, reclaim it after deliver_by.';
-/** The live advert with the capability, the endpoint or the status changed, re-encoded. */
-function advertDatum(over: { capability_id?: string; endpoint_url?: string; status?: 'Active' | 'Retired' }): string {
-  const c = Data.from(ADVERT_DATUM_HEX) as Constr<Data>;
-  if (over.capability_id !== undefined) c.fields[1] = fromText(over.capability_id);
-  if (over.endpoint_url !== undefined) c.fields[8] = fromText(over.endpoint_url);
-  if (over.status === 'Retired') c.fields[12] = new Constr(1, []);
-  return Data.to(c);
-}
-
-interface Scenario {
-  capability?: string; endpoint?: string; escrow?: 'open' | 'claimed' | 'submitted' | 'finished';
-  /**
-   * The ref the caller names: the Post output (default), the output the Claim made (a later output of the same escrow; needs
-   * escrow: 'claimed'), or an output in the Accepted state, which is all there is of the escrow on the chain.
-   */
-  names?: 'post' | 'claimed-output' | 'accepted-output';
-  /** A copy of the escrow's fields left at the escrow credential by a transaction that spent no escrow output, besides the escrow's own outputs. */
-  decoy?: boolean;
-  /** The payload the escrow commits to, as its prompt_hash (default PAYLOAD). */
-  committed?: string;
-  /**
-   * Who funded the Post transaction, as Koios tx_info reports its inputs: the buyer (default), a stranger only, a stranger and the
-   * buyer, nobody Koios knows (the transaction is unknown to it), or Koios failing to answer ('koios-error' needs escrow: 'open'
-   * because every tx_info call fails; 'unreachable' fails only the question about the Post transaction).
-   */
-  funder?: 'buyer' | 'stranger' | 'stranger-and-buyer' | 'unknown' | 'koios-error' | 'unreachable';
-  advert?: { status?: 'Active' | 'Retired'; spent?: boolean; spentUnreported?: boolean; address?: string; missing?: boolean; httpStatus?: number; unreachable?: boolean };
-  answer?: (call: Call, init: RequestInit) => Answer;
-}
-/**
- * One escrow (Open, Claimed, Submitted, or finished with nothing left on the chain), posted from OWN_ADDRESS with the prompt hash of
- * its payload, its advert, and a supplier. The node and Koios are built from one list of UTxOs (`world`); the advert read is answered
- * on top of Koios (and counted, with the URL it went to); whatever else is fetched is the supplier.
- */
-function scenario(o: Scenario = {}) {
-  const capability = o.capability ?? 'identity.history.report.v1';
-  const posted: EscrowDatum = { ...POSTED_BASE, capability_id: capability, prompt_hash: promptHashForPayload(o.committed ?? PAYLOAD) };
-  const claimed: EscrowDatum = { ...posted, state: 'Claimed' };
-  const submitted: EscrowDatum = { ...posted, submitted_at: posted.posted_at + 60_000, result_receipt_hash: 'cd'.repeat(32), state: 'Submitted' };
-  const state = o.escrow ?? 'open';
-  const accepted: EscrowDatum = { ...posted, state: 'Accepted' };
-  const own: UTxO[] = o.names === 'accepted-output'
-    ? [escrowAt(CLAIM_TX, accepted)]
-    : { open: [escrowAt(ESCROW_TX, posted)], claimed: [escrowAt(CLAIM_TX, claimed)], submitted: [escrowAt(SUBMIT_TX, submitted)], finished: [] }[state];
-  const chain: UTxO[] = [...own, ...(o.decoy ? [escrowAt(DECOY_TX, claimed)] : [])];
-  const funder = o.funder ?? 'buyer';
-  const postInputs = POST_INPUTS[funder]; // undefined: Koios does not know the Post transaction
-  const koiosOptions = { txs: { ...GENUINE_TXS, ...(o.decoy ? DECOY_TXS : {}), ...(postInputs ? { [ESCROW_TX]: postInputs } : {}) }, ...(funder === 'koios-error' ? { txStatus: 502 } : {}) };
-  const laterOutputRow = (datum: EscrowDatum) => ({ tx_hash: CLAIM_TX, tx_index: 0, address: ESCROW_ADDRESS, value: String(ESCROW_LOCKED_LOVELACE), is_spent: false, inline_datum: { bytes: encodeEscrowDatum(datum) } });
-  const w = o.names === 'claimed-output' ? world(chain, { ...koiosOptions, rows: [laterOutputRow(claimed)] })
-    : o.names === 'accepted-output' ? world(chain, { ...koiosOptions, rows: [laterOutputRow(accepted)] })
-    : world(chain, { ...koiosOptions, datumHex: encodeEscrowDatum(posted), spent: state !== 'open' });
-  const advert = o.advert ?? {};
-  const advertRow: Record<string, unknown> = {
-    tx_hash: ADVERT_TX, tx_index: 0, address: advert.address ?? ADVERT_ADDRESS, value: '2000000', is_spent: advert.spent ?? false,
-    inline_datum: { bytes: advertDatum({ capability_id: capability, endpoint_url: o.endpoint ?? SUPPLIER, status: advert.status }) },
-  };
-  if (advert.spentUnreported) delete advertRow.is_spent; // Koios leaves the field out when it does not know
-  const sup = supplier(o.answer);
-  const advertUrls: string[] = [];
-  const fetchImpl = (async (url: string, init: { body: string }) => {
-    const u = String(url);
-    if (u.endsWith('/api/v1/utxo_info') && (JSON.parse(init.body)._utxo_refs as string[]).includes(ADVERT_REF)) {
-      advertUrls.push(u);
-      if (advert.unreachable) throw new TypeError('fetch failed: connect ECONNREFUSED internal.koios.example:443 password=hunter2');
-      if (advert.httpStatus) return new Response(HOSTILE, { status: advert.httpStatus });
-      return new Response(JSON.stringify(advert.missing ? [] : [advertRow]), { status: 200 });
-    }
-    if (u.endsWith('/api/v1/tx_info') && funder === 'unreachable' && (JSON.parse(init.body)._tx_hashes as string[]).includes(ESCROW_TX)) {
-      throw new TypeError('fetch failed: connect ECONNREFUSED internal.koios.example:443 password=hunter2');
-    }
-    if (u.includes('/api/v1/')) return w.koios.f(url, init);
-    return sup.f(url, init as RequestInit);
-  }) as unknown as typeof fetch;
-  const named = o.names === 'claimed-output' || o.names === 'accepted-output' ? `${CLAIM_TX}#0` : ESCROW_REF;
-  return {
-    sup, koios: w.koios, posted, named, advertUrls: () => advertUrls, advertReads: () => advertUrls.length,
-    /** The tx_info questions asked about the Post transaction (who funded it). */
-    fundingChecks: () => w.koios.calls.filter((c) => c.path === '/api/v1/tx_info' && (c.body._tx_hashes as string[]).includes(ESCROW_TX)).map((c) => c.body),
-    send: (over: Partial<Parameters<typeof sendJob>[2]> = {}) => sendJob(w.node, KOIOS, { escrowRef: named, payload: PAYLOAD, buyerAddress: OWN_ADDRESS, ...over }, fetchImpl),
-    poll: (over: Partial<Parameters<typeof getJob>[1]> = {}) => getJob(KOIOS, { escrowRef: named, jobId: JOB_ID, buyerAddress: OWN_ADDRESS, ...over }, fetchImpl),
-  };
-}
 
 /** The promise rejects with an Error whose message `check` accepts. */
 const rejectsWith = (run: Promise<unknown>, check: (message: string) => void) => assert.rejects(run, (err: unknown) => { assert.ok(err instanceof Error, String(err)); check(err.message); return true; });
@@ -1027,5 +906,493 @@ describe('a supplier that never answers', () => {
     await rejectsWith(sendJob({} as never, KOIOS, { escrowRef: ESCROW_REF, payload: 'x', buyerAddress: OWN_ADDRESS }, never), (message) => {
       assert.equal(message, `Could not read escrow ${ESCROW_REF}: Koios request failed (network error or timeout)`);
     });
+  });
+});
+
+// ─── verifying a receipt ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+// A receipt is checked five ways, and "verified" is said only when all five pass. The signed receipts here are made the way the
+// template's supplier makes them: the eight fields, Ed25519 over canonicalize(receipt), and a result_receipt_hash on chain that is
+// sha256(canonicalize({receipt, signature})).
+const statesOf = (v: ReceiptVerdict) => Object.fromEntries(Object.entries(v.checks).map(([name, c]) => [name, c.state]));
+const PASSING = { escrow_ref_matches: 'pass', response_hash_matches: 'pass', supplier_key_matches: 'pass', signature_valid: 'pass', on_chain_hash_matches: 'pass' };
+
+describe('verifyReceipt', () => {
+  const receipt = receiptOf(SUPPLIER_KEY, ESCROW_REF);
+  const signature = signWith(SUPPLIER_KEY, receipt);
+  const onChain = committedHash(receipt, signature);
+  const good: VerifyInput = { receipt, signature, escrowRef: ESCROW_REF, result: RESULT, supplierPubKeyHex: pubHexOf(SUPPLIER_KEY), escrowSupplierPkh: pkhOf(SUPPLIER_KEY), resultReceiptHashOnChain: onChain };
+
+  test('a good receipt passes the five checks, in the design\'s order, and is verified', () => {
+    const v = verifyReceipt(good);
+    assert.equal(v.verdict, 'verified');
+    assert.deepEqual(Object.keys(v.checks), ['escrow_ref_matches', 'response_hash_matches', 'supplier_key_matches', 'signature_valid', 'on_chain_hash_matches']);
+    assert.deepEqual(statesOf(v), PASSING);
+    for (const c of Object.values(v.checks)) assert.equal(c.note, '');
+  });
+  test('the same receipt after a JSON round trip, with its keys in another order, is the same receipt', () => {
+    const reordered = JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(receipt).reverse())));
+    assert.equal(verifyReceipt({ ...good, receipt: reordered }).verdict, 'verified');
+  });
+
+  describe('(1) receipt.escrow_ref equals the escrow ref', () => {
+    test('a receipt for another escrow fails that check only: it is validly signed and committed, for something else', () => {
+      const other = `${'b'.repeat(64)}#0`;
+      const r = receiptOf(SUPPLIER_KEY, other);
+      const sig = signWith(SUPPLIER_KEY, r);
+      const v = verifyReceipt({ ...good, receipt: r, signature: sig, resultReceiptHashOnChain: committedHash(r, sig) });
+      assert.equal(v.verdict, 'failed');
+      assert.deepEqual(statesOf(v), { ...PASSING, escrow_ref_matches: 'fail' });
+      assert.equal(v.checks.escrow_ref_matches.note, 'the receipt names another escrow');
+    });
+    test('the spelling is exact, as the template\'s check is: the same ref in upper case or padded is another string', () => {
+      for (const spelled of [ESCROW_REF.toUpperCase(), ` ${ESCROW_REF}`, ESCROW_REF.slice(0, -2) + '#00']) {
+        const r = receiptOf(SUPPLIER_KEY, spelled);
+        const sig = signWith(SUPPLIER_KEY, r);
+        assert.equal(verifyReceipt({ ...good, receipt: r, signature: sig, resultReceiptHashOnChain: committedHash(r, sig) }).checks.escrow_ref_matches.state, 'fail', spelled);
+      }
+    });
+  });
+
+  describe('(2) sha256(result) equals response_hash', () => {
+    test('without the report text the check is skipped, never passed, and the verdict is not "verified"', () => {
+      const v = verifyReceipt({ ...good, result: undefined });
+      assert.deepEqual(statesOf(v), { ...PASSING, response_hash_matches: 'skipped' });
+      assert.equal(v.checks.response_hash_matches.note, 'no report text given');
+      assert.equal(v.verdict, 'incomplete');
+    });
+    test('a report text that is not the one the supplier hashed fails, whatever the difference', () => {
+      for (const result of ['the output!', 'The output', 'the output ', ' the output', 'the  output', '']) {
+        const v = verifyReceipt({ ...good, result });
+        assert.equal(v.checks.response_hash_matches.state, 'fail', JSON.stringify(result));
+        assert.equal(v.verdict, 'failed');
+      }
+    });
+    test('an empty report text that is the one the supplier hashed passes: given is not the same as non-empty', () => {
+      const r = receiptOf(SUPPLIER_KEY, ESCROW_REF, '');
+      const sig = signWith(SUPPLIER_KEY, r);
+      const v = verifyReceipt({ ...good, receipt: r, signature: sig, result: '', resultReceiptHashOnChain: committedHash(r, sig) });
+      assert.equal(v.verdict, 'verified');
+    });
+    test('the text is hashed as UTF-8, exactly as given: no normalisation', () => {
+      const composed = 'café';
+      const r = receiptOf(SUPPLIER_KEY, ESCROW_REF, composed);
+      const sig = signWith(SUPPLIER_KEY, r);
+      const input = { ...good, receipt: r, signature: sig, resultReceiptHashOnChain: committedHash(r, sig) };
+      assert.equal(verifyReceipt({ ...input, result: composed }).verdict, 'verified');
+      assert.equal(verifyReceipt({ ...input, result: 'café' }).checks.response_hash_matches.state, 'fail');
+    });
+    test('a response_hash that is not a hash fails the check', () => {
+      for (const response_hash of [undefined, 7, null, '', 'abc']) {
+        const r = receiptOf(SUPPLIER_KEY, ESCROW_REF, RESULT, { response_hash });
+        const sig = signWith(SUPPLIER_KEY, r);
+        assert.equal(verifyReceipt({ ...good, receipt: r, signature: sig, resultReceiptHashOnChain: committedHash(r, sig) }).checks.response_hash_matches.state, 'fail', String(response_hash));
+      }
+    });
+  });
+
+  describe('(3) the supplier public key hashes to receipt.supplier_pkh and to the escrow\'s supplier_pkh', () => {
+    test('another supplier\'s key is neither, and it cannot sign this receipt either', () => {
+      const v = verifyReceipt({ ...good, supplierPubKeyHex: pubHexOf(OTHER_KEY) });
+      assert.deepEqual(statesOf(v), { ...PASSING, supplier_key_matches: 'fail', signature_valid: 'fail' });
+      assert.equal(v.checks.supplier_key_matches.note, 'the key hashes to neither receipt.supplier_pkh nor the escrow\'s supplier_pkh');
+      assert.equal(v.verdict, 'failed');
+    });
+    test('a key that is the receipt\'s supplier but not the escrow\'s fails, and so does the other way round', () => {
+      const v1 = verifyReceipt({ ...good, escrowSupplierPkh: pkhOf(OTHER_KEY) });
+      assert.equal(v1.checks.supplier_key_matches.state, 'fail');
+      assert.equal(v1.checks.supplier_key_matches.note, 'the key does not hash to the escrow\'s supplier_pkh');
+      assert.equal(v1.checks.signature_valid.state, 'pass', 'the signature itself is fine: the key just is not the escrow\'s supplier');
+      // a receipt that names another supplier than the one that signed it
+      const r = receiptOf(SUPPLIER_KEY, ESCROW_REF, RESULT, { supplier_pkh: pkhOf(OTHER_KEY) });
+      const sig = signWith(SUPPLIER_KEY, r);
+      const v2 = verifyReceipt({ ...good, receipt: r, signature: sig, resultReceiptHashOnChain: committedHash(r, sig) });
+      assert.equal(v2.checks.supplier_key_matches.state, 'fail');
+      assert.equal(v2.checks.supplier_key_matches.note, 'the key does not hash to receipt.supplier_pkh');
+    });
+    test('the hashes are compared in lower case: the datum\'s hex and the receipt\'s may be spelled either way', () => {
+      const r = receiptOf(SUPPLIER_KEY, ESCROW_REF, RESULT, { supplier_pkh: pkhOf(SUPPLIER_KEY).toUpperCase() });
+      const sig = signWith(SUPPLIER_KEY, r);
+      const v = verifyReceipt({ ...good, receipt: r, signature: sig, escrowSupplierPkh: pkhOf(SUPPLIER_KEY).toUpperCase(), resultReceiptHashOnChain: committedHash(r, sig) });
+      assert.equal(v.verdict, 'verified');
+    });
+    test('a key that is not 32 bytes of hex, or not a key at all, fails the check and leaves nothing to sign with', () => {
+      const keys = ['', 'zz', pubHexOf(SUPPLIER_KEY).slice(0, 62), pubHexOf(SUPPLIER_KEY) + '00', 'g'.repeat(64), ` ${pubHexOf(SUPPLIER_KEY)}`, undefined, null, 7];
+      for (const supplierPubKeyHex of keys) {
+        const v = verifyReceipt({ ...good, supplierPubKeyHex: supplierPubKeyHex as never });
+        assert.equal(v.checks.supplier_key_matches.state, 'fail', String(supplierPubKeyHex));
+        assert.equal(v.checks.signature_valid.state, 'fail', String(supplierPubKeyHex));
+        assert.equal(v.verdict, 'failed');
+      }
+    });
+  });
+
+  describe('(4) Ed25519 over canonicalize(receipt) verifies', () => {
+    test('a receipt signed by another key fails the signature, though the key given is the supplier\'s', () => {
+      const v = verifyReceipt({ ...good, signature: signWith(OTHER_KEY, receipt) });
+      assert.equal(v.checks.signature_valid.state, 'fail');
+      assert.equal(v.checks.supplier_key_matches.state, 'pass');
+      assert.equal(v.verdict, 'failed');
+    });
+    test('a field edited after signing fails, though every hash in it still matches', () => {
+      const v = verifyReceipt({ ...good, receipt: { ...receipt, model: 'something-else-v9' } });
+      assert.equal(v.checks.signature_valid.state, 'fail');
+      assert.equal(v.checks.escrow_ref_matches.state, 'pass');
+      assert.equal(v.checks.response_hash_matches.state, 'pass');
+    });
+    test('a signature that is not 64 bytes of hex fails without throwing', () => {
+      for (const sig of ['', 'zz', signature.slice(0, 126), signature + '00', 'g'.repeat(128), undefined, null, 7]) {
+        const v = verifyReceipt({ ...good, signature: sig as never });
+        assert.equal(v.checks.signature_valid.state, 'fail', String(sig));
+        assert.equal(v.verdict, 'failed');
+      }
+    });
+  });
+
+  describe('(5) the Submitted escrow\'s result_receipt_hash equals sha256(canonicalize({receipt, signature}))', () => {
+    test('a hash on chain that is not the hash of this signed receipt fails', () => {
+      for (const other of ['cd'.repeat(32), committedHash(receipt, signWith(OTHER_KEY, receipt)), committedHash({ ...receipt, model: 'x' }, signature)]) {
+        const v = verifyReceipt({ ...good, resultReceiptHashOnChain: other });
+        assert.equal(v.checks.on_chain_hash_matches.state, 'fail');
+        assert.equal(v.verdict, 'failed');
+      }
+    });
+    test('the hash on chain is compared in lower case', () => {
+      assert.equal(verifyReceipt({ ...good, resultReceiptHashOnChain: onChain.toUpperCase() }).verdict, 'verified');
+    });
+    test('no hash to compare is a skipped check, with the reason it is given or a plain one, and never "verified"', () => {
+      const plain = verifyReceipt({ ...good, resultReceiptHashOnChain: null });
+      assert.deepEqual(statesOf(plain), { ...PASSING, on_chain_hash_matches: 'skipped' });
+      assert.equal(plain.checks.on_chain_hash_matches.note, 'no Submitted escrow output was found');
+      assert.equal(plain.verdict, 'incomplete');
+      const told = verifyReceipt({ ...good, resultReceiptHashOnChain: null, onChainNote: 'the escrow is Claimed' });
+      assert.equal(told.checks.on_chain_hash_matches.note, 'the escrow is Claimed');
+    });
+  });
+
+  describe('the verdict', () => {
+    test('a failed check outweighs a skipped one', () => {
+      const v = verifyReceipt({ ...good, result: undefined, escrowRef: `${'b'.repeat(64)}#0` });
+      assert.deepEqual(statesOf(v), { ...PASSING, escrow_ref_matches: 'fail', response_hash_matches: 'skipped' });
+      assert.equal(v.verdict, 'failed');
+    });
+    test('two skipped checks and nothing failed is incomplete', () => {
+      const v = verifyReceipt({ ...good, result: undefined, resultReceiptHashOnChain: null });
+      assert.equal(v.verdict, 'incomplete');
+    });
+    test('"verified" is the verdict of a receipt only when every one of the five passed', () => {
+      const breaks: Array<[string, Partial<VerifyInput>]> = [
+        ['escrow', { escrowRef: `${'b'.repeat(64)}#0` }], ['result', { result: 'x' }], ['no result', { result: undefined }], ['key', { supplierPubKeyHex: pubHexOf(OTHER_KEY) }],
+        ['escrow supplier', { escrowSupplierPkh: pkhOf(OTHER_KEY) }], ['signature', { signature: signWith(OTHER_KEY, receipt) }], ['chain', { resultReceiptHashOnChain: 'cd'.repeat(32) }], ['no chain', { resultReceiptHashOnChain: null }],
+      ];
+      for (const [name, change] of breaks) assert.notEqual(verifyReceipt({ ...good, ...change }).verdict, 'verified', name);
+    });
+  });
+
+  test('a receipt that is not a JSON object fails every check that reads it, without throwing', () => {
+    for (const bad of [null, undefined, [], [receipt], 'a string', 7, true]) {
+      const v = verifyReceipt({ ...good, receipt: bad });
+      assert.equal(v.verdict, 'failed', JSON.stringify(bad));
+      for (const [name, check] of Object.entries(v.checks)) assert.equal(check.state, 'fail', `${name} for ${JSON.stringify(bad)}`);
+      assert.equal(v.checks.escrow_ref_matches.note, 'the receipt is not a JSON object');
+    }
+    // with no report text and nothing on chain, those two checks have nothing to read it for
+    const v = verifyReceipt({ ...good, receipt: null, result: undefined, resultReceiptHashOnChain: null });
+    assert.deepEqual(statesOf(v), { escrow_ref_matches: 'fail', response_hash_matches: 'skipped', supplier_key_matches: 'fail', signature_valid: 'fail', on_chain_hash_matches: 'skipped' });
+  });
+});
+
+// verifyJob reads what the five checks need and runs them: the escrow's Post output (its supplier), the supplier's key (the caller's, or
+// the supplier's own GET /capability at the endpoint of the advert the escrow names), and the Submitted output the escrow has now.
+describe('verifyJob', () => {
+  const receipt = receiptOf(SUPPLIER_KEY, ESCROW_REF);
+  const signature = signWith(SUPPLIER_KEY, receipt);
+  const CAPABILITY = `${SUPPLIER}/capability`;
+  /** A supplier whose GET /capability serves `body`. */
+  const serving = (body: unknown, status = 200) => (call: Call) => (call.url === CAPABILITY ? reply(status, body) : reply(404, { reason: 'not_found' }));
+  const submitted = (o: Scenario = {}) => scenario({ escrow: 'submitted', supplierPkh: pkhOf(SUPPLIER_KEY), receiptHash: committedHash(receipt, signature), answer: serving({ pub_key_hex: pubHexOf(SUPPLIER_KEY) }), ...o });
+  const input = { receipt, signature, result: RESULT };
+  /** The error names the escrow and carries nothing the supplier or the network said. */
+  const plainly = (message: string) => {
+    assert.ok(message.includes(ESCROW_REF), message);
+    for (const secret of ['203.0.113.7', '203.0.113.99', '169.254.169.254', '192.168.1.10', 'evil.example', 'hunter2', 'internal.koios.example', 'user:pw', 'Bad gateway']) assert.ok(!message.includes(secret), `${secret} leaked into: ${message}`);
+  };
+
+  test('reads the key from the supplier\'s /capability and the hash from the Submitted output, and says verified', async () => {
+    const s = submitted();
+    const v = await s.verify(input);
+    assert.equal(v.verdict, 'verified');
+    assert.deepEqual(statesOf(v), PASSING);
+    assert.equal(v.escrowRef, ESCROW_REF);
+    assert.equal(v.supplierPkh, pkhOf(SUPPLIER_KEY), 'the supplier the escrow\'s datum names');
+    assert.equal(v.keyFrom, 'capability');
+    assert.equal(v.submittedRef, `${SUBMIT_TX}#0`);
+    // one GET, to the endpoint of the escrow\'s advert, carrying nothing about the escrow or the job
+    assert.deepEqual(s.sup.calls, [{ url: CAPABILITY, method: 'GET', headers: { accept: 'application/json' }, body: '' }]);
+    assert.equal(s.advertReads(), 1);
+    assert.ok(s.koios.calls.every((c) => c.url?.startsWith(`${KOIOS}/api/v1/`)), 'one decision draws on one Koios');
+  });
+  test('a key the caller gives is used and the supplier is not called: the key still has to be the escrow\'s supplier', async () => {
+    const s = submitted();
+    const v = await s.verify({ ...input, supplierPubKeyHex: pubHexOf(SUPPLIER_KEY) });
+    assert.equal(v.verdict, 'verified');
+    assert.equal(v.keyFrom, 'argument');
+    assert.equal(s.sup.calls.length, 0);
+    assert.equal(s.advertReads(), 0);
+    const wrong = await submitted().verify({ ...input, supplierPubKeyHex: pubHexOf(OTHER_KEY) });
+    assert.equal(wrong.verdict, 'failed');
+    assert.equal(wrong.checks.supplier_key_matches.state, 'fail');
+  });
+  test('a supplier that serves another key than its escrow\'s supplier cannot pass, whatever it signed and committed', async () => {
+    // a dishonest endpoint serves a self-consistent set: its own key, a receipt naming that key, a signature, and (it controls its
+    // own chain data too) a hash that matches. Only the escrow's supplier_pkh, which the buyer paid against, is outside its control.
+    const forged = receiptOf(OTHER_KEY, ESCROW_REF);
+    const sig = signWith(OTHER_KEY, forged);
+    const s = submitted({ receiptHash: committedHash(forged, sig), answer: serving({ pub_key_hex: pubHexOf(OTHER_KEY) }) });
+    const v = await s.verify({ receipt: forged, signature: sig, result: RESULT });
+    assert.equal(v.verdict, 'failed');
+    assert.deepEqual(statesOf(v), { ...PASSING, supplier_key_matches: 'fail' });
+  });
+  test('without the report text the verdict is incomplete, and the other four checks still ran', async () => {
+    const v = await submitted().verify({ receipt, signature });
+    assert.equal(v.verdict, 'incomplete');
+    assert.deepEqual(statesOf(v), { ...PASSING, response_hash_matches: 'skipped' });
+    assert.equal(v.checks.response_hash_matches.note, 'no report text given');
+  });
+  test('a receipt for another escrow, or a report text that is not the supplier\'s, fails', async () => {
+    const other = receiptOf(SUPPLIER_KEY, `${'b'.repeat(64)}#0`);
+    const sig = signWith(SUPPLIER_KEY, other);
+    const v1 = await submitted({ receiptHash: committedHash(other, sig) }).verify({ receipt: other, signature: sig, result: RESULT });
+    assert.deepEqual(statesOf(v1), { ...PASSING, escrow_ref_matches: 'fail' });
+    const v2 = await submitted().verify({ ...input, result: 'something else' });
+    assert.deepEqual(statesOf(v2), { ...PASSING, response_hash_matches: 'fail' });
+  });
+  test('the escrow ref may be spelled in any case with spaces around it: the receipt is checked against the canonical ref', async () => {
+    const v = await submitted().verify({ ...input, escrowRef: ` ${ESCROW_REF.toUpperCase()} ` });
+    assert.equal(v.verdict, 'verified');
+    assert.equal(v.escrowRef, ESCROW_REF);
+  });
+
+  // The Submitted output is read by its ref from utxo_info, which answers for a spent output too (Koios keeps the datum after the
+  // Accept): an Accept that lands after the escrow was resolved does not take the hash away.
+  test('the hash is read from the Submitted output by its ref, whether or not Koios says it is spent by then', async () => {
+    for (const submittedSpent of [false, true]) {
+      const s = submitted({ submittedSpent });
+      const v = await s.verify(input);
+      assert.equal(v.verdict, 'verified', `spent: ${submittedSpent}`);
+      const reads = s.koios.calls.filter((c) => c.path === '/api/v1/utxo_info').flatMap((c) => c.body._utxo_refs as string[]);
+      assert.equal(reads.filter((ref) => ref === `${SUBMIT_TX}#0`).length, 1, 'the Submitted output is asked for once, by its ref');
+      assert.equal(reads.at(-1), `${SUBMIT_TX}#0`, 'and last, after the resolver has found it');
+    }
+  });
+
+  test('a Submitted output that Koios describes differently by its ref than the lineage found it is not trusted: the hash check is skipped', async () => {
+    const s = submitted();
+    const lying = (async (url: string, init: { body: string }) => {
+      const res = await s.fetchImpl(url, init as never);
+      if (!String(url).endsWith('/api/v1/utxo_info') || !(JSON.parse(init.body)._utxo_refs as string[]).includes(`${SUBMIT_TX}#0`)) return res;
+      const rows = (await res.json()) as Array<{ tx_hash: string; inline_datum: { bytes: string } }>;
+      for (const row of rows) if (row.tx_hash === SUBMIT_TX) row.inline_datum.bytes = encodeEscrowDatum({ ...decodeEscrowDatum(row.inline_datum.bytes), result_receipt_hash: 'ee'.repeat(32) });
+      return new Response(JSON.stringify(rows), { status: 200 });
+    }) as unknown as typeof fetch;
+    const v = await verifyJob(s.node, KOIOS, { escrowRef: ESCROW_REF, ...input }, lying);
+    assert.equal(v.verdict, 'incomplete');
+    assert.deepEqual(statesOf(v), { ...PASSING, on_chain_hash_matches: 'skipped' });
+    assert.equal(v.checks.on_chain_hash_matches.note, `Koios describes the Submitted output ${SUBMIT_TX}#0 differently when it is read by its ref; its receipt hash is not used`);
+    assert.equal(v.submittedRef, null);
+  });
+  test('a Submitted output that cannot be read by its ref skips the hash check, with the status and none of what Koios said', async () => {
+    const s = submitted();
+    const failing = (async (url: string, init: { body: string }) => {
+      if (String(url).endsWith('/api/v1/utxo_info') && (JSON.parse(init.body)._utxo_refs as string[]).includes(`${SUBMIT_TX}#0`)) return new Response(HOSTILE, { status: 502 });
+      return s.fetchImpl(url, init as never);
+    }) as unknown as typeof fetch;
+    const v = await verifyJob(s.node, KOIOS, { escrowRef: ESCROW_REF, ...input }, failing);
+    assert.equal(v.verdict, 'incomplete');
+    assert.equal(v.checks.on_chain_hash_matches.note, `the Submitted output ${SUBMIT_TX}#0 could not be read by its ref: Could not read escrow ${SUBMIT_TX}#0: Koios utxo_info answered 502`);
+    assert.ok(!v.checks.on_chain_hash_matches.note.includes('hunter2'));
+  });
+
+  // (5) can only be checked while the Submitted output is live; the other four never depend on it.
+  test('an escrow the supplier has not submitted has no hash on chain: the check is skipped, with the state, and the others run', async () => {
+    for (const escrow of ['open', 'claimed'] as const) {
+      const v = await submitted({ escrow }).verify(input);
+      assert.equal(v.verdict, 'incomplete', escrow);
+      assert.deepEqual(statesOf(v), { ...PASSING, on_chain_hash_matches: 'skipped' }, escrow);
+      assert.equal(v.checks.on_chain_hash_matches.note, `the escrow is ${escrow === 'open' ? 'Open' : 'Claimed'}: the supplier has not put a receipt hash on chain`, escrow);
+      assert.equal(v.submittedRef, null);
+    }
+  });
+  test('an escrow with no live output - settled, or not indexed yet - skips the check and does not call the escrow finished', async () => {
+    const v = await submitted({ escrow: 'finished' }).verify(input);
+    assert.equal(v.verdict, 'incomplete');
+    assert.deepEqual(statesOf(v), { ...PASSING, on_chain_hash_matches: 'skipped' });
+    assert.equal(v.checks.on_chain_hash_matches.note, 'no live Submitted output was found for the escrow (it may be settled, or its Submit may not be indexed yet); check before vector_build_marketplace_accept, while it is live');
+    assert.doesNotMatch(v.checks.on_chain_hash_matches.note, /finished|accepted|released/i);
+  });
+  test('a copy of the escrow at its credential that the resolver cannot tell apart skips only the hash check, with the resolver\'s words', async () => {
+    const v = await submitted({ escrow: 'finished', decoy: true }).verify(input);
+    assert.equal(v.verdict, 'incomplete');
+    assert.deepEqual(statesOf(v), { ...PASSING, on_chain_hash_matches: 'skipped' });
+    assert.match(v.checks.on_chain_hash_matches.note, /^the escrow's live output could not be resolved: None of .* descends from escrow .* by the spend chain/);
+  });
+  test('a ref that names a later output of the escrow is refused: the receipt names the Post output', async () => {
+    await rejectsWith(submitted({ escrow: 'claimed', names: 'claimed-output' }).verify(input), (message) => {
+      assert.equal(message, `Cannot verify a receipt for escrow ${CLAIM_TX}#0: it is a Claimed output, not the output its Post made: use the escrow ref the Post returned.`);
+    });
+    await rejectsWith(submitted({ names: 'accepted-output' }).verify(input), (message) => assert.match(message, /: it is an Accepted output, not the output its Post made/));
+  });
+  test('an escrow Koios does not know, or cannot be asked about, is an error that names the escrow', async () => {
+    const failing = world([], { status: 502 });
+    await rejectsWith(verifyJob(failing.node, KOIOS, { escrowRef: ESCROW_REF, ...input }, failing.koios.f), (message) => assert.equal(message, `Could not read escrow ${ESCROW_REF}: Koios utxo_info answered 502`));
+  });
+
+  describe('when the supplier\'s key cannot be read', () => {
+    const readFails = (why: string) => `Cannot verify a receipt for escrow ${ESCROW_REF}: the supplier's public key could not be read (${why}); pass supplier_pub_key_hex.`;
+    test('an answer that is not 200 is reported by its status alone', async () => {
+      for (const status of [404, 500, 503]) {
+        await rejectsWith(submitted({ answer: serving({ reason: 'advert_not_active', message: 'advert is retired (status=Retired) password=hunter2' }, status) }).verify(input), (message) => {
+          plainly(message);
+          assert.equal(message, readFails(`the supplier answered ${status}`));
+        });
+      }
+    });
+    test('an answer without a usable pub_key_hex is refused, and what it said instead is not repeated', async () => {
+      const bad: unknown[] = [{}, { pub_key_hex: 7 }, { pub_key_hex: '' }, { pub_key_hex: 'zz' }, { pub_key_hex: pubHexOf(SUPPLIER_KEY).slice(2) }, { pub_key_hex: `${pubHexOf(SUPPLIER_KEY)}00` }, { pub_key_hex: ['x'] }, [pubHexOf(SUPPLIER_KEY)], 'not json password=hunter2', '', 'null'];
+      for (const body of bad) {
+        await rejectsWith(submitted({ answer: serving(body) }).verify(input), (message) => {
+          plainly(message);
+          assert.equal(message, readFails('its /capability answer has no usable pub_key_hex'), JSON.stringify(body));
+        });
+      }
+    });
+    test('the key is accepted in either case of hex and used in lower case', async () => {
+      const v = await submitted({ answer: serving({ pub_key_hex: pubHexOf(SUPPLIER_KEY).toUpperCase() }) }).verify(input);
+      assert.equal(v.verdict, 'verified');
+    });
+    test('a redirect is not followed, a private or reserved address is refused by the rule, and an endpoint that is not https never reaches the call', async () => {
+      const redirect = submitted({ answer: () => new Response('', { status: 302, headers: { location: 'https://evil.example/steal' } }) });
+      await rejectsWith(redirect.verify(input), (message) => { plainly(message); assert.equal(message, readFails('the supplier answered with a redirect, which is not followed')); });
+      for (const endpoint of ['https://169.254.169.254/latest', 'https://192.168.1.10', 'https://127.0.0.1:8443']) {
+        const s = submitted({ endpoint });
+        await rejectsWith(s.verify(input), (message) => { plainly(message); assert.equal(message, readFails('the supplier host resolves to a private or reserved address, which is refused')); });
+        assert.equal(s.sup.calls.length, 0, endpoint);
+      }
+      const plain = submitted({ endpoint: 'http://203.0.113.7' });
+      await rejectsWith(plain.verify(input), (message) => assert.match(message, /^Cannot verify a receipt for escrow .*: the endpoint of its advert .* is not an https URL\.$/));
+      assert.equal(plain.sup.calls.length, 0);
+    });
+    test('a connection that drops, and an answer over 64 KiB, are reported without what the network said', async () => {
+      const dropped = submitted({ answer: () => { throw new TypeError('fetch failed: connect ECONNRESET 203.0.113.7:443 (evil.example)'); } });
+      await rejectsWith(dropped.verify(input), (message) => { plainly(message); assert.equal(message, readFails('the request to the supplier failed (network error)')); });
+      const big = submitted({ answer: () => reply(200, JSON.stringify({ pub_key_hex: pubHexOf(SUPPLIER_KEY), pad: 'x'.repeat(65_536) })) });
+      await rejectsWith(big.verify(input), (message) => { plainly(message); assert.equal(message, readFails('the supplier\'s answer is over the 65536 byte limit')); });
+      const exact = JSON.stringify({ pub_key_hex: pubHexOf(SUPPLIER_KEY), pad: '' });
+      const fits = submitted({ answer: () => reply(200, JSON.stringify({ pub_key_hex: pubHexOf(SUPPLIER_KEY), pad: 'x'.repeat(65_536 - Buffer.byteLength(exact)) })) });
+      assert.equal((await fits.verify(input)).verdict, 'verified', 'exactly 64 KiB is read');
+    });
+    test('a fleet supplier is out of scope where the endpoint is resolved, and a retired or spent advert is still where the key is', async () => {
+      const fleet = submitted({ capability: 'ocr.page.extract.chandra-ocr-2.v1' });
+      await rejectsWith(fleet.verify(input), (message) => assert.match(message, /^Cannot verify a receipt for escrow .*: ocr\.page\.extract\.chandra-ocr-2\.v1 uses the fleet route; this tool supports template-contract suppliers only in this release\.$/));
+      assert.equal(fleet.sup.calls.length, 0);
+      for (const advert of [{ status: 'Retired' as const }, { spent: true }, { spentUnreported: true }]) {
+        assert.equal((await submitted({ advert }).verify(input)).verdict, 'verified', JSON.stringify(advert));
+      }
+    });
+  });
+});
+
+describe('a supplier that never answers GET /capability', () => {
+  afterEach(() => { mock.restoreAll(); });
+  test('verifyJob gives up after 20 s and says to pass the key', async () => {
+    const budgets: number[] = [];
+    const real = AbortSignal.timeout.bind(AbortSignal);
+    mock.method(AbortSignal, 'timeout', (ms: number) => { budgets.push(ms); return real(ms === 20_000 ? 30 : ms); });
+    const hangs = (_call: Call, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init.signal as AbortSignal;
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+    const receipt = receiptOf(SUPPLIER_KEY, ESCROW_REF);
+    const signature = signWith(SUPPLIER_KEY, receipt);
+    const s = scenario({ escrow: 'submitted', supplierPkh: pkhOf(SUPPLIER_KEY), receiptHash: committedHash(receipt, signature), answer: hangs });
+    await rejectsWith(s.verify({ receipt, signature, result: RESULT }), (message) => {
+      assert.equal(message, `Cannot verify a receipt for escrow ${ESCROW_REF}: the supplier's public key could not be read (the supplier did not answer within 20 s); pass supplier_pub_key_hex.`);
+    });
+    assert.deepEqual(budgets.filter((ms) => ms === 20_000), [20_000], 'the key is asked for once, with a 20 s budget');
+    assert.equal(s.sup.calls.length, 1);
+  });
+});
+
+// The manifest an advert's detail_uri points to: fetched as every URL taken from chain data is, and reported without the URL.
+describe('fetchManifest', () => {
+  const URI = 'https://203.0.113.9/agents/manifest.json';
+  const fetching = (answer: (url: string, init: RequestInit) => Response | Promise<Response>) => {
+    const calls: Array<{ url: string; method: string; headers: unknown }> = [];
+    const f = (async (url: string, init: RequestInit) => { calls.push({ url: String(url), method: String(init?.method ?? 'GET'), headers: init?.headers }); return answer(String(url), init); }) as unknown as typeof fetch;
+    return { f, calls };
+  };
+  const plainly = (error: string) => { for (const secret of ['203.0.113.9', 'evil.example', 'hunter2', 'manifest.json', 'Bad gateway']) assert.ok(!error.includes(secret), `${secret} leaked into: ${error}`); };
+
+  test('GETs the URI once, asking for JSON, and returns whatever JSON it serves', async () => {
+    const manifest = { name: 'Chandra OCR', capabilities: ['ocr.page.extract.chandra-ocr-2.v1'], nested: { a: [1, 2, { b: null }] } };
+    const { f, calls } = fetching(() => reply(200, manifest));
+    assert.deepEqual(await fetchManifest(URI, f), { manifest });
+    assert.deepEqual(calls, [{ url: URI, method: 'GET', headers: { accept: 'application/json' } }]);
+    for (const served of [null, [], 7, 'text', true]) assert.deepEqual(await fetchManifest(URI, fetching(() => reply(200, JSON.stringify(served))).f), { manifest: served }, JSON.stringify(served));
+  });
+  test('an answer that is not 200, and one that is not JSON, are reported without what the host said', async () => {
+    for (const status of [201, 206, 401, 404, 500, 503]) {
+      const r = await fetchManifest(URI, fetching(() => reply(status, '{"error":"db password=hunter2"}')).f);
+      assert.deepEqual(r, { error: `the supplier answered ${status}` });
+    }
+    for (const body of ['', '<html>Bad gateway password=hunter2</html>', '{"unfinished":', 'not json']) {
+      const r = await fetchManifest(URI, fetching(() => reply(200, body)).f);
+      assert.deepEqual(r, { error: 'its answer is not JSON' }, JSON.stringify(body));
+    }
+  });
+  test('a redirect is not followed, a URI that is not https or is on a private or reserved address is refused, and none of it is repeated', async () => {
+    const redirect = await fetchManifest(URI, fetching(() => new Response('', { status: 302, headers: { location: 'https://evil.example/steal' } })).f);
+    assert.deepEqual(redirect, { error: 'the supplier answered with a redirect, which is not followed' });
+    const refused = [
+      ['http://203.0.113.9/manifest.json', 'the supplier URL was refused by the outbound-call policy'],
+      ['ipfs://bafybeigdyrzt/manifest.json', 'the supplier URL was refused by the outbound-call policy'],
+      ['https://user:pw@203.0.113.9/manifest.json', 'the supplier URL was refused by the outbound-call policy'],
+      ['not a url', 'the supplier URL was refused by the outbound-call policy'],
+      ['https://169.254.169.254/latest/meta-data', 'the supplier host resolves to a private or reserved address, which is refused'],
+      ['https://192.168.1.10/manifest.json', 'the supplier host resolves to a private or reserved address, which is refused'],
+      ['https://[::1]/manifest.json', 'the supplier host resolves to a private or reserved address, which is refused'],
+    ];
+    for (const [uri, error] of refused) {
+      const { f, calls } = fetching(() => reply(200, {}));
+      const r = await fetchManifest(uri, f);
+      assert.deepEqual(r, { error }, uri);
+      assert.equal(calls.length, 0, `${uri} was fetched`);
+      plainly((r as { error: string }).error);
+    }
+  });
+  test('a connection that drops is reported as a network error, and the answer is read to 256 KiB and no further', async () => {
+    const dropped = await fetchManifest(URI, fetching(() => { throw new TypeError('fetch failed: connect ECONNRESET 203.0.113.9:443 (evil.example)'); }).f);
+    assert.deepEqual(dropped, { error: 'the request to the supplier failed (network error)' });
+    const overhead = Buffer.byteLength(JSON.stringify({ pad: '' }));
+    const sized = (bytes: number) => reply(200, JSON.stringify({ pad: 'x'.repeat(bytes - overhead) }));
+    const full = await fetchManifest(URI, fetching(() => sized(262_144)).f);
+    assert.ok('manifest' in full, 'exactly 256 KiB is read');
+    assert.deepEqual(await fetchManifest(URI, fetching(() => sized(262_145)).f), { error: "the supplier's answer is over the 262144 byte limit" });
+  });
+});
+
+describe('a manifest host that never answers', () => {
+  afterEach(() => { mock.restoreAll(); });
+  test('fetchManifest gives up after 15 s', async () => {
+    const budgets: number[] = [];
+    const real = AbortSignal.timeout.bind(AbortSignal);
+    mock.method(AbortSignal, 'timeout', (ms: number) => { budgets.push(ms); return real(ms === 15_000 ? 30 : ms); });
+    const hangs = (async (_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init.signal as AbortSignal;
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    })) as unknown as typeof fetch;
+    assert.deepEqual(await fetchManifest('https://203.0.113.9/manifest.json', hangs), { error: 'the supplier did not answer within 15 s' });
+    assert.deepEqual(budgets, [15_000], 'one call, one 15 s budget');
   });
 });

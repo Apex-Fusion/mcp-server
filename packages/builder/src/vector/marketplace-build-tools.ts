@@ -10,20 +10,16 @@ import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
 import { lucidForAddress } from './build.js';
 import { withJson } from './marketplace-indexer.js';
 import { buildPostEscrow, buildAccept, buildReclaim, supplierPayoutRaised } from './marketplace-build.js';
-import { ACCEPT_WINDOW_MS } from './marketplace-constants.js';
-import { text, fail, cell, isoOrRaw, SIGN_COPY } from './marketplace-shared.js';
+import { text, fail, cell, isoOrRaw, SIGN_COPY, ACCEPT_WINDOW_S, RELEASE_TAKE } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
 
-const ACCEPT_WINDOW_S = ACCEPT_WINDOW_MS / 1000;
 /** A payout below the minimum output is raised to it (planAccept, planReclaim); the signer is told, as it is shown more than the datum owes. */
 const raised = (flag: boolean): string => (flag ? ' (raised to the 1-unit minimum)' : '');
-/** What a missed accept window costs, in the one wording every tool uses. escrow.ak (handle_release) only bounds the supplier's take from below (the three amounts the datum names), so it may keep the floor excess of the lock as well. */
-const RELEASE_TAKE = 'keep everything locked (price + both bonds + any floor excess)';
 
 export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit: RateGate, providerFor: () => Provider) {
   server.tool(
     "vector_build_marketplace_post_escrow",
-    "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Takes no key material. After it confirms, send the job through the marketplace transport tool (PR 3) with the returned escrow_ref and the same payload. " + SIGN_COPY,
+    "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref, the same payload and your wallet address as buyerAddress. " + SIGN_COPY,
     {
       changeAddress: z.string().describe("Your wallet address (pays the lock and fees; receives the bond back on Accept). Get it from vector_signer_get_address."),
       advert_ref: z.string().describe("Advert '<txid>#<index>' from vector_marketplace_list_suppliers"),
@@ -50,7 +46,7 @@ export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit:
           `Miss that window and the supplier may Release and ${RELEASE_TAKE}. ` +
           `If it never submits, Reclaim after ${deliverBy} returns everything.\n` +
           `**Deliver by:** ${deliverBy}\n**Payload hash:** \`${r.promptHash}\`\n**Estimated fee:** ${r.feeAda}\n**Collateral kept aside:** ${r.collateralKept ? 'yes' : 'no'}${warning}\n\n` +
-          `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\nKeep the payload byte-identical when you send the job through the marketplace transport tool (PR 3). ${SIGN_COPY}`;
+          `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\nKeep the payload byte-identical for vector_marketplace_send_job. ${SIGN_COPY}`;
         return text(withJson(md, { escrow_ref: r.escrowRef, lock_lovelace: r.lockLovelace, deliver_by: r.deliverBy, prompt_hash: r.promptHash, tx_hash: r.txHash, fee: r.fee, collateral_kept: r.collateralKept }));
       } catch (err) { return fail('build escrow post', err, ['The wallet needs the lock plus about 1 unit for fees, and one pure 5-unit output kept as collateral', 'Check the advert is still Active with vector_marketplace_get_supplier']); }
     },
@@ -58,7 +54,7 @@ export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit:
 
   server.tool(
     "vector_build_marketplace_accept",
-    "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. Verify the receipt first. " + SIGN_COPY,
+    "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. Verify the receipt first with vector_marketplace_verify_receipt. " + SIGN_COPY,
     {
       changeAddress: z.string().describe("The buyer wallet address that posted the escrow"),
       escrow_ref: z.string().describe("The escrow_ref returned by vector_build_marketplace_post_escrow"),
@@ -78,7 +74,7 @@ export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit:
         return text(withJson(md, { escrow_ref: r.escrowRef, tx_hash: r.txHash, supplier_pkh: r.supplierPkh, supplier_lovelace: r.supplierLovelace, buyer_lovelace: r.buyerLovelace, seconds_left: r.secondsLeft }));
       } catch (err) {
         return fail('build accept', err, [
-          'The job must be in Submitted state: check its progress through the marketplace transport tool (PR 3) first',
+          'The job must be in Submitted state: poll vector_marketplace_get_job first',
           `Accept must land within ${ACCEPT_WINDOW_S} s of Submit; after that the supplier may Release and ${RELEASE_TAKE}`,
           'The wallet needs one pure 5-unit output as collateral',
         ]);
