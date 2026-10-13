@@ -139,6 +139,12 @@ describe('vector_marketplace_list_suppliers', () => {
     assert.equal(j[1].model, 'a|b\nc`d');
     assert.equal(j[1].capability_id, 'x.'.repeat(60));
   });
+  test('says who receives what on Accept: the buyer funds both bonds, the supplier gets price + supplier bond', async () => {
+    stub({ suppliers: [supplierRow()] });
+    const t = markdownOf(await call('vector_marketplace_list_suppliers', { only_free: true, limit: 20 }));
+    assert.ok(t.includes('The buyer locks price + supplier bond + buyer bond; on Accept the supplier receives price + supplier bond and the buyer bond returns to the buyer.'), t);
+    assert.ok(!/both bonds return/i.test(t), 'the supplier bond does not come back to the buyer');
+  });
   test('echoes a capability filter that matched nothing as one clean line', async () => {
     stub({ suppliers: [supplierRow()] });
     const t = await call('vector_marketplace_list_suppliers', { capability_id: 'zz`|\nq', only_free: true, limit: 20 });
