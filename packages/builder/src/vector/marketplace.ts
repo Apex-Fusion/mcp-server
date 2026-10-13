@@ -112,7 +112,7 @@ export function registerMarketplaceTools(server: McpServer, identity: string, op
 
   server.tool(
     "vector_build_marketplace_post_escrow",
-    "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref and the same payload. " + SIGN_COPY,
+    "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Takes no key material. After it confirms, send the job through the marketplace transport tool with the returned escrow_ref and the same payload. " + SIGN_COPY,
     {
       changeAddress: z.string().describe("Your wallet address (pays the lock and fees; receives the bond back on Accept). Get it from vector_signer_get_address."),
       advert_ref: z.string().describe("Advert '<txid>#<index>' from vector_marketplace_list_suppliers"),
@@ -133,7 +133,7 @@ export function registerMarketplaceTools(server: McpServer, identity: string, op
           `**Escrow ref (after submit):** \`${r.escrowRef}\`\n` +
           `**Locked:** ${lovelaceToAda(r.lockLovelace)} = price ${lovelaceToAda(r.priceLovelace)} + supplier bond ${lovelaceToAda(r.supplierBondLovelace)} + buyer bond ${lovelaceToAda(r.buyerBondLovelace)} (floored to the min-UTxO of the Submitted datum). On Accept the supplier receives price + supplier bond and your buyer bond returns. Reclaim after ${deliverBy} returns everything.\n` +
           `**Deliver by:** ${deliverBy}\n**Payload hash:** \`${r.promptHash}\`\n**Estimated fee:** ${r.feeAda}\n**Collateral kept aside:** ${r.collateralKept ? 'yes' : 'no'}${warning}\n\n` +
-          `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\nKeep the payload byte-identical for vector_marketplace_send_job. ${SIGN_COPY}`;
+          `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\nKeep the payload byte-identical when you send the job through the marketplace transport tool. ${SIGN_COPY}`;
         return text(withJson(md, { escrow_ref: r.escrowRef, lock_lovelace: r.lockLovelace, deliver_by: r.deliverBy, prompt_hash: r.promptHash, tx_hash: r.txHash, fee: r.fee, collateral_kept: r.collateralKept }));
       } catch (err) { return fail('build escrow post', err, ['The wallet needs the lock plus about 1 unit for fees, and one pure 5-unit output kept as collateral', 'Check the advert is still Active with vector_marketplace_get_supplier']); }
     },
@@ -141,7 +141,7 @@ export function registerMarketplaceTools(server: McpServer, identity: string, op
 
   server.tool(
     "vector_build_marketplace_accept",
-    "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. Verify the receipt first with vector_marketplace_verify_receipt. " + SIGN_COPY,
+    "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. Verify the receipt first. " + SIGN_COPY,
     {
       changeAddress: z.string().describe("The buyer wallet address that posted the escrow"),
       escrow_ref: z.string().describe("The escrow_ref returned by vector_build_marketplace_post_escrow"),
@@ -155,7 +155,7 @@ export function registerMarketplaceTools(server: McpServer, identity: string, op
         const warn = r.secondsLeft < 120 ? `\n\n**Hurry:** only ${r.secondsLeft} s remain in the accept window.` : '';
         const md = `# Unsigned Accept Built (Not Submitted)\n\n**Supplier receives:** ${lovelaceToAda(r.supplierLovelace)}\n**Your bond back:** ${lovelaceToAda(r.buyerLovelace)}\n**Estimated fee:** ${r.feeAda}${warn}\n\n**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\n${SIGN_COPY}`;
         return text(withJson(md, { escrow_ref, tx_hash: r.txHash, supplier_lovelace: r.supplierLovelace, buyer_lovelace: r.buyerLovelace, seconds_left: r.secondsLeft }));
-      } catch (err) { return fail('build accept', err, ['The job must be in Submitted state: poll vector_marketplace_get_job first', 'Accept must land within 600 s of Submit; after that the supplier may Release', 'The wallet needs one pure 5-unit output as collateral']); }
+      } catch (err) { return fail('build accept', err, ['The job must be in Submitted state: check its progress through the marketplace transport tool first', 'Accept must land within 600 s of Submit; after that the supplier may Release', 'The wallet needs one pure 5-unit output as collateral']); }
     },
   );
 

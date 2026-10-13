@@ -274,7 +274,7 @@ describe('vector_build_marketplace_post_escrow', () => {
     // the CBOR in the fence is the escrow post: the escrow is output 0
     assert.deepEqual(outputsOf(cborOf(t))[0], { address: ESCROW_ADDRESS, lovelace: ESCROW_LOCKED_LOVELACE });
     askedConfiguredKoios(requested);
-    assert.ok(markdownOf(t).endsWith(`Keep the payload byte-identical for vector_marketplace_send_job. ${SIGN_FLOW}`));
+    assert.ok(markdownOf(t).endsWith(`Keep the payload byte-identical when you send the job through the marketplace transport tool. ${SIGN_FLOW}`));
     // the wallet kept an output aside for the script spends, so there is nothing to warn about
     assert.equal(j.collateral_kept, true);
     assert.equal(lineOf(t, '**Collateral kept aside:**'), '**Collateral kept aside:** yes');
