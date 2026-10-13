@@ -1,6 +1,7 @@
 // packages/builder/test/marketplace-indexer.test.ts
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Constr, Data } from '@lucid-evolution/lucid';
 import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, koiosTxInputCreds, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
 import { ADVERT_ADDRESS, ESCROW_ADDRESS, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
@@ -178,6 +179,16 @@ describe('readAdvert', () => {
       const r = await readAdvert(ESCROW_REF, koiosReturning([utxoAt(ESCROW_REF, ADVERT_ADDRESS, datum)]).f);
       assert.equal(errorOf(r), `UTxO ${ESCROW_REF} does not hold an advert datum.`, `datum ${String(datum).slice(0, 12)}`);
     }
+  });
+  test('a refused advert says why when the decoder names the field that is out of range, and only then', async () => {
+    const advertWith = (change: (c: Constr<Data>) => void) => { const c = Data.from(ADVERT_DATUM_HEX) as Constr<Data>; change(c); return Data.to(c); };
+    const refusal = async (datum: string) => errorOf(await readAdvert(ESCROW_REF, koiosReturning([utxoAt(ESCROW_REF, ADVERT_ADDRESS, datum)]).f));
+    const plain = `UTxO ${ESCROW_REF} does not hold an advert datum.`;
+    assert.equal(await refusal(advertWith((c) => { c.fields[3] = 2n ** 60n; })), `${plain} advert.max_output_tokens: integer outside the safe range.`);
+    assert.equal(await refusal(advertWith((c) => { c.fields[4] = -(2n ** 60n); })), `${plain} advert.max_processing_ms: integer outside the safe range.`);
+    // Field-named decoder messages are fixed text; anything else the decoder says (shape, CBOR) stays out of the caller's text.
+    assert.equal(await refusal(ESCROW_OPEN_DATUM_HEX), plain);
+    assert.equal(await refusal('ff'), plain);
   });
   test('a malformed ref is refused without calling Koios', async () => {
     const { f, calls } = koiosReturning([]);

@@ -136,7 +136,15 @@ export async function readAdvert(ref: string, fetchImpl: typeof fetch = fetch): 
   if (utxo.address?.toLowerCase() !== ADVERT_ADDRESS) return { error: `UTxO ${canonical} is not at the advert script address.` };
   const datum = utxo.inline_datum?.bytes;
   let advert: AdvertDatum | null = null;
-  if (datum) { try { advert = decodeAdvertDatum(datum); } catch { /* not an advert datum: refused below */ } }
-  if (!advert) return { error: `UTxO ${canonical} does not hold an advert datum.` };
+  let why = '';
+  if (datum) {
+    try { advert = decodeAdvertDatum(datum); } catch (err) {
+      // Refused below. When the decoder names the field it refused (`advert.max_output_tokens: integer outside the safe range`)
+      // the caller is told which; those messages are fixed text, whereas anything else it says (CBOR, shape) stays out.
+      const message = err instanceof Error ? err.message : '';
+      if (/^advert\.\w+: /.test(message)) why = ` ${message}.`;
+    }
+  }
+  if (!advert) return { error: `UTxO ${canonical} does not hold an advert datum.${why}` };
   return { utxo, advert, spent: utxo.is_spent === true };
 }
