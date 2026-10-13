@@ -1,6 +1,7 @@
 // packages/builder/test/fixtures/escrow-koios.fixture.ts
-// A fake Koios for the escrow lineage, shared by marketplace-lineage.test.ts, marketplace-build.test.ts and
-// marketplace-build-clock.test.ts, plus the spend chain of the live fixture escrow and the ways a decoy comes to be.
+// A fake Koios for the escrow lineage, shared by marketplace-lineage.test.ts, marketplace-build.test.ts,
+// marketplace-build-clock.test.ts and marketplace-tools.test.ts, plus the spend chain of the live fixture escrow and the ways a
+// decoy comes to be. `world` (at the end) builds a node and the Koios that describes the same chain from one list of UTxOs.
 //
 // The fake answers the three routes the resolver reads:
 //  - utxo_info describes the Post output of the live escrow fixture. A `null` option leaves a field out, as Koios does when it
@@ -16,6 +17,7 @@ import { ESCROW_ADDRESS, ESCROW_SCRIPT_HASH } from '../../src/vector/marketplace
 import { encodeEscrowDatum } from '../../src/vector/marketplace-datum.ts';
 import type { EscrowDatum } from '../../src/vector/marketplace-datum.ts';
 import { ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './marketplace.fixture.ts';
+import { FixtureProvider } from './fixture-provider.ts';
 
 export type KoiosFake = { f: typeof fetch; calls: Array<{ path: string; body: any; url?: string }> };
 export type SpentOutputs = Array<[ref: string, address: string]>;
@@ -123,3 +125,19 @@ export const DECOY_KINDS: Array<[name: string, creatingTx: string]> = [
   ['left behind by a terminal spend of another escrow\'s Post output', OTHER_SPEND_TX],
   ['left behind by a terminal spend of another escrow\'s Claimed output', OTHER_RELEASE_TX],
 ];
+
+// One chain, two views. A test that builds the node and the Koios by hand can quietly give them different chains and still pass,
+// because Koios is where the builders look first and the node is where they confirm; `world` builds both from the one list.
+export type KoiosOptions = NonNullable<Parameters<typeof escrowKoios>[0]>;
+/** The outputs of `utxos` that sit at the escrow credential, which is all a Koios that has caught up with the node lists. */
+export const escrowOutputsOf = (utxos: UTxO[]): UTxO[] => utxos.filter((u) => credentialOf(u.address) === ESCROW_SCRIPT_HASH);
+/**
+ * The Koios that describes the same chain as a node holding `utxos`: it has indexed the node's escrow-credential outputs and
+ * knows the genuine spend chain (GENUINE_TXS). A Koios that lags, or knows more, is asked for on purpose, with `indexed` and
+ * `txs`, so that a test of node and Koios disagreeing says so.
+ */
+export const koiosFor = (utxos: UTxO[], o: KoiosOptions = {}): KoiosFake => escrowKoios({ txs: GENUINE_TXS, indexed: escrowOutputsOf(utxos), ...o });
+/** A node holding `utxos` and the Koios that describes the same chain (see koiosFor). */
+export function world(utxos: UTxO[], o: KoiosOptions = {}) {
+  return { node: new FixtureProvider(utxos), koios: koiosFor(utxos, o) };
+}

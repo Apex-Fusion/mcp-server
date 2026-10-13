@@ -20,6 +20,8 @@ export const MAX_PROCESSING_MS_CEILING = 86_400_000;
 export const MARKETPLACE_MIN_FEE = 500_000n;
 export const COLLATERAL_MIN_LOVELACE = 5_000_000n;
 export const MIN_UTXO_LOVELACE = 1_000_000n;
-export const INDEXER_URL = process.env.VECTOR_MARKETPLACE_INDEXER_URL || 'https://mp-indexer.vector.apexfusion.org';
+/** The indexer base URL as an operator wrote it, without trailing slashes: every request appends `/<route>`. */
+export const indexerUrlFrom = (configured: string | undefined): string => (configured || 'https://mp-indexer.vector.apexfusion.org').replace(/\/+$/, '');
+export const INDEXER_URL = indexerUrlFrom(process.env.VECTOR_MARKETPLACE_INDEXER_URL);
 /** Redeemer constructor indices of the escrow validator (escrow.ak). */
 export const REDEEMER = { Claim: 0, Submit: 1, Accept: 2, Reclaim: 3, Release: 4 } as const;

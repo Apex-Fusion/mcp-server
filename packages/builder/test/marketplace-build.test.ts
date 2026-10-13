@@ -3,14 +3,15 @@ import { describe, test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML, Constr, Data, getAddressDetails, credentialToAddress, unixTimeToSlot, slotToUnixTime, validatorToScriptHash } from '@lucid-evolution/lucid';
 import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
-import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS, FOREIGN_ADDRESS, FIXTURE_TXHASH, FIXTURE_TOKEN_UNIT } from './fixtures/fixture-provider.ts';
+import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS, FIXTURE_TXHASH, FIXTURE_TOKEN_UNIT } from './fixtures/fixture-provider.ts';
 import { lucidForAddress } from '../src/vector/build.ts';
 import {
   ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_EXPECTED, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX, ESCROW_REF,
 } from './fixtures/marketplace.fixture.ts';
 import { ESCROW_SCRIPT_CBOR } from './fixtures/escrow-script.fixture.ts';
+import { REF_SCRIPT_UTXO, evaluatingProvider } from './fixtures/escrow-node.fixture.ts';
 import {
-  escrowKoios, escrowAt, stakedEscrowAddress, GENUINE_TXS, DECOY_TXS, ESCROW_TX, CLAIM_TX, SUBMIT_TX, DECOY_TX, SLY_DECOY_TX, SUPPLIER_ADDRESS,
+  escrowKoios, koiosFor, escrowAt, stakedEscrowAddress, GENUINE_TXS, DECOY_TXS, ESCROW_TX, CLAIM_TX, SUBMIT_TX, DECOY_TX, SLY_DECOY_TX, SUPPLIER_ADDRESS,
 } from './fixtures/escrow-koios.fixture.ts';
 import type { KoiosFake, SpentOutputs } from './fixtures/escrow-koios.fixture.ts';
 import {
@@ -611,26 +612,10 @@ describe('planReclaim validity range', () => {
 });
 
 // ─── Accept and Reclaim (offline) ────────────────────────────────────────────
-// In production the node (Ogmios) evaluates the script while the transaction is completed: the builders tell Lucid not to do it
-// locally. This provider answers that call with a fixed budget per redeemer and counts the calls. It lets Lucid finish assembling
-// the transaction and says nothing about whether the validator would accept it; that is for the first-party E2E before any deploy.
-// What these tests do check is what the validator reads off the transaction: the redeemer, the signer, the outputs to each key and
-// the validity range, plus the shape of a script spend (reference script, collateral, fee).
-const REF_SCRIPT_UTXO: UTxO = {
-  txHash: ESCROW_REF_UTXO.txHash, outputIndex: ESCROW_REF_UTXO.outputIndex, address: FOREIGN_ADDRESS,
-  assets: { lovelace: 60_000_000n }, scriptRef: { type: 'PlutusV3', script: ESCROW_SCRIPT_CBOR },
-};
-function evaluatingProvider(utxos: UTxO[]) {
-  const evaluations: string[] = [];
-  const evaluateTx = async (txCborHex: string) => {
-    evaluations.push(txCborHex);
-    const legacy = CML.Transaction.from_cbor_hex(txCborHex).witness_set().redeemers()?.as_arr_legacy_redeemer();
-    const out: Array<{ ex_units: { mem: number; steps: number }; redeemer_index: number; redeemer_tag: 'spend' }> = [];
-    for (let i = 0; legacy && i < legacy.len(); i++) out.push({ ex_units: { mem: 2_000_000, steps: 500_000_000 }, redeemer_index: Number(legacy.get(i).index()), redeemer_tag: 'spend' });
-    return out;
-  };
-  return Object.assign(new FixtureProvider(utxos), { evaluateTx, evaluations });
-}
+// The node's script evaluation is stood in for by evaluatingProvider (fixtures/escrow-node.fixture.ts), which lets Lucid finish
+// assembling the transaction and says nothing about whether the validator would accept it; that is for the first-party E2E before
+// any deploy. What these tests do check is what the validator reads off the transaction: the redeemer, the signer, the outputs to
+// each key and the validity range, plus the shape of a script spend (reference script, collateral, fee).
 function redeemersOf(cborHex: string) {
   const legacy = CML.Transaction.from_cbor_hex(cborHex).witness_set().redeemers()?.as_arr_legacy_redeemer();
   const out: Array<{ tag: number; index: number; data: string; mem: bigint }> = [];
@@ -664,16 +649,17 @@ describe('buildAccept / buildReclaim (offline)', () => {
   const keyAddress = (pkh: string) => credentialToAddress('Mainnet', { type: 'Key', hash: pkh });
 
   async function setup(chain: UTxO[], wallet: UTxO[] = FIXTURE_UTXOS) {
-    const provider = evaluatingProvider([...wallet, ...chain]);
-    return { provider, chain, lucid: await lucidForAddress(provider, OWN_ADDRESS) };
+    const utxos = [...wallet, ...chain];
+    const provider = evaluatingProvider(utxos);
+    return { provider, utxos, lucid: await lucidForAddress(provider, OWN_ADDRESS) };
   }
   type World = Awaited<ReturnType<typeof setup>>;
   /** The Post output is spent and the escrow lives on in the given state: Claimed by the Claim, Submitted by the Submit after it (GENUINE_TXS). */
   const afterSubmit = (datum: EscrowDatum = SUBMITTED, wallet?: UTxO[]) => setup([REF_SCRIPT_UTXO, escrowAt(liveTx(datum), datum)], wallet);
   /** Nobody has touched the Post output: it is still Open. */
   const untouched = (wallet?: UTxO[]) => setup([REF_SCRIPT_UTXO, escrowAt(ESCROW_TX, POSTED)], wallet);
-  /** Koios as it describes this world: the Post output of POSTED, spent or not; the spend chain in `txs`; the escrow outputs of the world indexed. */
-  const postedOn = (w: World, spent: boolean, txs: Record<string, SpentOutputs> = GENUINE_TXS) => escrowKoios({ datumHex: encodeEscrowDatum(POSTED), spent, txs, indexed: w.chain });
+  /** Koios as it describes this world (koiosFor: it has indexed the escrow outputs the node holds): the Post output of POSTED, spent or not; the spend chain in `txs`. */
+  const postedOn = (w: World, spent: boolean, txs: Record<string, SpentOutputs> = GENUINE_TXS) => koiosFor(w.utxos, { datumHex: encodeEscrowDatum(POSTED), spent, txs });
   type Over = Partial<{ changeAddress: string; escrowRef: string; nowMs: number }>;
   const accept = (w: World, over: Over = {}, k: KoiosFake = postedOn(w, true)) =>
     buildAccept(w.lucid, w.provider, KOIOS, { changeAddress: OWN_ADDRESS, escrowRef: ESCROW_REF, nowMs: ACCEPT_NOW, ...over }, k.f);

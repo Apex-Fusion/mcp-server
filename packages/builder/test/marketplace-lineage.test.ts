@@ -4,18 +4,20 @@
 // chain of the live fixture escrow are in fixtures/escrow-koios.fixture.ts.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { credentialToAddress } from '@lucid-evolution/lucid';
+import { Constr, Data, credentialToAddress } from '@lucid-evolution/lucid';
 import type { UTxO } from '@lucid-evolution/lucid';
 import { FixtureProvider, OWN_ADDRESS } from './fixtures/fixture-provider.ts';
 import { ADVERT_DATUM_HEX, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
 import {
-  escrowKoios, escrowAt, stakedEscrowAddress, txInfoRequests, credentialRequests, GENUINE_TXS, DECOY_TXS, DECOY_KINDS,
+  escrowKoios, world, koiosFor, escrowAt, stakedEscrowAddress, txInfoRequests, credentialRequests, GENUINE_TXS, DECOY_TXS, DECOY_KINDS,
   ESCROW_TX, CLAIM_TX, SUBMIT_TX, DECOY_TX, SLY_DECOY_TX, SUPPLIER_ADDRESS,
 } from './fixtures/escrow-koios.fixture.ts';
+import type { KoiosOptions } from './fixtures/escrow-koios.fixture.ts';
 import { ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_SCRIPT_HASH } from '../src/vector/marketplace-constants.ts';
 import { decodeEscrowDatum, encodeEscrowDatum } from '../src/vector/marketplace-datum.ts';
 import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
 import { resolveEscrowLineage } from '../src/vector/marketplace-lineage.ts';
+import { koiosCredentialUtxos } from '../src/vector/marketplace-indexer.ts';
 import { resolveEscrowLineage as resolveViaBuild } from '../src/vector/marketplace-build.ts';
 
 const KOIOS = 'https://koios.example';
@@ -29,11 +31,6 @@ const stranger = at('ff'.repeat(32), { ...submitted, posted_at: 1 });
 const postOutput = at(ESCROW_TX, posted); // the Post output itself, as the node lists it while it is unspent
 const staked = stakedEscrowAddress('aa'.repeat(28));
 
-type KoiosOptions = NonNullable<Parameters<typeof escrowKoios>[0]>;
-/** A node holding `node` and a Koios that has indexed `indexed` (by default the same outputs) and knows the genuine spend chain. */
-function world(node: UTxO[], o: KoiosOptions & { indexed?: UTxO[] } = {}) {
-  return { node: new FixtureProvider(node), koios: escrowKoios({ txs: GENUINE_TXS, indexed: node, ...o }) };
-}
 type World = ReturnType<typeof world>;
 const resolve = (w: World, ref = ESCROW_REF) => resolveEscrowLineage(w.node, KOIOS, ref, w.koios.f);
 const lineage = (node: UTxO[], o: KoiosOptions = {}) => resolve(world(node, o));
@@ -45,6 +42,21 @@ const refusalAbout = (asked: string, message: RegExp, ...alsoNames: string[]) =>
   return true;
 };
 const refusal = (message: RegExp, ...alsoNames: string[]) => refusalAbout(ESCROW_REF, message, ...alsoNames);
+
+// The fixture the Accept/Reclaim and transport tests lean on: node and Koios are built from one list, so they cannot differ by accident.
+describe('world (test fixture)', () => {
+  const wallet: UTxO = { txHash: 'ab'.repeat(32), outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 5_000_000n } };
+  const listed = async (k: ReturnType<typeof world>['koios']) => (await koiosCredentialUtxos(KOIOS, ESCROW_SCRIPT_HASH, k.f)).map((r) => r.tx_hash).sort();
+  test('Koios has indexed the escrow-credential outputs the node holds, and only those', async () => {
+    const w = world([wallet, claimed, at(SUBMIT_TX, submitted, { address: staked })]);
+    assert.deepEqual(await listed(w.koios), [CLAIM_TX, SUBMIT_TX].sort());
+    assert.equal((await w.node.getUtxosByOutRef([{ txHash: wallet.txHash, outputIndex: 0 }])).length, 1, 'the wallet output is on the node');
+  });
+  test('a Koios that lags, or knows more, is asked for with `indexed`', async () => {
+    assert.deepEqual(await listed(world([claimed], { indexed: [] }).koios), []);
+    assert.deepEqual(await listed(world([claimed], { indexed: [current] }).koios), [SUBMIT_TX]);
+  });
+});
 
 describe('resolveEscrowLineage', () => {
   test('is the one the build module re-exports', () => {
@@ -75,6 +87,35 @@ describe('resolveEscrowLineage', () => {
     // what Claim and Submit do change (state, submitted_at, the receipt hash) does not make it another escrow
     assert.equal((await lineage([claimed])).current?.datum.state, 'Claimed');
     assert.equal((await lineage([current])).current?.datum.state, 'Submitted');
+  });
+  // The four fields above only pick the candidates. escrow.ak keeps every field but state, submitted_at and result_receipt_hash as it
+  // was across Claim and Submit (expect_unchanged_modulo_state, expect_unchanged_modulo_submit), so the continuation the spend chain
+  // leads to must agree with the output it follows on all the rest. A transaction that spent the escrow in a way that ends it (a
+  // Reclaim, an Accept, a Release) can still leave an output at the escrow credential behind, with any datum it likes: it descends
+  // from the escrow by the spend chain, and Accept would pay out what that datum says.
+  test('a continuation that follows the spend chain but changes a field Claim and Submit keep is refused, naming the field', async () => {
+    const changes: Array<[field: string, change: Partial<EscrowDatum>]> = [
+      ['supplier_pkh', { supplier_pkh: 'aa'.repeat(28) }],
+      ['capability_id', { capability_id: 'other.capability.v1' }],
+      ['request_spec_hash', { request_spec_hash: 'aa'.repeat(32) }],
+      ['payment_lovelace', { payment_lovelace: posted.payment_lovelace + 1_000_000n }],
+      ['buyer_bond_lovelace', { buyer_bond_lovelace: posted.buyer_bond_lovelace + 1n }],
+      ['supplier_bond_lovelace', { supplier_bond_lovelace: posted.supplier_bond_lovelace - 1n }],
+      ['deliver_by', { deliver_by: posted.deliver_by + 1 }],
+    ];
+    for (const [field, change] of changes) {
+      // one step down (the Claimed output) and two steps down (the Submitted output)
+      for (const [stateName, decoy] of [['Claimed', at(CLAIM_TX, { ...claimedDatum, ...change })], ['Submitted', at(SUBMIT_TX, { ...submitted, ...change })]] as const) {
+        await assert.rejects(() => lineage([decoy]), refusal(new RegExp(`but its datum differs from that escrow's in ${field}, which Claim and Submit leave unchanged; refusing to build on it\.$`), `${decoy.txHash}#0`), `${field}, ${stateName}`);
+      }
+    }
+    // every changed field is named
+    await assert.rejects(() => lineage([at(CLAIM_TX, { ...claimedDatum, payment_lovelace: 9n, deliver_by: 1 })]), refusal(/in payment_lovelace, deliver_by, which Claim/));
+  });
+  test('a continuation that changes only what Claim and Submit may change - state, submitted_at, the receipt hash - is the escrow', async () => {
+    const r = await lineage([at(SUBMIT_TX, { ...submitted, submitted_at: posted.deliver_by, result_receipt_hash: 'ee'.repeat(32) })]);
+    assert.equal(r.current?.datum.state, 'Submitted');
+    assert.equal(r.current?.datum.submitted_at, posted.deliver_by);
   });
   test('returns current = null when the lineage is finished', async () => {
     const r = await lineage([stranger]);
@@ -266,8 +307,9 @@ describe('resolveEscrowLineage', () => {
     assert.equal((await lineage([stakedPost], { rows: [row(false)] })).current?.utxo, stakedPost);
   });
   test('the node\'s list of UTxOs at an address is not how candidates are found', async () => {
-    const node = Object.assign(new FixtureProvider([current]), { getUtxos: async () => { throw new Error('the resolver must not scan the node'); } });
-    const r = await resolveEscrowLineage(node, KOIOS, ESCROW_REF, escrowKoios({ txs: GENUINE_TXS, indexed: [current] }).f);
+    const w = world([current]);
+    const node = Object.assign(w.node, { getUtxos: async () => { throw new Error('the resolver must not scan the node'); } });
+    const r = await resolveEscrowLineage(node, KOIOS, ESCROW_REF, w.koios.f);
     assert.equal(r.current?.utxo.txHash, SUBMIT_TX);
   });
   test('refuses a Post output whose payment credential is not the escrow script\'s: a key address, the advert script, any other', async () => {
@@ -290,7 +332,7 @@ describe('resolveEscrowLineage', () => {
     for (const held of [[noDatum], [elsewhere]]) await assert.rejects(() => lineage(held, { spent: false }), refusal(/Koios and the node disagree about escrow .*not as an escrow output.*retry in a minute/));
   });
   test('Koios lists a live continuation that the node does not: refused, naming it', async () => {
-    const w = { node: new FixtureProvider([]), koios: escrowKoios({ txs: GENUINE_TXS, indexed: [current] }) };
+    const w = world([], { indexed: [current] }); // Koios has indexed an output the node does not list
     await assert.rejects(() => resolve(w), refusal(/Koios and the node disagree about escrow .*Koios lists .* as its live continuation, the node does not list it.*retry in a minute/, `${SUBMIT_TX}#0`));
   });
   test('the node\'s copy must be the output Koios described: same datum, same lovelace', async () => {
@@ -298,7 +340,7 @@ describe('resolveEscrowLineage', () => {
     const lessLovelace = at(SUBMIT_TX, submitted, { assets: { lovelace: ESCROW_LOCKED_LOVELACE - 1n } });
     const notAnEscrowDatum = at(SUBMIT_TX, submitted, { datum: 'ff' });
     for (const [name, onNode] of [['datum', otherDatum], ['lovelace', lessLovelace], ['not a datum', notAnEscrowDatum]] as const) {
-      const w = { node: new FixtureProvider([onNode]), koios: escrowKoios({ txs: GENUINE_TXS, indexed: [current] }) };
+      const w = world([onNode], { indexed: [current] }); // the node holds another version of the output Koios indexed
       await assert.rejects(() => resolve(w), refusal(/Koios and the node disagree about escrow .*retry in a minute/, `${SUBMIT_TX}#0`), name);
     }
     // the same while the Post output is unspent: the datum the node carries is compared with the one Koios decoded
@@ -354,7 +396,7 @@ describe('resolveEscrowLineage', () => {
     const rejecting = (error: Error) => (async () => { throw error; }) as unknown as typeof fetch;
     const timeout = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
     const after = (calls: number, error: Error): typeof fetch => { // the first `calls` requests are answered by a good Koios, then every request fails
-      const good = escrowKoios({ txs: GENUINE_TXS, indexed: [current] }).f;
+      const good = koiosFor([current]).f;
       let n = 0;
       return (async (u: string, init: any) => { if (n++ < calls) return good(u, init); throw error; }) as unknown as typeof fetch;
     };
@@ -365,9 +407,9 @@ describe('resolveEscrowLineage', () => {
       ['a 200 that is not a list', escrowKoios({ raw: '{"error":"internal.koios.example is down"}' }).f, /: Koios utxo_info: Koios returned a non-list response$/],
       ['a transport error that names the endpoint', rejecting(new TypeError('connect ECONNREFUSED https://koios.example:8443/api/v1/utxo_info')), /: Koios request failed \(network error or timeout\)$/],
       ['a timeout', rejecting(timeout), /: Koios request failed \(network error or timeout\)$/],
-      ['an HTTP error from credential_utxos', escrowKoios({ credentialStatus: 502, indexed: [current] }).f, /: Koios credential_utxos answered 502$/],
+      ['an HTTP error from credential_utxos', koiosFor([current], { credentialStatus: 502 }).f, /: Koios credential_utxos answered 502$/],
       ['a transport error from credential_utxos', after(1, transport), /: Koios request failed \(network error or timeout\)$/],
-      ['an HTTP error from tx_info', escrowKoios({ txStatus: 503, indexed: [current] }).f, /: Koios tx_info answered 503$/],
+      ['an HTTP error from tx_info', koiosFor([current], { txStatus: 503 }).f, /: Koios tx_info answered 503$/],
       ['a transport error from tx_info', after(2, new TypeError('connect ECONNREFUSED https://koios.example:8443/api/v1/tx_info')), /: Koios request failed \(network error or timeout\)$/],
     ];
     for (const [name, f, message] of cases) {
@@ -390,7 +432,7 @@ describe('resolveEscrowLineage', () => {
     ];
     for (const [name, error, message] of cases) {
       const node = Object.assign(new FixtureProvider([current]), { getUtxosByOutRef: async () => { throw error; } });
-      for (const k of [escrowKoios({ txs: GENUINE_TXS, indexed: [current] }), escrowKoios({ spent: false })]) {
+      for (const k of [koiosFor([current]), escrowKoios({ spent: false })]) {
         await assert.rejects(() => resolveEscrowLineage(node, KOIOS, ESCROW_REF, k.f), (err: unknown) => {
           assert.ok(err instanceof Error, name);
           assert.ok(err.message.startsWith(`Could not read escrow ${ESCROW_REF} from the node: `), `${name}: ${err.message}`);
@@ -421,5 +463,35 @@ describe('resolveEscrowLineage', () => {
   test('a credential with more matching outputs than the read allows is refused, not truncated', async () => {
     const lots = Array.from({ length: 5_050 }, (_, i) => at(i.toString(16).padStart(64, '0'), claimedDatum));
     await assert.rejects(() => lineage([...lots, claimed]), refusal(/: Koios credential_utxos: 5000 or more outputs matched; refusing to read them all$/));
+  });
+  // The prompt hash is what the candidate read searches for (1 to 128 bytes of hex). Anyone can lock an output at the escrow
+  // credential with a prompt hash of another size, and a spent one of those is a permanent refusal: wording it as a failed Koios
+  // call would send the caller off to retry something that cannot change.
+  test('a spent Post output whose prompt hash cannot be searched for is refused for good, not as a Koios failure to retry', async () => {
+    const rootWith = (bytes: number) => {
+      const datum = Data.from(ESCROW_OPEN_DATUM_HEX) as Constr<Data>;
+      datum.fields[5] = 'ab'.repeat(bytes); // the prompt hash; Lucid frames a bytestring over 64 bytes in chunks, as the ledger does
+      return { tx_hash: ESCROW_TX, tx_index: 0, address: ESCROW_ADDRESS, value: String(ESCROW_LOCKED_LOVELACE), is_spent: true, inline_datum: { bytes: Data.to(datum) } };
+    };
+    for (const bytes of [0, 129, 1000]) {
+      const w = world([], { rows: [rootWith(bytes)] });
+      await assert.rejects(() => resolve(w), (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.equal(err.message, `Escrow ${ESCROW_REF} cannot be followed: its prompt hash is ${bytes} bytes, outside the 1 to 128 bytes the lookup supports; retrying will not change that.`);
+        return true;
+      }, `${bytes} bytes`);
+      assert.equal(credentialRequests(w.koios).length, 0, `${bytes} bytes: Koios was not asked to search`);
+    }
+    // the ends of the range are searched for as usual, and finding nothing is "no continuation", not a refusal
+    for (const bytes of [1, 128]) {
+      const w = world([], { rows: [rootWith(bytes)] });
+      assert.equal((await resolve(w)).current, null, `${bytes} bytes`);
+      assert.equal(credentialRequests(w.koios).length, 1);
+    }
+  });
+  test('an unspent Post output needs no search, so its prompt hash does not matter', async () => {
+    const odd = at(ESCROW_TX, { ...posted, prompt_hash: '' });
+    const row = { tx_hash: ESCROW_TX, tx_index: 0, address: ESCROW_ADDRESS, value: String(ESCROW_LOCKED_LOVELACE), is_spent: false, inline_datum: { bytes: encodeEscrowDatum({ ...posted, prompt_hash: '' }) } };
+    assert.equal((await lineage([odd], { rows: [row] })).current?.utxo, odd);
   });
 });

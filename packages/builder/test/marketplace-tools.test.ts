@@ -145,6 +145,25 @@ describe('vector_marketplace_list_suppliers', () => {
     assert.ok(t.includes('The buyer locks price + supplier bond + buyer bond; on Accept the supplier receives price + supplier bond and the buyer bond returns to the buyer.'), t);
     assert.ok(!/both bonds return/i.test(t), 'the supplier bond does not come back to the buyer');
   });
+  test('shows at most `limit` suppliers, cheapest first, and 20 when no limit is given', async () => {
+    const many = Array.from({ length: 25 }, (_, i) => supplierRow({ utxo_ref: `${i.toString(16).padStart(2, '0')}`.repeat(32) + '#0', price_lovelace: String(100_000 + i * 1_000) }));
+    stub({ suppliers: [...many].reverse() }); // the indexer's order is nobody's business: the tool sorts
+    const three = await call('vector_marketplace_list_suppliers', { only_free: true, limit: 3 });
+    assert.equal(markdownOf(three).split('\n').filter((l) => l.startsWith('| `')).length, 3);
+    assert.deepEqual(jsonOf(three).map((s: { advert_ref: string }) => s.advert_ref), many.slice(0, 3).map((s) => s.utxo_ref));
+    const dflt = await call('vector_marketplace_list_suppliers', { only_free: true });
+    assert.equal(jsonOf(dflt).length, 20);
+    assert.equal(markdownOf(dflt).split('\n').filter((l) => l.startsWith('| `')).length, 20);
+    assert.equal(jsonOf(await call('vector_marketplace_list_suppliers', { only_free: true, limit: 50 })).length, 25, 'fewer rows than the limit is not padded');
+  });
+  test('lists only free suppliers when only_free is not given, and every status when it is false', async () => {
+    const row = (status: string, i: number) => supplierRow({ utxo_ref: `${i}`.repeat(64) + '#0', status });
+    stub({ suppliers: [row('free', 1), row('busy', 2), row('offline', 3)] });
+    assert.deepEqual(jsonOf(await call('vector_marketplace_list_suppliers', {})).map((s: { status: string }) => s.status), ['free']);
+    assert.equal(jsonOf(await call('vector_marketplace_list_suppliers', { only_free: false })).length, 3);
+    stub({ suppliers: [row('busy', 2)] });
+    assert.equal(await call('vector_marketplace_list_suppliers', {}), 'No suppliers found with status free.', 'the empty answer says which default it applied');
+  });
   test('echoes a capability filter that matched nothing as one clean line', async () => {
     stub({ suppliers: [supplierRow()] });
     const t = await call('vector_marketplace_list_suppliers', { capability_id: 'zz`|\nq', only_free: true, limit: 20 });

@@ -152,7 +152,7 @@ limitations.
 |------|-------------|
 | `vector_marketplace_list_capabilities` | List the capability ids advertised on the agents marketplace, with supplier counts (read-only, no wallet needed) |
 | `vector_marketplace_list_suppliers` | List supplier adverts: advert ref, model, price, bonds, processing window, status. Filter by capability; free suppliers by default (read-only, no wallet needed) |
-| `vector_marketplace_get_supplier` | Read one advert from the ledger by advert ref (all 13 fields) plus the indexer's live status; refuses any UTxO that is not a genuine advert (read-only, no wallet needed) |
+| `vector_marketplace_get_supplier` | Read one advert from the ledger by advert ref (all 13 fields) plus the indexer's live status; refuses UTxOs that are not at the advert script address or hold no advert datum (read-only, no wallet needed) |
 
 Agent DIDs follow the format: `did:vector:agent:{policyId}:{nftAssetName}`
 
@@ -255,7 +255,7 @@ If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` firs
 | `VECTOR_KOIOS_URL` | Koios REST API endpoint | `https://v2.koios.vector.testnet.apexfusion.org/` |
 | `VECTOR_SUBMIT_URL` | Transaction submit API | `https://submit.vector.testnet.apexfusion.org/api/submit/tx` |
 | `VECTOR_EXPLORER_URL` | Block explorer base URL | `https://vector.testnet.apexscan.org` |
-| `VECTOR_MARKETPLACE_INDEXER_URL` | Marketplace indexer behind the `vector_marketplace_*` tools. Read at startup, before any `.env` file is loaded, so it must be set as a real environment variable | `https://mp-indexer.vector.apexfusion.org` |
+| `VECTOR_MARKETPLACE_INDEXER_URL` | Marketplace indexer behind the `vector_marketplace_*` tools. Read at startup, before any `.env` file is loaded, so it must be set as a real environment variable. Trailing slashes are ignored | `https://mp-indexer.vector.apexfusion.org` |
 | `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute, per identity (min `1`) | `60` |
 | `VECTOR_MCP_SESSION_IDLE_MS` | `/mcp` session idle timeout before the reaper closes it, in ms (min `100`) | `600000` (10 min) |
 | `VECTOR_MCP_SESSION_SWEEP_MS` | How often the `/mcp` idle reaper sweeps, in ms (min `100`) | `60000` (1 min) |

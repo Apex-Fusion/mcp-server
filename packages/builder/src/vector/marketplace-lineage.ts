@@ -65,6 +65,21 @@ const owedLovelace = (d: EscrowDatum): bigint => d.payment_lovelace + d.buyer_bo
 const carriesFieldsOf = (posted: EscrowDatum, d: EscrowDatum): boolean =>
   d.advert_ref.txHash === posted.advert_ref.txHash && d.advert_ref.index === posted.advert_ref.index
   && d.buyer_pkh === posted.buyer_pkh && d.posted_at === posted.posted_at && d.prompt_hash === posted.prompt_hash;
+/**
+ * The fields escrow.ak keeps as they were across Claim and Submit (expect_unchanged_modulo_state and expect_unchanged_modulo_submit):
+ * everything but state, submitted_at and result_receipt_hash. The candidate rule above looks at four of them to pick candidates;
+ * the one the spend chain chooses must agree on all of them.
+ */
+const KEPT_BY_CLAIM_AND_SUBMIT: Array<[field: string, valueOf: (d: EscrowDatum) => unknown]> = [
+  ['buyer_pkh', (d) => d.buyer_pkh], ['supplier_pkh', (d) => d.supplier_pkh],
+  ['advert_ref', (d) => formatOutRef(d.advert_ref.txHash, d.advert_ref.index)],
+  ['capability_id', (d) => d.capability_id], ['request_spec_hash', (d) => d.request_spec_hash], ['prompt_hash', (d) => d.prompt_hash],
+  ['payment_lovelace', (d) => d.payment_lovelace], ['buyer_bond_lovelace', (d) => d.buyer_bond_lovelace], ['supplier_bond_lovelace', (d) => d.supplier_bond_lovelace],
+  ['deliver_by', (d) => d.deliver_by], ['posted_at', (d) => d.posted_at],
+];
+/** The names of the fields Claim and Submit keep that `d` has changed from `earlier`, in datum order. */
+const changedFieldsOf = (earlier: EscrowDatum, d: EscrowDatum): string[] =>
+  KEPT_BY_CLAIM_AND_SUBMIT.filter(([, valueOf]) => valueOf(earlier) !== valueOf(d)).map(([field]) => field);
 /** The same datum, field for field (the escrow encoder is canonical, so equal encodings mean equal datums). */
 function sameDatum(a: EscrowDatum, b: EscrowDatum): boolean {
   try { return encodeEscrowDatum(a) === encodeEscrowDatum(b); } catch { return false; }
@@ -135,7 +150,10 @@ async function descendantsOf(rootRef: string, root: EscrowDatum, candidates: Can
  * spent the posted output; one in state Submitted when its transaction spent an escrow output whose transaction spent the posted
  * output. A genuine continuation also holds exactly the lovelace the posted output held (Claim and Submit keep the value), so a
  * copy has to lock the full amount. Koios tx_info answers the chain questions in at most two batched calls (none when nothing
- * carries the escrow on, one when the live output is Claimed).
+ * carries the escrow on, one when the live output is Claimed). Nor is descending enough on its own: a transaction that ended the
+ * escrow (Reclaim, Accept, Release) can leave an output at the escrow credential behind, which descends from it by the spend
+ * chain with a datum of its own. So the output chosen must agree with the one it follows on every field escrow.ak keeps across
+ * Claim and Submit (all but state, submitted_at and result_receipt_hash), not only the four that pick the candidates.
  *
  * Fails closed. A UTxO counts as an escrow only when its payment credential is the escrow script's, it holds an escrow datum, and
  * the posted output holds at least the payment and both bonds its datum owes (Accept pays what the datum says, and the wallet
@@ -143,7 +161,8 @@ async function descendantsOf(rootRef: string, root: EscrowDatum, candidates: Can
  * read (their messages carry no endpoint and no response body); Koios does not say whether the posted output is spent or what it
  * holds; Koios and the node disagree (one is behind: the posted output spent on one and not on the other, the live continuation
  * on Koios but not on the node, or the node's copy of an output differs from the one Koios described); UTxOs carry the escrow's
- * fields but none provably descends from it, or Koios does not know a transaction on the way yet; and when two of them do.
+ * fields but none provably descends from it, or Koios does not know a transaction on the way yet; when two of them do; and when
+ * the one that does differs from the escrow in a field Claim and Submit keep.
  * `fetchImpl` stands in for fetch in the Koios calls (tests).
  */
 export async function resolveEscrowLineage(provider: Provider, koiosUrl: string, escrowRef: string, fetchImpl: typeof fetch = fetch): Promise<EscrowLineage> {
@@ -186,6 +205,12 @@ export async function resolveEscrowLineage(provider: Provider, koiosUrl: string,
   }
   if (rootOnNode) throw disagree('Koios says it is spent, the node still lists it as unspent (one of them is behind)');
 
+  // The search below is for the prompt hash as a slice of the datum (1 to 128 bytes). A Post output can be locked by anyone with
+  // a prompt hash of any size; one the search cannot take is no transient failure and no network error, so it is said as what it is.
+  const promptBytes = posted.prompt_hash.length / 2;
+  if (!(promptBytes >= 1 && promptBytes <= 128)) {
+    throw new Error(`Escrow ${canonical} cannot be followed: its prompt hash is ${promptBytes} bytes, outside the 1 to 128 bytes the lookup supports; retrying will not change that.`);
+  }
   // Candidates: the outputs at the escrow credential whose datum carries this escrow's prompt hash, as Koios lists them.
   const listed = await fromKoios(() => koiosCredentialUtxos(koiosUrl, ESCROW_SCRIPT_HASH, fetchImpl, { datumContains: posted.prompt_hash }));
   const candidates: Candidate[] = [];
@@ -208,6 +233,12 @@ export async function resolveEscrowLineage(provider: Provider, koiosUrl: string,
   }
   const chosen = genuine[0];
   const at = refOf(chosen);
+  // Descending by the spend chain is not enough: a transaction that ended the escrow (Reclaim, Accept, Release) can leave an
+  // output at the escrow credential behind, with a datum of its own, and Accept would pay out what that datum says.
+  const changed = changedFieldsOf(posted, chosen.datum);
+  if (changed.length > 0) {
+    throw new Error(`UTxO ${at} follows escrow ${canonical} along the spend chain, but its datum differs from that escrow's in ${changed.join(', ')}, which Claim and Submit leave unchanged; refusing to build on it.`);
+  }
   const [utxo] = await fromNode(() => provider.getUtxosByOutRef([{ txHash: chosen.txHash, outputIndex: chosen.outputIndex }]));
   if (!utxo) throw disagree(`Koios lists ${at} as its live continuation, the node does not list it (one of them is behind)`);
   return { posted, current: { utxo: confirmedOnNode(utxo, at, { datum: chosen.datum, lovelace: rootLovelace }), datum: chosen.datum }, spent: true };

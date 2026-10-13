@@ -57,8 +57,9 @@ export function registerMarketplaceTools(server: McpServer, identity: string) {
     async ({ capability_id, only_free, limit }) => {
       const limited = checkRateLimit(); if (limited) return limited;
       try {
-        const rows = (await fetchSuppliers({ capability_id, onlyFree: only_free ?? true })).slice(0, limit ?? 20);
-        if (rows.length === 0) return text(`No suppliers found${capability_id ? ` for ${cell(capability_id)}` : ''}${only_free ? ' with status free' : ''}.`);
+        const onlyFree = only_free ?? true; // the schema's defaults, for a caller that bypasses the schema
+        const rows = (await fetchSuppliers({ capability_id, onlyFree })).slice(0, limit ?? 20);
+        if (rows.length === 0) return text(`No suppliers found${capability_id ? ` for ${cell(capability_id)}` : ''}${onlyFree ? ' with status free' : ''}.`);
         const table = rows.map((s) =>
           `| \`${cell(s.utxo_ref)}\` | ${cell(s.capability_id)} | ${cell(s.model)} | ${lovelaceToAda(s.price_lovelace)} | ${lovelaceToAda(s.supplier_bond_lovelace)} / ${lovelaceToAda(s.buyer_bond_lovelace)} | ${Math.round(s.max_processing_ms / 1000)} s | ${cell(s.status)} | ${cell(s.last_seen_iso ?? '-')} | ${cell(host(s.endpoint_url))} |`).join('\n');
         const md = `# Marketplace suppliers\n\nThe buyer locks price + supplier bond + buyer bond; on Accept the supplier receives price + supplier bond and the buyer bond returns to the buyer.\n\n| advert_ref | capability | model | price | bonds (supplier / buyer) | window | status | last seen | endpoint |\n|---|---|---|---|---|---|---|---|---|\n${table}`;

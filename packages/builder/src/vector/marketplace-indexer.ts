@@ -102,8 +102,9 @@ export async function koiosUtxoInfo(koiosUrl: string, refs: string[], fetchImpl:
  * 1,000 rows, so the rows are read `pageSize` at a time in a fixed order (tx hash, index) until a short page; keep pageSize below
  * the server's own cap or a capped page would be taken for the last one. `datumContains` (hex) narrows the read on the server to
  * outputs whose inline datum contains it, which keeps a call small however many outputs the credential holds; the caller still
- * checks every row it gets. At most `maxRows` rows are collected, past that the read is refused. Errors name the operation and the
- * status only.
+ * checks every row it gets. A row listed on two pages (the set can shift while it is read) is returned once. At most `maxRows`
+ * entries are read, counting everything Koios sent whether or not it is a usable row, and past that the read is refused: a Koios
+ * that sends full pages of junk, or the same page again and again, cannot keep it going. Errors name the operation and the status only.
  */
 export async function koiosCredentialUtxos(
   koiosUrl: string, paymentCredential: string, fetchImpl: typeof fetch = fetch,
@@ -118,15 +119,21 @@ export async function koiosCredentialUtxos(
   }
   const pageSize = opts.pageSize ?? 100;
   const maxRows = opts.maxRows ?? 5_000;
-  const rows: KoiosUtxo[] = [];
+  // With a page size below one every page would count as full and add nothing to `read`: the loop below could not end.
+  if (!Number.isInteger(pageSize) || pageSize < 1) throw new Error('The page size must be a positive whole number.');
+  const rows = new Map<string, KoiosUtxo>(); // by ref, in the order first seen
+  let read = 0;
   for (let offset = 0; ; offset += pageSize) {
     const page = await koiosPostList(koiosUrl, 'credential_utxos', { _payment_credentials: [credential], _extended: true }, fetchImpl, `?order=tx_hash.asc,tx_index.asc&offset=${offset}&limit=${pageSize}${filter}`);
+    read += page.length;
     for (const entry of page) {
       const row = entry as Partial<KoiosUtxo> | null;
-      if (row !== null && typeof row === 'object' && typeof row.tx_hash === 'string' && Number.isInteger(row.tx_index)) rows.push(row as KoiosUtxo);
+      if (row === null || typeof row !== 'object' || typeof row.tx_hash !== 'string' || !Number.isInteger(row.tx_index)) continue;
+      const ref = `${row.tx_hash.toLowerCase()}#${row.tx_index}`;
+      if (!rows.has(ref)) rows.set(ref, row as KoiosUtxo);
     }
-    if (page.length < pageSize) return rows;
-    if (rows.length >= maxRows) throw new Error(`Koios credential_utxos: ${maxRows} or more outputs matched; refusing to read them all`);
+    if (page.length < pageSize) return [...rows.values()];
+    if (read >= maxRows) throw new Error(`Koios credential_utxos: ${maxRows} or more outputs matched; refusing to read them all`);
   }
 }
 
@@ -191,9 +198,13 @@ export function withJson(markdown: string, obj: unknown): string {
 
 export type AdvertRead = { error: string } | { utxo: KoiosUtxo; advert: AdvertDatum; spent: boolean };
 
-// Anyone can lock a UTxO anywhere with a datum that merely parses as an advert (and copies a real supplier_pkh), so an
-// advert is genuine only at the advert script address. Problems with the ref come back as text-ready `{ error }`; Koios failures throw.
-/** Reads one advert from the ledger and refuses anything that is not genuine; PR 2's post builder reuses it and additionally requires `utxo.is_spent === false`. */
+// Anyone can lock a UTxO anywhere with a datum that merely parses as an advert (and copies a real supplier_pkh), so a UTxO is
+// taken for an advert only at the advert script address. Problems with the ref come back as text-ready `{ error }`; Koios failures throw.
+/**
+ * Reads one advert from the ledger. It refuses UTxOs that are not at the advert script address or hold no advert datum. That does
+ * not make an advert genuine (the advert validator does not check who creates one, so buildPostEscrow also proves authorship) or
+ * live: a spent or retired advert is returned too, flagged by `spent` and `advert.status`, and buildPostEscrow requires it unspent.
+ */
 export async function readAdvert(ref: string, fetchImpl: typeof fetch = fetch): Promise<AdvertRead> {
   let parsed: { txHash: string; outputIndex: number };
   try { parsed = parseOutRef(ref); } catch (err) { return { error: err instanceof Error ? err.message : String(err) }; }

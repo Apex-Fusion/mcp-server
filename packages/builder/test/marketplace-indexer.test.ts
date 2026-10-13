@@ -3,7 +3,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Constr, Data, credentialToAddress } from '@lucid-evolution/lucid';
 import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, koiosTxInputCreds, koiosTxInputRefs, koiosCredentialUtxos, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
-import { ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_SCRIPT_HASH, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
+import { ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_SCRIPT_HASH, INDEXER_URL, indexerUrlFrom } from '../src/vector/marketplace-constants.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
 
 const fakeFetch = (body: unknown, status = 200) => (async () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
@@ -60,6 +60,19 @@ describe('indexer client failure surfaces', () => {
   });
   test('koiosUtxoInfo reports the status of a failed call', async () => {
     await assert.rejects(() => koiosUtxoInfo('https://koios.example', ['a'.repeat(64) + '#0'], fakeFetch({}, 500)), safeMessage(/^Koios utxo_info answered 500$/));
+  });
+});
+
+describe('indexer base URL', () => {
+  test('is the configured URL without trailing slashes, so no request path starts with a double slash', () => {
+    assert.equal(indexerUrlFrom('https://idx.example'), 'https://idx.example');
+    assert.equal(indexerUrlFrom('https://idx.example/'), 'https://idx.example');
+    assert.equal(indexerUrlFrom('https://idx.example///'), 'https://idx.example');
+    assert.equal(indexerUrlFrom('https://idx.example/base/'), 'https://idx.example/base');
+    assert.ok(!INDEXER_URL.endsWith('/'));
+  });
+  test('is the public indexer when nothing is configured', () => {
+    for (const unset of [undefined, '']) assert.equal(indexerUrlFrom(unset), 'https://mp-indexer.vector.apexfusion.org');
   });
 });
 
@@ -391,6 +404,44 @@ describe('koiosCredentialUtxos', () => {
   test('entries that are not rows are dropped', async () => {
     const { f } = paging([rowN(1), null, 'x', {}, { tx_hash: 'ab', tx_index: 'x' }, { tx_hash: rowN(2).tx_hash, tx_index: 1.5 }, rowN(3)]);
     assert.deepEqual((await koiosCredentialUtxos(KOIOS, CRED, f)).map((r) => r.tx_hash), [rowN(1).tx_hash, rowN(3).tx_hash]);
+  });
+  // The loop ends on a short page or on maxRows. maxRows counts everything Koios sent, not only the well-formed rows: a Koios that
+  // sends full pages of junk (or the same page again and again) would otherwise never reach it. The fakes below give up after 50
+  // requests so that a loop that does not end fails the test instead of hanging it.
+  const runaway = (page: (call: number) => unknown[]) => {
+    let calls = 0;
+    const f = (async () => {
+      if (++calls > 50) throw new Error('runaway: still paging after 50 requests');
+      return new Response(JSON.stringify(page(calls)), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { f, calls: () => calls };
+  };
+  test('full pages of entries that are not rows still count toward maxRows: the read is refused, not run for ever', async () => {
+    const junk = runaway(() => [null, 'x']);
+    await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, junk.f, { pageSize: 2, maxRows: 6 }), safeMessage(/^Koios credential_utxos: 6 or more outputs matched; refusing to read them all$/));
+    assert.equal(junk.calls(), 3);
+  });
+  test('the same page sent again and again (an offset that is ignored) is stopped by maxRows too', async () => {
+    const same = runaway(() => [rowN(1), rowN(2)]);
+    await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, same.f, { pageSize: 2, maxRows: 6 }), safeMessage(/^Koios credential_utxos: 6 or more outputs matched/));
+    assert.equal(same.calls(), 3);
+  });
+  test('a row that is listed on two pages (the set shifted while it was read) comes back once, in the order it first appeared', async () => {
+    const { f } = paging([1, 2, 3, 2, 4].map(rowN)); // pages of two: [1, 2] [3, 2] [4]
+    assert.deepEqual((await koiosCredentialUtxos(KOIOS, CRED, f, { pageSize: 2 })).map((r) => r.tx_hash), [1, 2, 3, 4].map((i) => rowN(i).tx_hash));
+  });
+  test('a ref is the same ref whatever the case of its hash, and an output index tells two rows of one transaction apart', async () => {
+    const lower = rowN(0xab); // a hash with letters in it
+    const upper = { ...lower, tx_hash: lower.tx_hash.toUpperCase() };
+    const sibling = { ...lower, tx_index: 1 };
+    assert.notEqual(upper.tx_hash, lower.tx_hash);
+    const { f } = paging([lower, upper, sibling]);
+    assert.deepEqual((await koiosCredentialUtxos(KOIOS, CRED, f)).map((r) => [r.tx_hash, r.tx_index]), [[lower.tx_hash, 0], [lower.tx_hash, 1]]);
+  });
+  test('a page size that is not a positive whole number is refused before anything is asked', async () => {
+    const none = runaway(() => []);
+    for (const pageSize of [0, -1, 1.5, Number.NaN]) await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, none.f, { pageSize }), /page size/, String(pageSize));
+    assert.equal(none.calls(), 0);
   });
   test('POSTs to <base>/api/v1/credential_utxos however many slashes end the base', async () => {
     const urls: string[] = [];

@@ -112,10 +112,16 @@ export function slotClockOf(lucid: LucidEvolution): SlotClockProvider {
 // included) must use a consistent zeroTime across calls in one process.
 let vectorZeroTime: number | null = null;
 
+// A node that answers with something that is not a finite number (OgmiosProvider turns an unparseable start time into NaN)
+// must not become the process's clock: the cache above never forgets, and every validity range would be computed from it.
 export async function ensureSlotConfig(provider: Pick<SlotClockProvider, 'getSystemStartMs'>): Promise<number> {
   if (vectorZeroTime === null) {
-    vectorZeroTime = await provider.getSystemStartMs();
-    SLOT_CONFIG_NETWORK.Mainnet = { zeroTime: vectorZeroTime, zeroSlot: 0, slotLength: 1000 };
+    const zeroTime = await provider.getSystemStartMs();
+    if (typeof zeroTime !== 'number' || !Number.isFinite(zeroTime)) {
+      throw new Error(`The node did not report a usable chain start time (got ${String(zeroTime)}), so the slot clock was not set.`);
+    }
+    vectorZeroTime = zeroTime;
+    SLOT_CONFIG_NETWORK.Mainnet = { zeroTime, zeroSlot: 0, slotLength: 1000 };
   }
   return vectorZeroTime;
 }
