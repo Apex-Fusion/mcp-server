@@ -25,6 +25,8 @@ export { paymentKeyHashOf };
 export function enterpriseAddressOf(pkh: string): string { return credentialToAddress('Mainnet', { type: 'Key', hash: pkh }); }
 const redeemerHex = (idx: number) => Data.to(new Constr(idx, []));
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
+/** `new Error(message, { cause })`: Node has had the option since v16.9, but the type library this package compiles against (ES2020) does not declare it. */
+const ErrorWithCause = Error as new (message?: string, options?: { cause?: unknown }) => Error;
 /** ISO text for error messages; a datum can hold a time no Date can represent, and that must not replace the real message with a RangeError. */
 const iso = (ms: number) => { const d = new Date(ms); return Number.isNaN(d.getTime()) ? String(ms) : d.toISOString(); };
 
@@ -187,11 +189,17 @@ export async function buildPostEscrow(
   // which nothing here guarantees.
   const inputs = reserveCollateralInputs(await lucid.wallet().getUtxos(), plan.lockLovelace);
   let completed: TxSignBuilder | undefined;
+  let reservedFailure: unknown;
   if (inputs) {
-    try { completed = await assemble().complete({ presetWalletInputs: inputs }); } catch { /* retried below with the whole wallet; a real failure surfaces from that attempt */ }
+    try { completed = await assemble().complete({ presetWalletInputs: inputs }); } catch (err) { reservedFailure = err; /* retried below with the whole wallet */ }
   }
   const collateralKept = completed !== undefined;
-  if (!completed) completed = await assemble().complete({});
+  if (!completed) {
+    try { completed = await assemble().complete({}); } catch (err) {
+      // The whole-wallet attempt is the one whose words the caller gets; why the reserved selection was given up on stays attached.
+      throw inputs ? new ErrorWithCause(errorText(err), { cause: reservedFailure }) : err;
+    }
+  }
   const r = toBuildResult(completed);
   assertEscrowIsOutputZero(r.txCbor, { datumHex: escrowDatumHex, lockLovelace: plan.lockLovelace });
   const { datum, ...terms } = plan;

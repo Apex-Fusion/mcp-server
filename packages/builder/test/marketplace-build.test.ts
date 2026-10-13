@@ -426,6 +426,27 @@ describe('buildPostEscrow (offline)', () => {
     assert.ok(inputRefs(r.txCbor).includes(`${FIXTURE_TXHASH}#0`), 'the held-back output was needed after all');
     assert.equal(outputs(r.txCbor)[0].address, ESCROW_ADDRESS);
   });
+  test('when the whole-wallet retry fails too, its error keeps the reason the first attempt failed as its cause', async () => {
+    // Both attempts fail, each in its own words: first the selection that holds the collateral output back, then the whole wallet.
+    const failing = {
+      ...lucid,
+      newTx: () => {
+        const tx = lucid.newTx();
+        tx.complete = (async (options?: { presetWalletInputs?: UTxO[] }) => {
+          throw new Error(options?.presetWalletInputs ? 'reserved selection failed' : 'whole wallet failed');
+        }) as unknown as typeof tx.complete;
+        return tx;
+      },
+    } as LucidEvolution;
+    await assert.rejects(() => buildPostEscrow(failing, provider, { changeAddress: OWN_ADDRESS, advertRef: ADVERT_REF, payload: 'hello', nowMs: NOW }, koiosFake().f), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal(err.message, 'whole wallet failed');
+      const { cause } = err as Error & { cause?: unknown };
+      assert.ok(cause instanceof Error, 'the first attempt failure is attached');
+      assert.equal(cause.message, 'reserved selection failed');
+      return true;
+    });
+  });
   test('a Koios failure while reading the advert names the advert and the step', async () => {
     await assert.rejects(() => post(koiosFake({ utxoInfoStatus: 502 })), new RegExp(`Could not read advert ${ADVERT_REF}: Koios utxo_info answered 502$`));
   });
