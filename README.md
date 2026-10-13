@@ -15,12 +15,17 @@ Hosted instances run on both networks. The 30 tools described below are the code
 | Mainnet | `https://mcp.vector.mainnet.apexfusion.org/mcp` |
 | Testnet | `https://mcp.vector.testnet.apexfusion.org/mcp` |
 
-> **Deployment status: both networks are current.** Both hosted instances run today's
-> completed migration: testnet since the 2026-07-31 morning merges (auto-deployed from
-> `main`), mainnet since a deliberate cutover deploy the same day (see
+> **Deployment status: both networks are current with the non-custodial migration, and only
+> with that.** Both hosted instances run the completed migration: testnet since the
+> 2026-07-31 morning merges (auto-deployed from `main`), mainnet since a deliberate cutover
+> deploy the same day (see
 > [docs/architecture/non-custodial-split.md](docs/architecture/non-custodial-split.md), section
-> 11, "Rollout", for the full history). **Both hosted instances are open access - no bearer
-> token is required to connect.** Callers are admitted anonymously with per-IP rate limiting.
+> 11, "Rollout", for the full history). This does not mean a hosted instance serves every
+> tool listed below: the marketplace tools are newer than those deploys, and an instance
+> serves them only once the release that adds them has deployed there (until then its tool
+> list is shorter than the one below; a client's tool list shows what an instance serves right
+> now). **Both hosted instances are open access - no bearer token is required to connect.**
+> Callers are admitted anonymously with per-IP rate limiting.
 > That is an access-control property, and it is separate from custody: neither instance
 > accepts a mnemonic from any caller, with or without a token. Self-hosted deployments can
 > still gate access with `MCP_AUTH_TOKENS` - see [Configuration](#configuration).

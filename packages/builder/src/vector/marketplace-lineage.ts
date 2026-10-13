@@ -70,11 +70,11 @@ const carriesFieldsOf = (posted: EscrowDatum, d: EscrowDatum): boolean =>
  * everything but state, submitted_at and result_receipt_hash. The candidate rule above looks at four of them to pick candidates;
  * the one the spend chain chooses must agree on all of them.
  *
- * What is compared are decoded values, not datum bytes: capability_id has been through toText, deliver_by and posted_at through
- * Number, and decoding can fold two different byte strings, or two integers past 2^53, into one value. That is safe for what a
- * payout is worked out from. Both key hashes are compared as the hex of their bytes, and the payment and both bonds stay bigint,
- * so none of them can differ unseen. capability_id and the two times decide no amount, and the times of a genuine escrow are
- * milliseconds since the epoch, far below 2^53.
+ * What is compared are decoded values, not datum bytes: capability_id has been through toText, advert_ref.index, deliver_by and
+ * posted_at through Number, and decoding can fold two different byte strings, or two integers past 2^53, into one value. That is
+ * safe for what a payout is worked out from. Both key hashes are compared as the hex of their bytes, and the payment and both
+ * bonds stay bigint, so none of them can differ unseen. capability_id, advert_ref.index and the two times decide no amount, and
+ * the times of a genuine escrow are milliseconds since the epoch and its advert's output index is a small count, far below 2^53.
  */
 const KEPT_BY_CLAIM_AND_SUBMIT: Array<[field: string, valueOf: (d: EscrowDatum) => unknown]> = [
   ['buyer_pkh', (d) => d.buyer_pkh], ['supplier_pkh', (d) => d.supplier_pkh],

@@ -72,10 +72,16 @@ beforeEach(() => { requested = []; });
 afterEach(() => { globalThis.fetch = realFetch; node = undefined; });
 
 // A real advert datum with chosen supplier-controlled fields (indexes follow AdvertDatum's on-chain field order).
-const advertDatumWith = (fields: { capability_id?: string; model?: string; endpoint_url?: string; advertised_at?: bigint }): string => {
+const advertDatumWith = (fields: {
+  capability_id?: string; model?: string; endpoint_url?: string; advertised_at?: bigint;
+  price_lovelace?: bigint; supplier_bond_lovelace?: bigint; buyer_bond_lovelace?: bigint;
+}): string => {
   const c = Data.from(ADVERT_DATUM_HEX) as Constr<Data>;
   if (fields.capability_id !== undefined) c.fields[1] = fromText(fields.capability_id);
   if (fields.model !== undefined) c.fields[2] = fromText(fields.model);
+  if (fields.price_lovelace !== undefined) c.fields[5] = fields.price_lovelace;
+  if (fields.supplier_bond_lovelace !== undefined) c.fields[6] = fields.supplier_bond_lovelace;
+  if (fields.buyer_bond_lovelace !== undefined) c.fields[7] = fields.buyer_bond_lovelace;
   if (fields.endpoint_url !== undefined) c.fields[8] = fromText(fields.endpoint_url);
   if (fields.advertised_at !== undefined) c.fields[11] = fields.advertised_at;
   return Data.to(c);
@@ -252,13 +258,15 @@ describe('vector_build_marketplace_post_escrow', () => {
     const j = jsonOf(t);
     assert.ok(t.startsWith('# Unsigned Escrow Post Built (Not Submitted)\n'));
     // the lock, itemised, and what each ending costs: Accept pays the supplier its bond and returns only the buyer bond; missing
-    // the 600 s window lets the supplier Release and keep price + both bonds (escrow.ak handle_release); Reclaim returns everything
+    // the 600 s window lets the supplier Release and keep everything locked, the floor excess included (escrow.ak handle_release
+    // only bounds its take from below); Reclaim returns everything. Price + supplier bond is 1.2 units here, so no payout is raised.
     assert.equal(lineOf(t, '**Locked:**'),
       '**Locked:** 2.261030 = price 0.200000 + supplier bond 1.000000 + buyer bond 1.000000 (floored to the min-UTxO of the Submitted datum). ' +
       'If the supplier submits, accept within 600 s: it receives price + supplier bond and your buyer bond (plus any floor excess) returns. ' +
-      'Miss that window and the supplier may Release and keep price + both bonds. ' +
+      'Miss that window and the supplier may Release and keep everything locked (price + both bonds + any floor excess). ' +
       `If it never submits, Reclaim after ${new Date(j.deliver_by).toISOString()} returns everything.`);
     assert.ok(!/both bonds return/i.test(t), 'never says that both bonds return');
+    assert.ok(!t.includes('raised'), 'nothing is raised to the minimum when price + supplier bond is above 1 unit');
     // the escrow, the payee, the deadline, the payload
     assert.equal(j.escrow_ref, `${j.tx_hash}#0`);
     assert.equal(lineOf(t, '**Escrow ref (after submit):**'), `**Escrow ref (after submit):** \`${j.escrow_ref}\``);
@@ -280,6 +288,28 @@ describe('vector_build_marketplace_post_escrow', () => {
     assert.equal(lineOf(t, '**Collateral kept aside:**'), '**Collateral kept aside:** yes');
     assert.ok(!t.includes('Warning'));
     assert.deepEqual(Object.keys(j).sort(), ['collateral_kept', 'deliver_by', 'escrow_ref', 'fee', 'lock_lovelace', 'prompt_hash', 'tx_hash']);
+  });
+  test("says when the supplier payout will be raised to the 1-unit minimum out of the buyer's return, and only then", async () => {
+    const NOTE = ' (the supplier payout is raised to the 1-unit minimum out of your return)';
+    const lockedLineFor = async (amounts: { price_lovelace?: bigint; supplier_bond_lovelace?: bigint; buyer_bond_lovelace?: bigint }): Promise<string> => {
+      stub({ utxos: [advertUtxo(advertDatumWith(amounts))] });
+      const t = await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+      assert.ok(t.startsWith('# Unsigned Escrow Post Built (Not Submitted)\n'), t.slice(0, 400));
+      return lineOf(t, '**Locked:**');
+    };
+    // 1 lovelace under the minimum: Accept would owe the supplier 0.999999, and an output cannot be that small, so it is raised
+    const under = await lockedLineFor({ price_lovelace: 299_999n, supplier_bond_lovelace: 700_000n });
+    assert.ok(under.includes('price 0.299999 + supplier bond 0.700000 + buyer bond 1.000000'), under);
+    assert.ok(under.includes(`(plus any floor excess) returns${NOTE}. Miss that window and the supplier may Release and keep everything locked (price + both bonds + any floor excess). `), under);
+    assert.equal(under.split('raised').length - 1, 1, 'said once');
+    // no price and no bond is the extreme of the same rule
+    assert.ok((await lockedLineFor({ price_lovelace: 0n, supplier_bond_lovelace: 0n })).includes(`(plus any floor excess) returns${NOTE}. `));
+    // exactly the minimum owes nothing extra: the plain text
+    const exact = await lockedLineFor({ price_lovelace: 300_000n, supplier_bond_lovelace: 700_000n });
+    assert.ok(exact.includes('(plus any floor excess) returns. Miss that window'), exact);
+    assert.ok(!exact.includes('raised'), exact);
+    // the rule is on price + supplier bond: a small buyer bond is the buyer's own return, not a supplier payout
+    assert.ok(!(await lockedLineFor({ buyer_bond_lovelace: 100_000n })).includes('raised'));
   });
   test('warns, in one line, when no pure 5-unit output could be kept aside for Accept and Reclaim', async () => {
     node = new FixtureProvider([{ txHash: FIXTURE_TXHASH, outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 900_000_000n } }]); // the only output is the only collateral candidate
@@ -351,12 +381,13 @@ function escrowWorld(chain: UTxO[], posted: EscrowDatum, spent: boolean, koios: 
   return k;
 }
 
-// The troubleshooting tips, whole: they name what a missed accept window costs (escrow.ak handle_release: the supplier takes
-// price + supplier bond + buyer bond), and the transport tool by what it will be called in PR 3.
+// The troubleshooting tips, whole: they name what a missed accept window costs (escrow.ak handle_release only bounds the supplier's
+// take from below, at price + supplier bond + buyer bond, so it may keep everything locked), and the transport tool by what it will be
+// called in PR 3.
 const ACCEPT_TIPS = '\n\n**Troubleshooting Tips:**\n1. The job must be in Submitted state: check its progress through the marketplace transport tool (PR 3) first\n' +
-  '2. Accept must land within 600 s of Submit; after that the supplier may Release and keep price + both bonds\n3. The wallet needs one pure 5-unit output as collateral';
+  '2. Accept must land within 600 s of Submit; after that the supplier may Release and keep everything locked (price + both bonds + any floor excess)\n3. The wallet needs one pure 5-unit output as collateral';
 const RECLAIM_TIPS = '\n\n**Troubleshooting Tips:**\n1. Reclaim opens only after deliver_by\n' +
-  '2. A Submitted escrow cannot be reclaimed: accept within 600 s of Submit; after that the supplier may Release and keep your buyer bond';
+  '2. A Submitted escrow cannot be reclaimed: accept within 600 s of Submit; after that the supplier may Release and keep everything locked (price + both bonds + any floor excess)';
 /** A refusal about where the escrow is must never claim the escrow is over: nothing found is not the same as finished. */
 const ENDED_WORDING = /accepted|released|reclaimed|finished/i;
 /** The refusal itself, without the fixed troubleshooting tips (those say a Submitted escrow "cannot be reclaimed": guidance, not a claim about this escrow). */

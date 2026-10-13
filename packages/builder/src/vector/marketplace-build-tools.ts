@@ -10,13 +10,15 @@ import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
 import { lucidForAddress } from './build.js';
 import { withJson } from './marketplace-indexer.js';
 import { buildPostEscrow, buildAccept, buildReclaim } from './marketplace-build.js';
-import { ACCEPT_WINDOW_MS } from './marketplace-constants.js';
+import { ACCEPT_WINDOW_MS, MIN_UTXO_LOVELACE } from './marketplace-constants.js';
 import { text, fail, cell, isoOrRaw, SIGN_COPY } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
 
 const ACCEPT_WINDOW_S = ACCEPT_WINDOW_MS / 1000;
 /** A payout below the minimum output is raised to it (planAccept, planReclaim); the signer is told, as it is shown more than the datum owes. */
 const raised = (flag: boolean): string => (flag ? ' (raised to the 1-unit minimum)' : '');
+/** What a missed accept window costs, in the one wording every tool uses. escrow.ak (handle_release) only bounds the supplier's take from below (the three amounts the datum names), so it may keep the floor excess of the lock as well. */
+const RELEASE_TAKE = 'keep everything locked (price + both bonds + any floor excess)';
 
 export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit: RateGate, providerFor: () => Provider) {
   server.tool(
@@ -35,15 +37,17 @@ export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit:
         const lucid = await lucidForAddress(provider, changeAddress);
         const r = await buildPostEscrow(lucid, provider, { changeAddress, advertRef: advert_ref, payload, deliverByMs: deliver_by_ms });
         const deliverBy = isoOrRaw(r.deliverBy);
+        // planAccept raises a supplier payout below the minimum output to it, and the raise comes out of the buyer's side: said here, before the Post is signed.
+        const supplierRaise = r.priceLovelace + r.supplierBondLovelace < MIN_UTXO_LOVELACE ? ' (the supplier payout is raised to the 1-unit minimum out of your return)' : '';
         // supplierPkh, endpointHost and capabilityId come out of an advert, which anyone can write: all three go through cell().
         const warning = r.collateralKept ? '' : '\n**Warning:** no pure 5-unit output was kept aside for the Accept/Reclaim script spends; make sure your wallet still has one afterwards (the change of this Post counts if it is a pure output of at least 5 units).';
         const md = `# Unsigned Escrow Post Built (Not Submitted)\n\n` +
           `**Hiring:** \`${cell(r.capabilityId)}\` from supplier key \`${cell(r.supplierPkh)}\`, endpoint host \`${cell(r.endpointHost)}\`\n` +
           `**Escrow ref (after submit):** \`${r.escrowRef}\`\n` +
           `**Locked:** ${lovelaceToAda(r.lockLovelace)} = price ${lovelaceToAda(r.priceLovelace)} + supplier bond ${lovelaceToAda(r.supplierBondLovelace)} + buyer bond ${lovelaceToAda(r.buyerBondLovelace)} (floored to the min-UTxO of the Submitted datum). ` +
-          // escrow.ak: Accept pays the supplier price + supplier bond and the buyer its bond; once the window has passed, Release pays the supplier all three
-          `If the supplier submits, accept within ${ACCEPT_WINDOW_S} s: it receives price + supplier bond and your buyer bond (plus any floor excess) returns. ` +
-          `Miss that window and the supplier may Release and keep price + both bonds. ` +
+          // escrow.ak: Accept pays the supplier price + supplier bond and the buyer its bond; once the window has passed, Release lets the supplier take at least all three (a floor, not a ceiling)
+          `If the supplier submits, accept within ${ACCEPT_WINDOW_S} s: it receives price + supplier bond and your buyer bond (plus any floor excess) returns${supplierRaise}. ` +
+          `Miss that window and the supplier may Release and ${RELEASE_TAKE}. ` +
           `If it never submits, Reclaim after ${deliverBy} returns everything.\n` +
           `**Deliver by:** ${deliverBy}\n**Payload hash:** \`${r.promptHash}\`\n**Estimated fee:** ${r.feeAda}\n**Collateral kept aside:** ${r.collateralKept ? 'yes' : 'no'}${warning}\n\n` +
           `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\nKeep the payload byte-identical when you send the job through the marketplace transport tool (PR 3). ${SIGN_COPY}`;
@@ -75,7 +79,7 @@ export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit:
       } catch (err) {
         return fail('build accept', err, [
           'The job must be in Submitted state: check its progress through the marketplace transport tool (PR 3) first',
-          `Accept must land within ${ACCEPT_WINDOW_S} s of Submit; after that the supplier may Release and keep price + both bonds`,
+          `Accept must land within ${ACCEPT_WINDOW_S} s of Submit; after that the supplier may Release and ${RELEASE_TAKE}`,
           'The wallet needs one pure 5-unit output as collateral',
         ]);
       }
@@ -102,7 +106,7 @@ export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit:
       } catch (err) {
         return fail('build reclaim', err, [
           'Reclaim opens only after deliver_by',
-          `A Submitted escrow cannot be reclaimed: accept within ${ACCEPT_WINDOW_S} s of Submit; after that the supplier may Release and keep your buyer bond`,
+          `A Submitted escrow cannot be reclaimed: accept within ${ACCEPT_WINDOW_S} s of Submit; after that the supplier may Release and ${RELEASE_TAKE}`,
         ]);
       }
     },
