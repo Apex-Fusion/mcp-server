@@ -85,6 +85,25 @@ export function decodeAdvertDatum(hex: string): AdvertDatum {
   };
 }
 
+// Positions of the four bytestring fields decodeAdvertDatum turns into text: capability_id, model, endpoint_url, detail_uri.
+const ADVERT_TEXT_FIELDS = [1, 2, 8, 9];
+
+/**
+ * True when the advert's four text fields are valid UTF-8 exactly as stored. decodeAdvertDatum reads them with toText,
+ * which replaces invalid sequences with U+FFFD and drops a leading BOM, so for such an advert re-encoding the decoded
+ * text would not reproduce the on-chain bytes. Takes the raw datum; one that is not a well-formed advert is false.
+ */
+export function advertTextFieldsRoundTrip(datumHex: string): boolean {
+  let parsed: Data;
+  try { parsed = Data.from(datumHex); } catch { return false; }
+  if (!(parsed instanceof Constr) || parsed.fields.length !== 13) return false;
+  const fields = parsed.fields;
+  return ADVERT_TEXT_FIELDS.every((i) => {
+    const hex = fields[i];
+    return typeof hex === 'string' && fromText(toText(hex)) === hex.toLowerCase();
+  });
+}
+
 export function decodeEscrowDatum(hex: string): EscrowDatum {
   const c = asConstr(Data.from(hex), 'escrow');
   if (c.index !== 0 || c.fields.length !== 14) throw new Error(`escrow: expected Constr 0 with 14 fields, got ${c.index}/${c.fields.length}`);

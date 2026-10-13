@@ -1,7 +1,7 @@
 // packages/builder/test/marketplace-indexer.test.ts
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
+import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, koiosTxInputCreds, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
 import { ADVERT_ADDRESS, ESCROW_ADDRESS, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
 
@@ -187,5 +187,56 @@ describe('readAdvert', () => {
   test('Koios failures still throw, with the safe messages', async () => {
     await assert.rejects(() => readAdvert(ADVERT_REF, fakeFetch({}, 500)), safeMessage(/^Koios utxo_info answered 500$/));
     await assert.rejects(() => readAdvert(ADVERT_REF, fakeFetch({ not: 'a list' })), safeMessage(/^Koios utxo_info: Koios returned a non-list response$/));
+  });
+});
+
+// koiosTxInputCreds: who funded a transaction. Koios tx_info answers with an EMPTY inputs list unless the request asks
+// for inputs (verified live 2026-10-13), and an empty list would read as "nobody signed", so the flags are pinned here.
+describe('koiosTxInputCreds', () => {
+  const TX = ADVERT_REF.slice(0, 64);
+  const SUPPLIER_ADDR = 'addr1v9qp4aqc5ln0kyrzwu5j3q0um64pes2mtvgja8ytmvk5djgfj3cl6'; // enterprise address of ADVERT_EXPECTED.supplier_pkh
+  const input = (cred: unknown, bech32 = SUPPLIER_ADDR) => ({ tx_hash: 'cc'.repeat(32), tx_index: 2, payment_addr: { bech32, cred }, stake_addr: null });
+  const row = (over: Record<string, unknown> = {}) => ({ tx_hash: TX, inputs: [input(ADVERT_EXPECTED.supplier_pkh)], ...over });
+
+  test('asks tx_info for the inputs and assets and returns the input payment credentials', async () => {
+    const { f, calls } = koiosReturning([row()]);
+    assert.deepEqual(await koiosTxInputCreds('https://koios.example/', TX, f), [ADVERT_EXPECTED.supplier_pkh]);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://koios.example/api/v1/tx_info');
+    assert.deepEqual(calls[0].body, { _tx_hashes: [TX], _inputs: true, _assets: true });
+  });
+  test('keeps every input credential, lowercased, and skips inputs that have none (Byron addresses)', async () => {
+    const entries = [row({ inputs: [input(ADVERT_EXPECTED.supplier_pkh.toUpperCase()), input(null, 'Ae2tdPwUPEZ'), input('bb'.repeat(28)), { tx_hash: 'dd'.repeat(32), tx_index: 0 }] })];
+    assert.deepEqual(await koiosTxInputCreds('https://koios.example', TX, koiosReturning(entries).f), [ADVERT_EXPECTED.supplier_pkh, 'bb'.repeat(28)]);
+  });
+  test('inputs that all lack a payment credential give an empty list (the caller refuses on that)', async () => {
+    assert.deepEqual(await koiosTxInputCreds('https://koios.example', TX, koiosReturning([row({ inputs: [input(null, 'Ae2tdPwUPEZ')] })]).f), []);
+  });
+  test('asks for, and matches, the lowercase hash', async () => {
+    const { f, calls } = koiosReturning([row()]);
+    assert.deepEqual(await koiosTxInputCreds('https://koios.example', TX.toUpperCase(), f), [ADVERT_EXPECTED.supplier_pkh]);
+    assert.deepEqual(calls[0].body._tx_hashes, [TX]);
+  });
+  test('POSTs to <base>/api/v1/tx_info however many slashes end the base', async () => {
+    const urls: string[] = [];
+    const f = (async (u: string) => { urls.push(u); return new Response(JSON.stringify([row()]), { status: 200 }); }) as unknown as typeof fetch;
+    for (const base of ['https://koios.example/', 'https://koios.example', 'https://koios.example//']) await koiosTxInputCreds(base, TX, f);
+    assert.deepEqual(urls, Array(3).fill('https://koios.example/api/v1/tx_info'));
+  });
+  test('failures name the operation and the status, never the URL or a body snippet', async () => {
+    const run = (f: typeof fetch) => koiosTxInputCreds('https://koios.example', TX, f);
+    await assert.rejects(() => run(fakeFetch({}, 500)), safeMessage(/^Koios tx_info answered 500$/));
+    await assert.rejects(() => run(htmlFetch), safeMessage(/^Koios tx_info: .*not valid JSON/));
+    for (const body of [{}, { error: 'x' }, null, 'oops', 7]) await assert.rejects(() => run(fakeFetch(body)), safeMessage(/^Koios tx_info: Koios returned a non-list response$/));
+  });
+  test('a transaction Koios does not know is a clear error, not an empty list that would read as "nobody signed"', async () => {
+    const run = (entries: unknown[]) => koiosTxInputCreds('https://koios.example', TX, koiosReturning(entries).f);
+    await assert.rejects(() => run([]), safeMessage(/^Koios tx_info: transaction not found$/));
+    await assert.rejects(() => run([row({ tx_hash: 'ee'.repeat(32) })]), safeMessage(/^Koios tx_info: transaction not found$/));
+  });
+  test('a row without inputs is a clear error: a ledger transaction always has one, so an empty list is Koios misbehaving', async () => {
+    for (const inputs of [undefined, null, 'x', {}, []]) {
+      await assert.rejects(() => koiosTxInputCreds('https://koios.example', TX, koiosReturning([row({ inputs })]).f), safeMessage(/^Koios tx_info: response has no inputs$/));
+    }
   });
 });

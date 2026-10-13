@@ -87,6 +87,34 @@ export async function koiosUtxoInfo(koiosUrl: string, refs: string[], fetchImpl:
   return body as KoiosUtxo[];
 }
 
+/**
+ * Koios tx_info: the payment credentials of a transaction's inputs, lowercase hex. Spending an input at a key address
+ * needs that key's witness, so a credential equal to a key hash means that key signed the transaction. The request must
+ * set `_inputs`: without it Koios answers with an empty inputs list, which would read as "nobody signed". A ledger
+ * transaction always has an input, so an empty or missing list, like a transaction Koios does not know, is an error and
+ * never an answer.
+ */
+export async function koiosTxInputCreds(koiosUrl: string, txHash: string, fetchImpl: typeof fetch = fetch): Promise<string[]> {
+  const hash = txHash.toLowerCase();
+  const base = koiosUrl.replace(/\/+$/, '');
+  const res = await fetchImpl(`${base}/api/v1/tx_info`, {
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'vector-mcp-builder' },
+    body: JSON.stringify({ _tx_hashes: [hash], _inputs: true, _assets: true }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`Koios tx_info answered ${res.status}`);
+  const body = await readJson<unknown>(res, 'Koios tx_info');
+  if (!Array.isArray(body)) throw new Error('Koios tx_info: Koios returned a non-list response');
+  const tx = body.find((t) => String(t?.tx_hash).toLowerCase() === hash);
+  if (!tx) throw new Error('Koios tx_info: transaction not found');
+  if (!Array.isArray(tx.inputs) || tx.inputs.length === 0) throw new Error('Koios tx_info: response has no inputs');
+  return tx.inputs.flatMap((i: { payment_addr?: { cred?: unknown } } | null) => {
+    const cred = i?.payment_addr?.cred;
+    return typeof cred === 'string' ? [cred.toLowerCase()] : [];
+  });
+}
+
 /** Markdown for the human plus a fenced JSON block the assistant can pass between tools. */
 export function withJson(markdown: string, obj: unknown): string {
   const json = JSON.stringify(obj, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
