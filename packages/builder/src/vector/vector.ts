@@ -14,6 +14,7 @@ import { limiterFor } from './rate-limiter.js';
 import { pollUntilConfirmed, buildConfirmationCheck } from './poll.js';
 import { registerAgentNetworkTools } from './agent-network.js';
 import { registerSelfImprovementTools } from './self-improvement.js';
+import { registerMarketplaceTools } from './marketplace.js';
 import type { VectorDryRunResult } from '@apexfusion/vector-mcp-shared/types';
 import {
   lucidForAddress, buildSendApex, buildSendTokens, buildMultiOutput,
@@ -725,4 +726,7 @@ Sign locally with vector_signer_sign { txCbor }, then broadcast with vector_subm
 
   // Self-Improvement Module tools (Module 6)
   registerSelfImprovementTools(server, identity);
+
+  // Marketplace tools (adverts, escrow, receipts) live in marketplace.ts
+  registerMarketplaceTools(server, identity);
 }

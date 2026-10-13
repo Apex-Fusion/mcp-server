@@ -170,8 +170,8 @@ export function requestSpecHash(a: Pick<AdvertDatum, 'capability_id' | 'max_outp
 export function wirePayloadFor(payload: string): string { return canonicalize([{ content: payload, role: 'user' }]); }
 export function promptHashForPayload(payload: string): string { return sha256Utf8Hex(wirePayloadFor(payload)); }
 
-// Min-ada floor for the escrow's largest future datum (Submitted). Port of minAdaFloor.ts.
-// Sized from encodeEscrowDatum, which is byte-identical to the marketplace's encoder, so it matches minAdaFloor.ts exactly.
+// The min-UTxO floor for the escrow's largest future datum (Submitted). Port of the marketplace's floor (agents-marketplace packages/shared).
+// Sized from encodeEscrowDatum, which is byte-identical to the marketplace's encoder, so it matches the marketplace's floor exactly.
 const UTXO_COST_PER_BYTE = 4310n;
 const OUTPUT_OVERHEAD_BYTES = 160n;
 const SAFETY_MARGIN_LOVELACE = 50_000n;

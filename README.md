@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks, exposing all 24 tools:
+Hosted instances run on both networks, exposing all 27 tools:
 
 | Network | Endpoint |
 |---------|----------|
@@ -95,7 +95,7 @@ limitations.
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
 - **Streamable HTTP transport** - the modern MCP transport at `/mcp`, with any-origin CORS for browser clients and an unauthenticated `GET /health` probe (the legacy SSE pair was removed in 2.0.0)
 
-## MCP Tools (24)
+## MCP Tools (27)
 
 ### Wallet & Queries
 
@@ -145,6 +145,14 @@ limitations.
 | `vector_build_self_improvement_proposal_spend` | Build an unsigned proposal submission - spends the lock and mints the proposal and activity tokens (step 2 of 2, keyless). Two transactions, agent-orchestrated. |
 | `vector_build_self_improvement_critique` | Build an unsigned critique on a proposal - support, oppose, or propose amendments (keyless) |
 | `vector_build_self_improvement_endorse` | Build an unsigned endorsement of a proposal by staking AP3X (keyless) |
+
+### Marketplace (3)
+
+| Tool | Description |
+|------|-------------|
+| `vector_marketplace_list_capabilities` | List the capability ids advertised on the agents marketplace, with supplier counts (read-only, no wallet needed) |
+| `vector_marketplace_list_suppliers` | List supplier adverts: advert ref, model, price, bonds, processing window, status. Filter by capability; free suppliers by default (read-only, no wallet needed) |
+| `vector_marketplace_get_supplier` | Read one advert from the ledger by advert ref (all 13 fields) plus the indexer's live status (read-only, no wallet needed) |
 
 Agent DIDs follow the format: `did:vector:agent:{policyId}:{nftAssetName}`
 

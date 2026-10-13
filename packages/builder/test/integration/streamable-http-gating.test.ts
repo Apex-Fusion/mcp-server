@@ -1,7 +1,9 @@
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
+import { resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { spawnServer, stopRawServer } from '../setup.ts';
@@ -21,7 +23,7 @@ import type { RawServerHandle } from '../setup.ts';
 // callback for why onsessionclosed does not cover them). The reaper and the
 // cap exist because /mcp has no disconnect signal: nothing tells the server
 // a caller dropped its socket without DELETE, so an un-reaped session -
-// transport, McpServer, and its 24 tools - would otherwise sit in memory
+// transport, McpServer, and its tools - would otherwise sit in memory
 // until process exit. Both bounds are exercised below with env-shrunk
 // thresholds (VECTOR_MCP_SESSION_IDLE_MS / VECTOR_MCP_SESSION_SWEEP_MS /
 // VECTOR_MCP_MAX_SESSIONS_PER_IDENTITY), never the real multi-minute
@@ -52,6 +54,13 @@ const TOKEN_BOB = 'tok-bob-shttp-9a06d4c7';
 const AUTH_ENV = { MCP_AUTH_TOKENS: `alice:${TOKEN_ALICE},bob:${TOKEN_BOB}` };
 
 const RATE_LIMIT_PATTERN = /^Rate limit exceeded\. Retry after \d+ms\.$/;
+
+// The full tool set, counted from the checked-in schema snapshot rather than hardcoded: the snapshot is
+// regenerated whenever tools change and the smoke suite pins it to the live tool set, so adding a tool
+// never needs a hand-edit here.
+const EXPECTED_TOOL_COUNT = Object.keys(
+  JSON.parse(readFileSync(resolve(import.meta.dirname!, '../smoke/tool-schemas.snapshot.json'), 'utf-8')),
+).length;
 
 interface RawResponse {
   status: number;
@@ -203,11 +212,11 @@ describe('streamable HTTP gating - MCP_AUTH_TOKENS set', () => {
     await stopRawServer(ctx);
   });
 
-  test('SDK client with a valid token connects over Streamable HTTP and lists exactly 24 tools', async () => {
+  test(`SDK client with a valid token connects over Streamable HTTP and lists exactly ${EXPECTED_TOOL_COUNT} tools`, async () => {
     const client = await connectStreamable(ctx.port, TOKEN_ALICE);
     try {
       const result = await client.listTools();
-      assert.equal(result.tools.length, 24);
+      assert.equal(result.tools.length, EXPECTED_TOOL_COUNT);
     } finally {
       await client.close();
     }
@@ -262,7 +271,7 @@ describe('streamable HTTP gating - MCP_AUTH_TOKENS set', () => {
     ));
     assert.equal(own.status, 200);
     const payload = extractJsonRpc(own.headers, own.body);
-    assert.equal(payload.result.tools.length, 24);
+    assert.equal(payload.result.tools.length, EXPECTED_TOOL_COUNT);
   });
 
   test('GET opens the standalone SSE stream for the session owner; GET with no session id is rejected with 400', async () => {

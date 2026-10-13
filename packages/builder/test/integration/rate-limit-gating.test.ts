@@ -132,4 +132,15 @@ describe('per-identity rate limiting across real registered tools', () => {
       'isError:true with a ReferenceError message ("rateLimiter is not defined") instead of this text'
     );
   });
+
+  test('alice, still exhausted, is also rate-limited on a marketplace.ts tool', async () => {
+    const r = await call(alice, 'vector_marketplace_list_capabilities', {});
+    assert.equal(r.isError, false, 'must be a well-formed rate-limit result, not a thrown error');
+    assert.match(
+      r.text,
+      RATE_LIMIT_PATTERN,
+      'a checkRateLimit/rateLimiter scoping regression in marketplace.ts would surface here as ' +
+      'isError:true with a ReferenceError message ("rateLimiter is not defined") instead of this text'
+    );
+  });
 });
