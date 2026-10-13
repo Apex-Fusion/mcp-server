@@ -11,6 +11,12 @@ export const ADVERT_REF_UTXO = { txHash: 'c8d84c6d67ec67a1efe5e9c6c06d53020e05d1
 export const ACCEPT_WINDOW_MS = 600_000;
 /** Buyer-side buffer added to the advert's processing window when computing deliver_by. */
 export const DELIVER_BY_BUFFER_MS = 180_000;
+/**
+ * The longest processing window (24 h) a Post will accept from an advert. A buyer cannot Reclaim before deliver_by, so the
+ * window an advert declares is how long a buyer's funds can be held; the supplier chooses it, so it is capped here. A caller
+ * deliver_by may be at most this plus DELIVER_BY_BUFFER_MS from now.
+ */
+export const MAX_PROCESSING_MS_CEILING = 86_400_000;
 export const MARKETPLACE_MIN_FEE = 500_000n;
 export const COLLATERAL_MIN_LOVELACE = 5_000_000n;
 export const MIN_UTXO_LOVELACE = 1_000_000n;

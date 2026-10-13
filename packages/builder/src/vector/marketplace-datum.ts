@@ -49,6 +49,14 @@ function asInt(x: unknown, where: string): bigint {
   if (typeof x !== 'bigint') throw new Error(`${where}: expected integer`);
   return x;
 }
+// A JS number rounds integers beyond 2^53 - 1 without a sound. The advert's two sizes become numbers that later code does
+// arithmetic on (deliver_by = now + window), so a value that cannot be held exactly is refused, naming the field.
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+function asSafeInt(x: unknown, where: string): number {
+  const n = asInt(x, where);
+  if (n > MAX_SAFE || n < -MAX_SAFE) throw new Error(`${where}: integer outside the safe range`);
+  return Number(n);
+}
 function optionInt(x: unknown, where: string): number | null {
   const c = asConstr(x, where);
   if (c.index === 1) return null;
@@ -72,8 +80,8 @@ export function decodeAdvertDatum(hex: string): AdvertDatum {
     supplier_pkh: asBytes(f[0], 'advert.supplier_pkh'),
     capability_id: toText(asBytes(f[1], 'advert.capability_id')),
     model: toText(asBytes(f[2], 'advert.model')),
-    max_output_tokens: Number(asInt(f[3], 'advert.max_output_tokens')),
-    max_processing_ms: Number(asInt(f[4], 'advert.max_processing_ms')),
+    max_output_tokens: asSafeInt(f[3], 'advert.max_output_tokens'),
+    max_processing_ms: asSafeInt(f[4], 'advert.max_processing_ms'),
     price_lovelace: asInt(f[5], 'advert.price'),
     supplier_bond_lovelace: asInt(f[6], 'advert.supplier_bond'),
     buyer_bond_lovelace: asInt(f[7], 'advert.buyer_bond'),

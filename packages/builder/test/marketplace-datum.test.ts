@@ -24,6 +24,19 @@ describe('advert datum', () => {
   test('request_spec_hash of that advert matches the live escrow datum', () => {
     assert.equal(requestSpecHash(decodeAdvertDatum(ADVERT_DATUM_HEX)), ESCROW_EXPECTED.request_spec_hash);
   });
+  // max_output_tokens and max_processing_ms become JS numbers that later code does arithmetic on (deliver_by = now + window).
+  // Past 2^53 a Number silently rounds, so the decoder refuses instead of handing on a wrong duration.
+  test('max_output_tokens and max_processing_ms must be safe integers, and the error names the field', () => {
+    const withField = (index: number, value: bigint) => { const c = Data.from(ADVERT_DATUM_HEX) as Constr<Data>; c.fields[index] = value; return Data.to(c); };
+    const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+    for (const [index, name] of [[3, 'max_output_tokens'], [4, 'max_processing_ms']] as const) {
+      assert.equal(decodeAdvertDatum(withField(index, MAX_SAFE))[name], Number.MAX_SAFE_INTEGER, `${name}: 2^53 - 1 is fine`);
+      assert.equal(decodeAdvertDatum(withField(index, -MAX_SAFE))[name], -Number.MAX_SAFE_INTEGER, `${name}: the decoder stays lenient about sign`);
+      for (const bad of [MAX_SAFE + 1n, MAX_SAFE + 2n, -MAX_SAFE - 1n, 2n ** 64n, 10n ** 40n]) {
+        assert.throws(() => decodeAdvertDatum(withField(index, bad)), new RegExp(`advert\.${name}: .*safe`), `${name} = ${bad}`);
+      }
+    }
+  });
 });
 
 describe('escrow datum', () => {

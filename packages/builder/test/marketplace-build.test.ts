@@ -1,7 +1,7 @@
 // packages/builder/test/marketplace-build.test.ts
 import { describe, test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { CML, Constr, Data, getAddressDetails, credentialToAddress } from '@lucid-evolution/lucid';
+import { CML, Constr, Data, getAddressDetails, credentialToAddress, unixTimeToSlot, slotToUnixTime } from '@lucid-evolution/lucid';
 import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
 import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS, FIXTURE_TXHASH } from './fixtures/fixture-provider.ts';
 import { lucidForAddress } from '../src/vector/build.ts';
@@ -9,11 +9,13 @@ import {
   ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_EXPECTED, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX,
 } from './fixtures/marketplace.fixture.ts';
 import {
-  ADVERT_ADDRESS, ESCROW_ADDRESS, DELIVER_BY_BUFFER_MS, ACCEPT_WINDOW_MS, MARKETPLACE_MIN_FEE,
+  ADVERT_ADDRESS, ESCROW_ADDRESS, DELIVER_BY_BUFFER_MS, ACCEPT_WINDOW_MS, MARKETPLACE_MIN_FEE, MAX_PROCESSING_MS_CEILING,
 } from '../src/vector/marketplace-constants.ts';
+import { ensureSlotConfig, paymentKeyHashOf as govPaymentKeyHashOf } from '../src/vector/gov-build.ts';
 import { decodeAdvertDatum, decodeEscrowDatum, encodeEscrowDatum, promptHashForPayload } from '../src/vector/marketplace-datum.ts';
 import {
   planPostEscrow, buildPostEscrow, reserveCollateralInputs, planAccept, planReclaim, paymentKeyHashOf, enterpriseAddressOf,
+  assertEscrowIsOutputZero,
 } from '../src/vector/marketplace-build.ts';
 
 const OWN_PKH = getAddressDetails(OWN_ADDRESS).paymentCredential!.hash;
@@ -44,6 +46,9 @@ describe('paymentKeyHashOf / enterpriseAddressOf', () => {
     assert.equal(paymentKeyHashOf(OWN_ADDRESS), OWN_PKH);
     assert.equal(paymentKeyHashOf(SUPPLIER_ADDRESS), ADVERT_EXPECTED.supplier_pkh);
     assert.equal(enterpriseAddressOf(ADVERT_EXPECTED.supplier_pkh), SUPPLIER_ADDRESS);
+  });
+  test('paymentKeyHashOf is the gov-build function, re-exported: one definition', () => {
+    assert.equal(paymentKeyHashOf, govPaymentKeyHashOf);
   });
   test('a script address or garbage is refused with a readable error', () => {
     assert.throws(() => paymentKeyHashOf(ESCROW_ADDRESS), /verification key/);
@@ -92,6 +97,25 @@ describe('planPostEscrow', () => {
   test('an explicit deliver_by is honoured when it leaves the supplier its full window', () => {
     assert.equal(planPostEscrow(advert, ADVERT_REF, OWN_PKH, 'x', NOW, NOW + advert.max_processing_ms + 1).deliverBy, NOW + advert.max_processing_ms + 1);
   });
+  test('refuses an advert whose processing window is longer than 24 h, and lets exactly 24 h through', () => {
+    assert.equal(MAX_PROCESSING_MS_CEILING, 86_400_000);
+    const plan = (max_processing_ms: number) => planPostEscrow({ ...advert, max_processing_ms }, ADVERT_REF, OWN_PKH, 'x', NOW);
+    assert.equal(plan(MAX_PROCESSING_MS_CEILING).deliverBy, NOW + MAX_PROCESSING_MS_CEILING + DELIVER_BY_BUFFER_MS);
+    assert.throws(() => plan(MAX_PROCESSING_MS_CEILING + 1), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, new RegExp(`^Advert ${ADVERT_REF} advertises a processing window of ${MAX_PROCESSING_MS_CEILING + 1} ms, longer than`));
+      return true;
+    });
+  });
+  test('refuses a caller deliver_by more than 24 h plus the buffer from now, and lets exactly that limit through', () => {
+    const limit = NOW + MAX_PROCESSING_MS_CEILING + DELIVER_BY_BUFFER_MS;
+    assert.equal(planPostEscrow(advert, ADVERT_REF, OWN_PKH, 'x', NOW, limit).deliverBy, limit);
+    assert.throws(() => planPostEscrow(advert, ADVERT_REF, OWN_PKH, 'x', NOW, limit + 1), /deliver_by is \d+ ms from now/);
+  });
+  test('catches a deliver_by given in microseconds (too far away) or in seconds (inside the supplier\'s window)', () => {
+    assert.throws(() => planPostEscrow(advert, ADVERT_REF, OWN_PKH, 'x', NOW, NOW * 1000), /deliver_by is .* POSIX milliseconds/);
+    assert.throws(() => planPostEscrow(advert, ADVERT_REF, OWN_PKH, 'x', NOW, Math.floor(NOW / 1000) + 3600), /deliver_by must leave the supplier its full window/);
+  });
   test('refuses a retired advert and a buyer who is the supplier', () => {
     assert.throws(() => planPostEscrow({ ...advert, status: 'Retired' }, ADVERT_REF, OWN_PKH, 'x', 1), /retired/);
     assert.throws(() => planPostEscrow(advert, ADVERT_REF, advert.supplier_pkh, 'x', 1), /cannot be the supplier/);
@@ -114,19 +138,22 @@ describe('planPostEscrow', () => {
     }
   });
   test('hostile numbers in an advert come back as a clear Error instead of a corrupt datum or a bare RangeError', () => {
-    const hostile: Array<[string, Partial<typeof advert>]> = [
-      ['negative price', { price_lovelace: -1n }],
-      ['price past uint64', { price_lovelace: 2n ** 64n }],
-      ['supplier bond past uint64', { supplier_bond_lovelace: 2n ** 70n }],
-      ['negative buyer bond', { buyer_bond_lovelace: -5n }],
-      ['infinite window', { max_processing_ms: Number.POSITIVE_INFINITY }],
-      ['negative window', { max_processing_ms: -1_000_000 }],
-      ['window past the safe-integer range', { max_processing_ms: 1e30 }],
+    const datumFit = 'cannot be posted: its terms do not fit an escrow datum';
+    const unusable = 'has an unusable processing window';
+    const hostile: Array<[string, Partial<typeof advert>, string]> = [
+      ['negative price', { price_lovelace: -1n }, datumFit],
+      ['price past uint64', { price_lovelace: 2n ** 64n }, datumFit],
+      ['supplier bond past uint64', { supplier_bond_lovelace: 2n ** 70n }, datumFit],
+      ['negative buyer bond', { buyer_bond_lovelace: -5n }, datumFit],
+      ['infinite window', { max_processing_ms: Number.POSITIVE_INFINITY }, unusable],
+      ['negative window', { max_processing_ms: -1_000_000 }, unusable],
+      ['fractional window', { max_processing_ms: 1.5 }, unusable],
+      ['window past the safe-integer range', { max_processing_ms: 1e30 }, 'advertises a processing window of'],
     ];
-    for (const [name, over] of hostile) {
+    for (const [name, over, message] of hostile) {
       assert.throws(() => planPostEscrow({ ...advert, ...over }, ADVERT_REF, OWN_PKH, 'x', NOW), (err: unknown) => {
         assert.ok(err instanceof Error, `${name}: an Error`);
-        assert.match(err.message, new RegExp(`^Advert ${ADVERT_REF} (cannot be posted: its terms do not fit an escrow datum|has an unusable processing window)`), `${name}: ${err.message}`);
+        assert.match(err.message, new RegExp(`^Advert ${ADVERT_REF} ${message}`), `${name}: ${err.message}`);
         return true;
       }, name);
     }
@@ -157,6 +184,14 @@ describe('reserveCollateralInputs', () => {
     assert.deepEqual(reserveCollateralInputs([token, pure, big], 2_300_000n), [token, big], 'the smallest PURE output is reserved, not the smaller one with a token');
     assert.equal(reserveCollateralInputs([token, utxo(8, { lovelace: 50_000_000n, ['22'.repeat(28) + '54']: 3n })], 2_300_000n), undefined, 'no pure output at all');
   });
+  test('removes the reserved output by outref, so a structural copy of it in the list cannot slip into the inputs', () => {
+    const utxo = (i: number, assets: UTxO['assets']): UTxO => ({ ...FIXTURE_UTXOS[0], outputIndex: i, assets });
+    const collateral = utxo(1, { lovelace: 5_000_000n });
+    const big = utxo(2, { lovelace: 900_000_000n });
+    const copy: UTxO = { ...collateral, assets: { ...collateral.assets } };
+    assert.notEqual(copy, collateral);
+    assert.deepEqual(reserveCollateralInputs([big, collateral, copy], 2_300_000n), [big]);
+  });
   test('returns undefined when what is left cannot pay the lock, the minimum fee and one change output', () => {
     const wallet = [FIXTURE_UTXOS[1], { ...FIXTURE_UTXOS[1], outputIndex: 9, assets: { lovelace: 6_000_000n } }]; // reserve 5, keep 6
     assert.ok(reserveCollateralInputs(wallet, 6_000_000n - MARKETPLACE_MIN_FEE - 1_000_000n) !== undefined);
@@ -167,13 +202,14 @@ describe('reserveCollateralInputs', () => {
 // ─── The offline Post build ──────────────────────────────────────────────────
 // The advert comes from Koios utxo_info (readAdvert) and its author from Koios tx_info; both are answered by this fake.
 type KoiosFake = { f: typeof fetch; calls: Array<{ path: string; body: any }> };
-function koiosFake(opts: { advertDatum?: string; address?: string; spent?: boolean | undefined; inputCreds?: unknown[]; txInfoStatus?: number } = {}): KoiosFake {
+function koiosFake(opts: { advertDatum?: string; address?: string; spent?: boolean | undefined; inputCreds?: unknown[]; utxoInfoStatus?: number; txInfoStatus?: number } = {}): KoiosFake {
   const calls: KoiosFake['calls'] = [];
   const f = (async (url: string, init: any) => {
     const body = JSON.parse(init.body);
     const path = '/' + new URL(url).pathname.split('/').slice(-3).join('/'); // /api/v1/<route>, whatever prefix VECTOR_KOIOS_URL carries
     calls.push({ path, body });
     if (path === '/api/v1/utxo_info') {
+      if (opts.utxoInfoStatus) return new Response('{}', { status: opts.utxoInfoStatus });
       return new Response(JSON.stringify([{
         tx_hash: ADVERT_TX, tx_index: 0, address: opts.address ?? ADVERT_ADDRESS, value: '2000000',
         ...('spent' in opts ? { is_spent: opts.spent } : { is_spent: false }),
@@ -215,6 +251,7 @@ describe('buildPostEscrow (offline)', () => {
     assert.equal(d.prompt_hash, promptHashForPayload('hello'));
     assert.equal(r.escrowRef, `${r.txHash}#0`);
     assert.equal(r.promptHash, promptHashForPayload('hello'));
+    assert.equal(r.collateralKept, true, 'the default wallet has a 5-unit output to spare and the rest funds the lock');
   });
   test('the datum in the transaction is the marketplace-identical encoding of the plan, byte for byte', async () => {
     const r = await post(koiosFake());
@@ -358,13 +395,88 @@ describe('buildPostEscrow (offline)', () => {
     const smallLucid = await lucidForAddress(small, OWN_ADDRESS);
     await assert.rejects(() => buildPostEscrow(smallLucid, small, { changeAddress: OWN_ADDRESS, advertRef: ADVERT_REF, payload: 'hello', nowMs: NOW }, koiosFake().f), /does not have enough funds/);
   });
-  test('a wallet with no pure 5-unit output still builds (the change becomes the next collateral)', async () => {
+  test('a wallet whose only pure output is needed for the lock still builds, reports collateralKept false, and the change replaces it', async () => {
     const single = new FixtureProvider([{ ...FIXTURE_UTXOS[0], assets: { lovelace: 800_000_000n } }]);
     const singleLucid = await lucidForAddress(single, OWN_ADDRESS);
     const r = await buildPostEscrow(singleLucid, single, { changeAddress: OWN_ADDRESS, advertRef: ADVERT_REF, payload: 'hello', nowMs: NOW }, koiosFake().f);
     const outs = outputs(r.txCbor);
     assert.equal(outs[0].address, ESCROW_ADDRESS);
-    assert.ok(outs.slice(1).some((o) => o.address === OWN_ADDRESS && o.lovelace >= 5_000_000n), 'a change output of at least 5 units');
+    assert.equal(r.collateralKept, false);
+    assert.ok(outs.slice(1).some((o) => o.address === OWN_ADDRESS && o.lovelace >= 5_000_000n), 'the change output is at least 5 units here, but nothing guarantees that in general');
+  });
+  test('a wallet with no pure 5-unit output at all builds and reports collateralKept false', async () => {
+    const at = (outputIndex: number): UTxO => ({ txHash: FIXTURE_TXHASH, outputIndex, address: OWN_ADDRESS, assets: { lovelace: 4_000_000n } });
+    const small = new FixtureProvider([at(0), at(1), at(2)]);
+    const smallLucid = await lucidForAddress(small, OWN_ADDRESS);
+    const r = await buildPostEscrow(smallLucid, small, { changeAddress: OWN_ADDRESS, advertRef: ADVERT_REF, payload: 'hello', nowMs: NOW }, koiosFake().f);
+    assert.equal(outputs(r.txCbor)[0].address, ESCROW_ADDRESS);
+    assert.equal(r.collateralKept, false);
+  });
+  test('when the reserved selection cannot complete (change with a token needs more lovelace), it retries with the whole wallet and says the collateral was not kept', async () => {
+    // The reservation's arithmetic is lovelace only: 3.8 units clears lock + fee + 1 for change, but the change carries a token and needs more.
+    const wallet: UTxO[] = [
+      { txHash: FIXTURE_TXHASH, outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 5_000_000n } },
+      { txHash: FIXTURE_TXHASH, outputIndex: 1, address: OWN_ADDRESS, assets: { lovelace: 3_800_000n, ['11'.repeat(28) + '54']: 1n } },
+    ];
+    assert.ok(reserveCollateralInputs(wallet, ESCROW_LOCKED_LOVELACE) !== undefined, 'the reservation believes the rest is enough');
+    const tight = new FixtureProvider(wallet);
+    const tightLucid = await lucidForAddress(tight, OWN_ADDRESS);
+    const r = await buildPostEscrow(tightLucid, tight, { changeAddress: OWN_ADDRESS, advertRef: ADVERT_REF, payload: 'hello', nowMs: NOW }, koiosFake().f);
+    assert.equal(r.collateralKept, false);
+    assert.ok(inputRefs(r.txCbor).includes(`${FIXTURE_TXHASH}#0`), 'the held-back output was needed after all');
+    assert.equal(outputs(r.txCbor)[0].address, ESCROW_ADDRESS);
+  });
+  test('a Koios failure while reading the advert names the advert and the step', async () => {
+    await assert.rejects(() => post(koiosFake({ utxoInfoStatus: 502 })), new RegExp(`Could not read advert ${ADVERT_REF}: Koios utxo_info answered 502$`));
+  });
+  test('checks that the escrow really is output 0 before returning the transaction (escrow_ref assumes it)', async () => {
+    // A lucid whose builder puts another payment first, so the escrow lands at output 1 and escrow_ref would point at the wrong output.
+    const rogue = { ...lucid, newTx: () => lucid.newTx().pay.ToAddress(OWN_ADDRESS, { lovelace: 1_500_000n }) } as LucidEvolution;
+    await assert.rejects(() => buildPostEscrow(rogue, provider, { changeAddress: OWN_ADDRESS, advertRef: ADVERT_REF, payload: 'hello', nowMs: NOW }, koiosFake().f), /output 0/);
+  });
+});
+
+describe('assertEscrowIsOutputZero', () => {
+  const provider = new FixtureProvider(FIXTURE_UTXOS);
+  let lucid: LucidEvolution;
+  const plan = planPostEscrow(decodeAdvertDatum(ADVERT_DATUM_HEX), ADVERT_REF, OWN_PKH, 'hello', NOW);
+  const expected = { datumHex: encodeEscrowDatum(plan.datum), lockLovelace: plan.lockLovelace };
+  type Tx = ReturnType<LucidEvolution['newTx']>;
+  const cbor = async (build: (tx: Tx) => Tx) => (await build(lucid.newTx()).complete()).toCBOR();
+  const escrow = (tx: Tx, over: { lovelace?: bigint; datum?: string; kind?: 'inline' | 'asHash' } = {}) =>
+    tx.pay.ToAddressWithData(ESCROW_ADDRESS, { kind: over.kind ?? 'inline', value: over.datum ?? expected.datumHex }, { lovelace: over.lovelace ?? expected.lockLovelace });
+  before(async () => { lucid = await lucidForAddress(provider, OWN_ADDRESS); });
+
+  test('accepts a transaction whose output 0 is the escrow with the planned datum and lock', async () => {
+    assertEscrowIsOutputZero(await cbor((tx) => escrow(tx)), expected);
+  });
+  test('refuses an output 0 that is not at the escrow address', async () => {
+    const tx = await cbor((t) => t.pay.ToAddress(OWN_ADDRESS, { lovelace: expected.lockLovelace }));
+    assert.throws(() => assertEscrowIsOutputZero(tx, expected), /output 0/);
+  });
+  test('refuses the planned datum and lock paid to another address', async () => {
+    const tx = await cbor((t) => t.pay.ToAddressWithData(OWN_ADDRESS, { kind: 'inline', value: expected.datumHex }, { lovelace: expected.lockLovelace }));
+    assert.throws(() => assertEscrowIsOutputZero(tx, expected), /output 0/);
+  });
+  test('refuses a transaction with no outputs at all', () => {
+    // body {inputs: [], outputs: [], fee: 0}, empty witness set, valid, no auxiliary data: the smallest thing CML parses
+    assert.throws(() => assertEscrowIsOutputZero('84a3008001800200a0f5f6', expected), /output 0/);
+  });
+  test('refuses an escrow that is output 1 behind another payment', async () => {
+    const tx = await cbor((t) => escrow(t.pay.ToAddress(OWN_ADDRESS, { lovelace: 1_500_000n })));
+    assert.throws(() => assertEscrowIsOutputZero(tx, expected), /output 0/);
+  });
+  test('refuses another lock amount', async () => {
+    const tx = await cbor((t) => escrow(t, { lovelace: expected.lockLovelace + 1n }));
+    assert.throws(() => assertEscrowIsOutputZero(tx, expected), /output 0/);
+  });
+  test('refuses another datum', async () => {
+    const tx = await cbor((t) => escrow(t, { datum: encodeEscrowDatum({ ...plan.datum, prompt_hash: 'ab'.repeat(32) }) }));
+    assert.throws(() => assertEscrowIsOutputZero(tx, expected), /output 0/);
+  });
+  test('refuses a datum hash in place of the inline datum', async () => {
+    const tx = await cbor((t) => escrow(t, { kind: 'asHash' }));
+    assert.throws(() => assertEscrowIsOutputZero(tx, expected), /output 0/);
   });
 });
 
@@ -404,11 +516,71 @@ describe('planAccept / planReclaim', () => {
     assert.throws(() => planReclaim(open, ESCROW_EXPECTED.buyer_pkh, open.deliver_by - 1), /deliver_by/);
     assert.throws(() => planReclaim(base, ESCROW_EXPECTED.buyer_pkh, base.deliver_by + 1), /Open or Claimed/);
   });
-  test('reclaim also covers a Claimed escrow, opens exactly at deliver_by, and only for the buyer', () => {
+  test('reclaim also covers a Claimed escrow, and only for the buyer', () => {
     const claimed = { ...ESCROW_EXPECTED, state: 'Claimed' as const };
-    const p = planReclaim(claimed, ESCROW_EXPECTED.buyer_pkh, claimed.deliver_by);
-    assert.equal(p.validFrom, claimed.deliver_by, 'the validity window starts at deliver_by, not before');
-    assert.ok(p.validTo > p.validFrom);
-    assert.throws(() => planReclaim(claimed, 'cc'.repeat(28), claimed.deliver_by + 1), /not the buyer/);
+    const opensAt = Math.ceil((claimed.deliver_by + 1) / 1000) * 1000;
+    assert.equal(planReclaim(claimed, ESCROW_EXPECTED.buyer_pkh, opensAt).redeemerHex, 'd87c80');
+    assert.throws(() => planReclaim(claimed, 'cc'.repeat(28), opensAt), /not the buyer/);
+  });
+});
+
+// escrow.ak handle_reclaim requires after_or_at(validity_range, deliver_by): the lower bound as the script sees it must be
+// >= deliver_by (common.ak after_or_at, inclusive branch). Lucid turns validFrom into the slot that CONTAINS it (floor) and the
+// script sees that slot's start, so a validFrom taken straight from an unaligned deliver_by lands up to 999 ms before it and the
+// validator would reject the transaction. The plan therefore opens at the first whole second strictly after deliver_by.
+describe('planReclaim validity range', () => {
+  before(async () => { await ensureSlotConfig(new FixtureProvider([])); });
+  const lowerBoundMs = (validFrom: number) => slotToUnixTime('Mainnet', unixTimeToSlot('Mainnet', validFrom));
+  const buyer = ESCROW_EXPECTED.buyer_pkh;
+  const open = { ...ESCROW_EXPECTED }; // deliver_by 1786530304711: not a whole second
+  const opens = Math.ceil((open.deliver_by + 1) / 1000) * 1000; // 1786530305000
+
+  test('the fixture deliver_by is not second-aligned, which is what makes a validFrom of deliver_by itself wrong', () => {
+    assert.notEqual(open.deliver_by % 1000, 0);
+    assert.ok(lowerBoundMs(open.deliver_by) < open.deliver_by, 'the slot Lucid picks for deliver_by starts before it');
+  });
+  test('is refused at deliver_by itself and until the next whole second, with an error that names deliver_by and when it opens', () => {
+    for (const now of [open.deliver_by, open.deliver_by + 1, opens - 1]) {
+      assert.throws(() => planReclaim(open, buyer, now), (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /deliver_by/);
+        assert.match(err.message, /opens/);
+        assert.ok(err.message.includes(new Date(open.deliver_by).toISOString()), err.message);
+        assert.ok(err.message.includes(new Date(opens).toISOString()), err.message);
+        return true;
+      }, `now = ${now}`);
+    }
+  });
+  test('at the opening second the validity start, as the slot Lucid picks, is not before deliver_by', () => {
+    const p = planReclaim(open, buyer, opens);
+    assert.equal(p.validFrom, opens);
+    assert.ok(lowerBoundMs(p.validFrom) >= open.deliver_by, `lower bound ${lowerBoundMs(p.validFrom)} is before deliver_by ${open.deliver_by}`);
+  });
+  test('later reclaims keep the lower bound at or after the opening second and leave ten minutes to sign', () => {
+    for (const later of [1, 59_999, 60_000, 60_001, 3_600_000 + 123]) {
+      const now = opens + later;
+      const p = planReclaim(open, buyer, now);
+      assert.equal(p.validFrom, Math.max(opens, now - 60_000), `later = ${later}`);
+      assert.ok(lowerBoundMs(p.validFrom) >= open.deliver_by, `later = ${later}`);
+      assert.equal(p.validTo, now + 600_000, `later = ${later}`);
+    }
+  });
+  test('an aligned deliver_by opens one whole second after it: strictly after, never at', () => {
+    const aligned = { ...open, deliver_by: 1_786_530_304_000 };
+    assert.throws(() => planReclaim(aligned, buyer, aligned.deliver_by), /opens/);
+    assert.throws(() => planReclaim(aligned, buyer, aligned.deliver_by + 999), /opens/);
+    assert.equal(planReclaim(aligned, buyer, aligned.deliver_by + 1000).validFrom, aligned.deliver_by + 1000);
+  });
+  test('for any deliver_by the first accepted reclaim has a lower bound the validator accepts, and the buyer waits at most one extra second', () => {
+    let x = 20260; // a fixed LCG, so a failure reproduces
+    for (let i = 0; i < 400; i++) {
+      x = (x * 1103515245 + 12345) % 2147483648;
+      const d = { ...open, deliver_by: 1_786_530_000_000 + (x % 5_000_000) };
+      const opensAt = Math.ceil((d.deliver_by + 1) / 1000) * 1000;
+      assert.throws(() => planReclaim(d, buyer, opensAt - 1), /opens/, `deliver_by ${d.deliver_by}`);
+      const p = planReclaim(d, buyer, opensAt);
+      assert.ok(lowerBoundMs(p.validFrom) >= d.deliver_by, `deliver_by ${d.deliver_by}`);
+      assert.ok(opensAt - d.deliver_by <= 1000, `deliver_by ${d.deliver_by}`);
+    }
   });
 });
