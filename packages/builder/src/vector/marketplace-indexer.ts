@@ -48,7 +48,11 @@ async function readJsonCapped<T>(res: Response, what: string, max: number): Prom
       if (total > max) { over = true; break; }
       chunks.push(value);
     }
-  } catch { throw new Error(`${what}: response was not valid JSON`); }
+  } catch (err) {
+    // The call's time budget runs to the end of the body (AbortSignal.timeout), so a list that stalls part-way says so, and how far it got.
+    if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) throw new Error(`${what}: indexer list read timed out after ${total} bytes`);
+    throw new Error(`${what}: response was not valid JSON`);
+  }
   if (over) { await reader.cancel().catch(() => {}); throw tooLong(); }
   try { return JSON.parse(new TextDecoder().decode(Buffer.concat(chunks, total))) as T; } catch { throw new Error(`${what}: response was not valid JSON`); }
 }
@@ -105,14 +109,14 @@ export async function fetchSupplier(pkh: string, opts: Opts = {}): Promise<Suppl
 export const ESCROWS_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
- * The indexer's rows for the escrows of one buyer (`?buyer=`) or one supplier (`?supplier=`): one row for each state an escrow
- * reached (Open, Claimed, Submitted), keyed by the UTxO that state was made in, and kept after that UTxO is spent. They are the
- * indexer's word and nothing more: they say where to look, and what they name is read from Koios before it is used. The list is
- * returned as it came, each entry untrusted (see submittedRefsOf in marketplace-lineage.ts), and is read to ESCROWS_MAX_BYTES at most.
+ * The indexer's rows for the escrows of one buyer (`?buyer=`): one row for each state an escrow reached (Open, Claimed, Submitted),
+ * keyed by the UTxO that state was made in, and kept after that UTxO is spent. They are the indexer's word and nothing more: they say
+ * where to look, and what they name is read from Koios before it is used. The list is returned as it came, each entry untrusted (see
+ * submittedRefsOf in marketplace-lineage.ts), and is read to ESCROWS_MAX_BYTES at most. A read that outlasts the call's time budget
+ * fails saying so and how many bytes it had.
  */
-export async function fetchEscrows(by: { buyer: string } | { supplier: string }, opts: Opts = {}): Promise<unknown[]> {
-  const query = 'buyer' in by ? `buyer=${encodeURIComponent(by.buyer)}` : `supplier=${encodeURIComponent(by.supplier)}`;
-  return getList<unknown>(`${INDEXER_URL}/escrows?${query}`, opts, 'list escrows', ESCROWS_MAX_BYTES);
+export async function fetchEscrows(buyerPkh: string, opts: Opts = {}): Promise<unknown[]> {
+  return getList<unknown>(`${INDEXER_URL}/escrows?buyer=${encodeURIComponent(buyerPkh)}`, opts, 'list escrows', ESCROWS_MAX_BYTES);
 }
 
 /**

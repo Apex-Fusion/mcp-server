@@ -55,6 +55,16 @@ const askedConfiguredKoios = (urls: Array<string | undefined>) => {
   for (const u of urls) assert.ok(u!.startsWith(`${VECTOR_KOIOS_URL.replace(/\/+$/, '')}/api/v1/`), `${u} is not under ${VECTOR_KOIOS_URL}`);
 };
 const TIPS = '\n\n**Troubleshooting Tips:**\n';
+/**
+ * What a failed send or a failed job says about the escrow, word for word. A tool that gave up does not know where the escrow stands: the
+ * supplier's Submit may still land (after a submit_timeout, and a 200 is served only after the Submit confirmed), a Submitted escrow cannot be
+ * reclaimed, and the supplier may Release it when the accept window is over.
+ */
+const CHECK_THE_ESCROW = "This tool does not know the escrow's state and the supplier's Submit may still land. Check the escrow: if it is Submitted, accept within the window. " +
+  "Accept must land within 600 s of the supplier's Submit; after that the supplier may Release and keep everything locked (price + both bonds + any floor excess). ";
+const RECLAIM_AFTER = (when: string) => `If it is Open or Claimed, reclaim after ${when} with vector_build_marketplace_reclaim.`;
+/** The deliver_by of the fixture escrow (1786530304711 ms), as the poll prints it. */
+const DELIVER_BY_ISO = '2026-08-12T10:25:04.711Z';
 
 const SEND = 'vector_marketplace_send_job';
 const POLL = 'vector_marketplace_get_job';
@@ -65,7 +75,7 @@ describe(SEND, () => {
   const args = { escrow_ref: ESCROW_REF, payload: PAYLOAD, ...BUYER };
   const SEND_TIPS = `${TIPS}1. Wait for vector_await_transaction to confirm the post, and pass the escrow_ref the post returned\n` +
     '2. buyerAddress must be the wallet that posted and funded the escrow, and payload exactly the one you posted with\n' +
-    '3. If the supplier cannot take the job, the escrow stays as it is until deliver_by; vector_build_marketplace_reclaim returns it after that';
+    `3. ${CHECK_THE_ESCROW}${RECLAIM_AFTER('its deliver_by')}`;
 
   test('sends the job and names the job id and the escrow, in the markdown and in the JSON', async () => {
     const s = run();
@@ -218,14 +228,32 @@ describe(POLL, () => {
     assert.equal(lineOf(markdownOf(t), '**Submitted output the supplier reports:**'), `**Submitted output the supplier reports:** \`${reported}\` (the supplier's word; vector_marketplace_verify_receipt reads the chain)`);
     assert.equal(jsonOf(t).submitted_ref, reported);
   });
-  test('failed says the escrow stays as it is and points to the reclaim; it does not say a bond is forfeited', async () => {
+  test('failed does not claim to know the escrow: the supplier\'s Submit may still land, what to do in each state, and when it can be reclaimed; no bond is said to be forfeited', async () => {
     run({ escrow: 'claimed', answer: () => reply(502, { status: 'failed', reason: 'service_timeout', message: 'the service did not answer' }) });
     const t = await call(POLL, args);
     assert.equal(markdownOf(t),
       `# Job ${JOB_ID}: failed\n\n**Reason:** service_timeout\n**Supplier said:** the service did not answer\n\n` +
-      'The job failed; the escrow stays as it is. If it is still Open or Claimed, reclaim it after deliver_by with vector_build_marketplace_reclaim.');
+      `The job failed. ${CHECK_THE_ESCROW}${RECLAIM_AFTER(`${DELIVER_BY_ISO} (its deliver_by)`)}`);
     assert.deepEqual(jsonOf(t), { state: 'failed', job_id: JOB_ID, escrow_ref: ESCROW_REF, reason: 'service_timeout', message: 'the service did not answer' });
     assert.doesNotMatch(t, /forfeit/i);
+    assert.doesNotMatch(t, /stays as it is/);
+    assert.equal(new Date(world!.posted.deliver_by).toISOString(), DELIVER_BY_ISO, 'the fixture escrow has the deliver_by the text is pinned to');
+  });
+  test('every failure of a job says the same about the escrow, a 200 without a receipt included (it is served only after the Submit confirmed)', async () => {
+    const answers: Array<[string, () => ReturnType<typeof reply>]> = [
+      ['malformed_response', () => reply(200, { choices: [{ message: { content: 'out' } }], escrow_ref: ESCROW_REF })],
+      ['escrow_mismatch', () => finished(RESULT, { escrow_ref: `${'bb'.repeat(32)}#0` })],
+      ['submit_timeout', () => reply(504, { status: 'failed', reason: 'submit_timeout', message: 'the submit did not confirm' })],
+      ['http_503', () => reply(503, 'upstream down')],
+    ];
+    for (const [reason, answer] of answers) {
+      for (const escrow of ['open', 'claimed', 'submitted'] as const) {
+        run({ escrow, answer });
+        const md = markdownOf(await call(POLL, args));
+        assert.ok(md.includes(`**Reason:** ${reason}`), `${reason} / ${escrow}: ${md}`);
+        assert.ok(md.endsWith(`The job failed. ${CHECK_THE_ESCROW}${RECLAIM_AFTER(`${DELIVER_BY_ISO} (its deliver_by)`)}`), `${reason} / ${escrow}: ${md}`);
+      }
+    }
   });
   test('a 200 without a receipt is failed with malformed_response, and an answer for another escrow with escrow_mismatch', async () => {
     run({ escrow: 'claimed', answer: () => reply(200, { choices: [{ message: { content: 'out' } }], escrow_ref: ESCROW_REF }) });

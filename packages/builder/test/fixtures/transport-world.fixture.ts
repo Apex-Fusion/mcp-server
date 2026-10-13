@@ -91,9 +91,10 @@ export interface Scenario {
   /**
    * The marketplace indexer: the rows `GET /escrows?buyer=` answers with (default: a row for each state the escrow reached, as the
    * real one lists them, kept after the output is spent, and a row for the decoy when there is one), the rows a function makes of the
-   * honest ones and the decoy's, or a failing answer: a status, a body that is no JSON, a failed connection.
+   * honest ones and the decoy's, or a failing answer: a status, a body that is no JSON, a failed connection, or a list that stalls
+   * after 14 bytes and is cut by the time budget of the call (`timesOut`).
    */
-  indexer?: { rows?: unknown[] | ((honest: unknown[], decoy: unknown) => unknown[]); status?: number; raw?: string; fails?: Error };
+  indexer?: { rows?: unknown[] | ((honest: unknown[], decoy: unknown) => unknown[]); status?: number; raw?: string; fails?: Error; timesOut?: boolean };
   /**
    * A copy of the escrow's Submitted output with a receipt hash of its own (DECOY_SUBMITTED_HASH), locked at the escrow credential by
    * a transaction that spent no escrow output (DECOY_TX): Koios knows it, the indexer lists it, and nothing links it to the escrow.
@@ -167,6 +168,12 @@ export function scenario(o: Scenario = {}) {
       indexerUrls.push(u);
       if (indexer.fails) throw indexer.fails;
       if (indexer.status) return new Response(HOSTILE, { status: indexer.status });
+      if (indexer.timesOut) {
+        let sent = false;
+        return new Response(new ReadableStream<Uint8Array>({
+          pull(c) { if (!sent) { sent = true; c.enqueue(new TextEncoder().encode('[{"utxo_ref":"')); } else c.error(new DOMException('The operation was aborted due to timeout', 'TimeoutError')); },
+        }), { status: 200 });
+      }
       return new Response(indexer.raw ?? JSON.stringify(indexerRows), { status: 200 });
     }
     if (u.endsWith('/api/v1/tx_info') && funder === 'unreachable' && (JSON.parse(init.body)._tx_hashes as string[]).includes(ESCROW_TX)) {

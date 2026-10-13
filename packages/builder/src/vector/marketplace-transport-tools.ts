@@ -9,10 +9,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Provider } from '@lucid-evolution/lucid';
 import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { withJson } from './marketplace-indexer.js';
-import { formatOutRef, parseOutRef } from './marketplace-datum.js';
 import { sendJob, getJob, verifyJob } from './marketplace-transport.js';
 import type { Check, ReceiptChecks, VerifiedJob } from './marketplace-transport.js';
-import { text, fail, cell, ACCEPT_WINDOW_S, RELEASE_TAKE } from './marketplace-shared.js';
+import { text, fail, cell, isoOrRaw, ACCEPT_WINDOW_S, RELEASE_TAKE } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
 
 /** How much of a result the markdown shows. The fenced JSON block always carries all of it. */
@@ -22,8 +21,14 @@ const BUYER_NOTE = "This tool trusts the buyer address and escrow ref your assis
 /** What a missed accept window costs, as the build tools say it. */
 const ACCEPT_CLOCK = `Accept must land within ${ACCEPT_WINDOW_S} s of the supplier's Submit; after that the supplier may Release and ${RELEASE_TAKE}.`;
 
-/** The canonical form of an escrow ref the module has already accepted. */
-const canonical = (ref: string): string => { const r = parseOutRef(ref); return formatOutRef(r.txHash, r.outputIndex); };
+/**
+ * What a failed send or a failed job leaves open. A tool that gave up does not know where the escrow stands: the supplier's Submit may
+ * still land after a submit_timeout, and a 200 without a usable receipt (malformed_response) is served only after the Submit has
+ * confirmed. A Submitted escrow cannot be reclaimed, and the supplier may Release it once the accept window is over.
+ */
+const CHECK_THE_ESCROW = (reclaimAfter: string): string =>
+  "This tool does not know the escrow's state and the supplier's Submit may still land. Check the escrow: if it is Submitted, accept within the window. " +
+  `${ACCEPT_CLOCK} If it is Open or Claimed, reclaim after ${reclaimAfter} with vector_build_marketplace_reclaim.`;
 
 /** `body` in a code fence that nothing inside it can close: longer than any run of backticks in the text. */
 function fenced(body: string): string {
@@ -86,7 +91,7 @@ export function registerMarketplaceTransportTools(server: McpServer, checkRateLi
       const limited = checkRateLimit(); if (limited) return limited;
       try {
         const r = await sendJob(providerFor(), VECTOR_KOIOS_URL, { escrowRef: escrow_ref, payload, buyerAddress });
-        const ref = canonical(escrow_ref);
+        const ref = r.escrowRef;
         const md = `# Job sent\n\n**Job id:** \`${r.jobId}\` · **status:** ${cell(r.status, 100)}\n**Escrow:** \`${ref}\` · **capability:** \`${cell(r.capabilityId)}\`\n\n` +
           `The supplier answered with this job id. Poll with vector_marketplace_get_job { escrow_ref, job_id, buyerAddress } every few seconds until it returns a result and a receipt. ` +
           `Nothing is verified yet: check the receipt with vector_marketplace_verify_receipt before you accept.`;
@@ -95,7 +100,7 @@ export function registerMarketplaceTransportTools(server: McpServer, checkRateLi
         return fail('send job', err, [
           'Wait for vector_await_transaction to confirm the post, and pass the escrow_ref the post returned',
           'buyerAddress must be the wallet that posted and funded the escrow, and payload exactly the one you posted with',
-          'If the supplier cannot take the job, the escrow stays as it is until deliver_by; vector_build_marketplace_reclaim returns it after that',
+          CHECK_THE_ESCROW('its deliver_by'),
         ]);
       }
     },
@@ -113,7 +118,7 @@ export function registerMarketplaceTransportTools(server: McpServer, checkRateLi
       const limited = checkRateLimit(); if (limited) return limited;
       try {
         const r = await getJob(VECTOR_KOIOS_URL, { escrowRef: escrow_ref, jobId: job_id, buyerAddress });
-        const ref = canonical(escrow_ref);
+        const ref = r.escrowRef;
         const v = r.view;
         if (v.state === 'pending') {
           return text(withJson(`# Job ${job_id}: pending\n\n**Status:** ${cell(v.status, 100)}\n\nThe supplier is still working. Poll again in a few seconds.`, { state: 'pending', job_id, escrow_ref: ref, status: v.status }));
@@ -122,7 +127,7 @@ export function registerMarketplaceTransportTools(server: McpServer, checkRateLi
           const said = cell(v.message, 500);
           return text(withJson(
             `# Job ${job_id}: failed\n\n**Reason:** ${cell(v.reason, 100)}${said ? `\n**Supplier said:** ${said}` : ''}\n\n` +
-            'The job failed; the escrow stays as it is. If it is still Open or Claimed, reclaim it after deliver_by with vector_build_marketplace_reclaim.',
+            `The job failed. ${CHECK_THE_ESCROW(`${isoOrRaw(r.deliverBy)} (its deliver_by)`)}`,
             { state: 'failed', job_id, escrow_ref: ref, reason: v.reason, message: v.message },
           ));
         }

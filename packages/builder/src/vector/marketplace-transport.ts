@@ -315,7 +315,8 @@ async function readTargetAdvert(
   return read.advert;
 }
 
-export interface SentJob { jobId: string; status: string; route: Route['kind']; endpoint: string; capabilityId: string }
+/** `escrowRef` is the canonical spelling of the ref the caller gave. */
+export interface SentJob { jobId: string; status: string; route: Route['kind']; endpoint: string; capabilityId: string; escrowRef: string }
 
 /**
  * Sends the job for an Open escrow to its supplier and returns the job id the supplier answers with (202 means its Claim has
@@ -365,10 +366,11 @@ export async function sendJob(provider: Provider, koiosUrl: string, p: { escrowR
   const jobId = answer?.job_id;
   if (typeof jobId !== 'string' || !JOB_ID.test(jobId)) throw new Error(`Could not send the job for escrow ${canonical}: the supplier answered 202 but returned no usable job id.${MAY_HAVE_CLAIMED}`);
   const status = typeof answer?.status === 'string' ? answer.status.slice(0, 100) : 'accepted';
-  return { jobId, status, route: route.kind, endpoint: advert.endpoint_url, capabilityId: advert.capability_id };
+  return { jobId, status, route: route.kind, endpoint: advert.endpoint_url, capabilityId: advert.capability_id, escrowRef: canonical };
 }
 
-export interface PolledJob { view: JobView; route: Route['kind']; endpoint: string; supplierPkh: string; capabilityId: string }
+/** `escrowRef` is the canonical spelling of the ref the caller gave, and `deliverBy` the escrow's deliver_by (POSIX ms), from its datum. */
+export interface PolledJob { view: JobView; route: Route['kind']; endpoint: string; supplierPkh: string; capabilityId: string; escrowRef: string; deliverBy: number }
 
 /** A poll answer that names another escrow than the one asked about is not an answer about this job: the failed view that says so, else null. */
 function wrongEscrow(text: string, canonical: string): JobView | null {
@@ -406,7 +408,7 @@ export async function getJob(koiosUrl: string, p: { escrowRef: string; jobId: st
     throw new Error(`Could not poll job ${p.jobId} of escrow ${canonical}: ${callFailure(err, POLL_CALL)}.`);
   }
   const view = wrongEscrow(res.text, canonical) ?? parseJobResponse(res.status, res.text);
-  return { view, route: route.kind, endpoint: advert.endpoint_url, supplierPkh: advert.supplier_pkh, capabilityId: advert.capability_id };
+  return { view, route: route.kind, endpoint: advert.endpoint_url, supplierPkh: advert.supplier_pkh, capabilityId: advert.capability_id, escrowRef: canonical, deliverBy: posted.deliver_by };
 }
 
 // ─── Verifying a receipt ─────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -624,7 +626,7 @@ async function submittedReceiptHash(
 
   const lead = lineageFailure === null ? 'the escrow has no live output' : `the escrow's live output could not be resolved (${lineageFailure})`;
   let rows: unknown[];
-  try { rows = await fetchEscrows({ buyer: post.datum.buyer_pkh }, { fetchImpl }); } catch (err) { return why(`${NOT_LOCATABLE}${lead}, and the indexer could not be asked (${indexerFailure(err)})`); }
+  try { rows = await fetchEscrows(post.datum.buyer_pkh, { fetchImpl }); } catch (err) { return why(`${NOT_LOCATABLE}${lead}, and the indexer could not be asked (${indexerFailure(err)})`); }
   const refs = submittedRefsOf(rows, post.datum);
   if (refs.length === 0) return why(`${NOT_LOCATABLE}${lead}, and the indexer lists no Submitted output of it`);
   if (refs.length > 1) return why(`${NOT_LOCATABLE}the indexer lists ${refs.length} Submitted outputs that match this escrow; pass submitted_ref to name the one`);

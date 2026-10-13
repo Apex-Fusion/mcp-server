@@ -242,7 +242,7 @@ describe('sendJob', () => {
   test('sends the job to the advert endpoint over the template contract and returns the job id', async () => {
     const s = scenario();
     const r = await s.send();
-    assert.deepEqual(r, { jobId: JOB_ID, status: 'accepted', route: 'template', endpoint: SUPPLIER, capabilityId: 'identity.history.report.v1' });
+    assert.deepEqual(r, { jobId: JOB_ID, status: 'accepted', route: 'template', endpoint: SUPPLIER, capabilityId: 'identity.history.report.v1', escrowRef: ESCROW_REF });
     assert.equal(s.sup.calls.length, 1);
     const call = s.sup.calls[0];
     assert.equal(call.url, `${SUPPLIER}/v1/job`);
@@ -602,12 +602,21 @@ describe('getJob', () => {
     assert.equal(r.endpoint, SUPPLIER);
     assert.equal(r.supplierPkh, ADVERT_EXPECTED.supplier_pkh);
     assert.equal(r.capabilityId, 'identity.history.report.v1');
+    assert.equal(r.escrowRef, ESCROW_REF);
+    assert.equal(r.deliverBy, s.posted.deliver_by);
     assert.equal(s.sup.calls.length, 1);
     assert.deepEqual(s.sup.calls[0], { url: `${SUPPLIER}/v1/job/${JOB_ID}`, method: 'GET', headers: { accept: 'application/json' }, body: '' });
     // one decision draws on one Koios here too
     assert.ok(s.koios.calls.every((c) => c.url?.startsWith(`${KOIOS}/api/v1/`)), JSON.stringify(s.koios.calls.map((c) => c.url)));
     assert.deepEqual(s.advertUrls(), [`${KOIOS}/api/v1/utxo_info`]);
     assert.equal(s.fundingChecks().length, 1);
+  });
+  test('the escrow comes back as the canonical ref, whatever case and spacing the caller used, for a send and for a poll', async () => {
+    const odd = ` ${ESCROW_REF.toUpperCase()} `;
+    const sent = scenario();
+    assert.equal((await sent.send({ escrowRef: odd })).escrowRef, ESCROW_REF);
+    const polled = scenario({ escrow: 'submitted', answer: () => reply(200, done) });
+    assert.equal((await polled.poll({ escrowRef: odd })).escrowRef, ESCROW_REF);
   });
   test('a job that failed is the failed view', async () => {
     const s = scenario({ escrow: 'claimed', answer: () => reply(502, { status: 'failed', reason: 'service_timeout', message: 'the service did not answer' }) });
@@ -1340,6 +1349,7 @@ describe('verifyJob', () => {
     test('an indexer that cannot be asked, or answers with something else than a list, skips the check in words that carry nothing it said', async () => {
       const cases: Array<[NonNullable<Scenario['indexer']>, string]> = [
         [{ status: 502 }, 'list escrows: indexer answered 502'],
+        [{ timesOut: true }, 'list escrows: indexer list read timed out after 14 bytes'],
         [{ raw: `["${'x'.repeat(ESCROWS_MAX_BYTES)}"]` }, `list escrows: the answer is over the ${ESCROWS_MAX_BYTES} byte limit`],
         [{ raw: '<html>Bad gateway password=hunter2</html>' }, 'list escrows: response was not valid JSON'],
         [{ raw: '{"rows":[]}' }, 'list escrows: indexer returned a non-list response'],
