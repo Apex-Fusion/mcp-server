@@ -19,18 +19,25 @@
 // The three fleet POST handlers read the escrow ref from the X-Escrow-Ref header (makeChatHandler, makeTtsHandler, makeOcrHandler);
 // the chat one takes a Responses request (input, instructions, ...: RESPONSE_REQUEST_FIELDS) and refuses any other field. The template
 // contract is vector-agent-template c4c378a agent/src/routes/custom.ts: POST /v1/job {escrow_ref, payload}, GET /v1/job/:jobId.
+//
+// This release serves template-contract suppliers only: the route table and the parsing of the fleet routes' answers are kept, tested
+// here, as the transport for a later SDK-backed path, and sendJob and getJob refuse a fleet supplier (and a fleet route) before any
+// call. Both also take the buyer's address and refuse an escrow that was not posted from it; sendJob refuses a payload that is not the
+// one the escrow committed to. The escrows of these tests are posted from OWN_ADDRESS with the prompt hash of PAYLOAD.
 import { describe, test, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { Constr, Data, fromText } from '@lucid-evolution/lucid';
+import { Constr, Data, fromText, getAddressDetails } from '@lucid-evolution/lucid';
 import type { UTxO } from '@lucid-evolution/lucid';
-import { ADVERT_ADDRESS } from '../src/vector/marketplace-constants.ts';
+import { ADVERT_ADDRESS, ESCROW_ADDRESS } from '../src/vector/marketplace-constants.ts';
 import { decodeEscrowDatum, encodeEscrowDatum, promptHashForPayload, wirePayloadFor } from '../src/vector/marketplace-datum.ts';
 import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
+import { enterpriseAddressOf } from '../src/vector/marketplace-build.ts';
 import { ROUTES, routeFor, parseJobResponse, sendJob, getJob } from '../src/vector/marketplace-transport.ts';
 import type { Route } from '../src/vector/marketplace-transport.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
-import { world, escrowAt, ESCROW_TX, CLAIM_TX, SUBMIT_TX } from './fixtures/escrow-koios.fixture.ts';
+import { OWN_ADDRESS } from './fixtures/fixture-provider.ts';
+import { world, escrowAt, ESCROW_TX, CLAIM_TX, SUBMIT_TX, SUPPLIER_ADDRESS } from './fixtures/escrow-koios.fixture.ts';
 
 const KOIOS = 'https://koios.example';
 const PAYLOAD = 'summarise the filing';
@@ -218,7 +225,9 @@ function supplier(answer: (call: Call, init: RequestInit) => Answer = () => acce
   return { f, calls };
 }
 
-const POSTED_BASE: EscrowDatum = { ...decodeEscrowDatum(ESCROW_OPEN_DATUM_HEX), prompt_hash: promptHashForPayload(PAYLOAD) };
+/** The wallet the escrows of these tests were posted from: a base address, so the buyer key is the payment part of it. */
+const BUYER_PKH = getAddressDetails(OWN_ADDRESS).paymentCredential!.hash;
+const POSTED_BASE: EscrowDatum = { ...decodeEscrowDatum(ESCROW_OPEN_DATUM_HEX), buyer_pkh: BUYER_PKH };
 const ADVERT_TX = ADVERT_REF.slice(0, 64);
 /** The live advert with the capability, the endpoint or the status changed, re-encoded. */
 function advertDatum(over: { capability_id?: string; endpoint_url?: string; status?: 'Active' | 'Retired' }): string {
@@ -231,16 +240,19 @@ function advertDatum(over: { capability_id?: string; endpoint_url?: string; stat
 
 interface Scenario {
   capability?: string; endpoint?: string; escrow?: 'open' | 'claimed' | 'submitted' | 'finished';
+  /** The payload the escrow commits to, as its prompt_hash (default PAYLOAD). */
+  committed?: string;
   advert?: { status?: 'Active' | 'Retired'; spent?: boolean; spentUnreported?: boolean; address?: string; missing?: boolean; httpStatus?: number; unreachable?: boolean };
   answer?: (call: Call, init: RequestInit) => Answer;
 }
 /**
- * One escrow (Open, Claimed, Submitted, or finished with nothing left on the chain), its advert, and a supplier. The node and Koios
- * are built from one list of UTxOs (`world`); the advert read is answered on top of Koios; whatever else is fetched is the supplier.
+ * One escrow (Open, Claimed, Submitted, or finished with nothing left on the chain), posted from OWN_ADDRESS with the prompt hash of
+ * its payload, its advert, and a supplier. The node and Koios are built from one list of UTxOs (`world`); the advert read is answered
+ * on top of Koios (and counted); whatever else is fetched is the supplier.
  */
 function scenario(o: Scenario = {}) {
   const capability = o.capability ?? 'identity.history.report.v1';
-  const posted: EscrowDatum = { ...POSTED_BASE, capability_id: capability };
+  const posted: EscrowDatum = { ...POSTED_BASE, capability_id: capability, prompt_hash: promptHashForPayload(o.committed ?? PAYLOAD) };
   const claimed: EscrowDatum = { ...posted, state: 'Claimed' };
   const submitted: EscrowDatum = { ...posted, submitted_at: posted.posted_at + 60_000, result_receipt_hash: 'cd'.repeat(32), state: 'Submitted' };
   const state = o.escrow ?? 'open';
@@ -253,8 +265,10 @@ function scenario(o: Scenario = {}) {
   };
   if (advert.spentUnreported) delete advertRow.is_spent; // Koios leaves the field out when it does not know
   const sup = supplier(o.answer);
+  let advertReads = 0;
   const fetchImpl = (async (url: string, init: { body: string }) => {
     if (String(url).endsWith('/api/v1/utxo_info') && (JSON.parse(init.body)._utxo_refs as string[]).includes(ADVERT_REF)) {
+      advertReads++;
       if (advert.unreachable) throw new TypeError('fetch failed: connect ECONNREFUSED internal.koios.example:443 password=hunter2');
       if (advert.httpStatus) return new Response(HOSTILE, { status: advert.httpStatus });
       return new Response(JSON.stringify(advert.missing ? [] : [advertRow]), { status: 200 });
@@ -263,9 +277,9 @@ function scenario(o: Scenario = {}) {
     return sup.f(url, init as RequestInit);
   }) as unknown as typeof fetch;
   return {
-    sup, koios: w.koios, posted,
-    send: (over: Partial<Parameters<typeof sendJob>[2]> = {}) => sendJob(w.node, KOIOS, { escrowRef: ESCROW_REF, payload: PAYLOAD, ...over }, fetchImpl),
-    poll: (over: Partial<Parameters<typeof getJob>[2]> = {}) => getJob(w.node, KOIOS, { escrowRef: ESCROW_REF, jobId: JOB_ID, ...over }, fetchImpl),
+    sup, koios: w.koios, posted, advertReads: () => advertReads,
+    send: (over: Partial<Parameters<typeof sendJob>[2]> = {}) => sendJob(w.node, KOIOS, { escrowRef: ESCROW_REF, payload: PAYLOAD, buyerAddress: OWN_ADDRESS, ...over }, fetchImpl),
+    poll: (over: Partial<Parameters<typeof getJob>[2]> = {}) => getJob(w.node, KOIOS, { escrowRef: ESCROW_REF, jobId: JOB_ID, buyerAddress: OWN_ADDRESS, ...over }, fetchImpl),
   };
 }
 
@@ -274,8 +288,10 @@ const rejectsWith = (run: Promise<unknown>, check: (message: string) => void) =>
 /** An error from this module names the escrow and never the endpoint, a Koios error body or the hostile text behind it. */
 const cleanOf = (message: string) => {
   assert.ok(message.includes(ESCROW_REF), `the escrow ref is missing from: ${message}`);
-  for (const secret of ['203.0.113.7', '169.254.169.254', '192.168.1.10', 'evil.example', 'hunter2', 'internal.koios.example', 'not a url', 'user:pw']) assert.ok(!message.includes(secret), `${secret} leaked into: ${message}`);
+  for (const secret of ['203.0.113.7', '203.0.113.99', '169.254.169.254', '192.168.1.10', 'evil.example', 'hunter2', 'internal.koios.example', 'not a url', 'user:pw']) assert.ok(!message.includes(secret), `${secret} leaked into: ${message}`);
 };
+const FLEET_CAPABILITIES = ['llm.text.generate.v1', 'ocr.page.extract.chandra-ocr-2.v1', 'audio.synthesize.piper.v1'];
+const NOT_A_BUYER = 'buyerAddress must be the wallet address (a key address) the escrow was posted from.';
 
 describe('sendJob', () => {
   test('sends the job to the advert endpoint over the template contract and returns the job id', async () => {
@@ -297,39 +313,9 @@ describe('sendJob', () => {
     assert.ok(s.koios.calls.length > 0 && s.koios.calls.every((c) => c.url?.startsWith(`${KOIOS}/api/v1/`)), JSON.stringify(s.koios.calls.map((c) => c.url)));
   });
   test('the escrow named in the request is the canonical ref, whatever case or spacing the caller used', async () => {
-    const s = scenario({ capability: 'llm.text.generate.v1' });
-    await s.send({ escrowRef: `  ${ESCROW_REF.toUpperCase()} ` });
-    assert.equal(s.sup.calls[0].headers['X-Escrow-Ref'], ESCROW_REF);
-    const t = scenario();
-    await t.send({ escrowRef: ` ${ESCROW_REF.toUpperCase()}` });
-    assert.equal(JSON.parse(t.sup.calls[0].body).escrow_ref, ESCROW_REF);
-  });
-  const fleet: Array<[capability: string, route: Route['kind'], path: string, body: (payload: string) => string]> = [
-    ['llm.text.generate.v1', 'chat', '/v1/responses', (p) => JSON.stringify({ input: p })],
-    ['ocr.page.extract.chandra-ocr-2.v1', 'ocr', '/v1/ocr/extract', (p) => p],
-    ['audio.synthesize.piper.v1', 'tts', '/v1/audio/synthesize', (p) => p],
-  ];
-  for (const [capability, route, path, body] of fleet) {
-    test(`${capability} goes to ${path} with the escrow in X-Escrow-Ref`, async () => {
-      const s = scenario({ capability });
-      const payload = route === 'chat' ? 'hi there' : '{"k":"v"}';
-      const r = await s.send({ payload });
-      assert.equal(r.route, route);
-      assert.equal(r.capabilityId, capability);
-      assert.equal(s.sup.calls.length, 1);
-      const call = s.sup.calls[0];
-      assert.equal(call.url, `${SUPPLIER}${path}`);
-      assert.equal(call.method, 'POST');
-      assert.deepEqual(call.headers, { 'content-type': 'application/json', accept: 'application/json', 'X-Escrow-Ref': ESCROW_REF });
-      assert.equal(call.body, body(payload));
-    });
-  }
-  test('a forced route overrides the capability', async () => {
     const s = scenario();
-    const r = await s.send({ route: 'ocr', payload: '{"k":"v"}' });
-    assert.equal(r.route, 'ocr');
-    assert.equal(s.sup.calls[0].url, `${SUPPLIER}/v1/ocr/extract`);
-    assert.equal(s.sup.calls[0].headers['X-Escrow-Ref'], ESCROW_REF);
+    await s.send({ escrowRef: ` ${ESCROW_REF.toUpperCase()}` });
+    assert.equal(JSON.parse(s.sup.calls[0].body).escrow_ref, ESCROW_REF);
   });
   test('only the headers of the route are sent: nothing the caller passes becomes a header', async () => {
     const s = scenario();
@@ -340,6 +326,103 @@ describe('sendJob', () => {
     assert.equal((await scenario({ answer: () => accepted({ status: 'running' }) }).send()).status, 'running');
     assert.equal((await scenario({ answer: () => accepted({ status: 's'.repeat(300) }) }).send()).status, 's'.repeat(100));
     assert.equal((await scenario({ answer: () => reply(202, { job_id: JOB_ID }) }).send()).status, 'accepted');
+  });
+
+  // The escrow is the buyer's: whoever posted it is named in its datum, and nobody else sends the job.
+  describe('only the buyer sends', () => {
+    test('the buyer is a key: a base address and an enterprise address of that key are the same buyer', async () => {
+      for (const buyerAddress of [OWN_ADDRESS, enterpriseAddressOf(BUYER_PKH)]) {
+        const s = scenario();
+        assert.equal((await s.send({ buyerAddress })).jobId, JOB_ID, buyerAddress);
+      }
+    });
+    test('an escrow someone else posted is refused, naming the address, before the advert is read or anything reaches the supplier', async () => {
+      const s = scenario();
+      await rejectsWith(s.send({ buyerAddress: SUPPLIER_ADDRESS }), (message) => {
+        cleanOf(message);
+        assert.equal(message, `Cannot send a job for escrow ${ESCROW_REF}: it was not posted by ${SUPPLIER_ADDRESS}. Nothing was sent.`);
+      });
+      assert.equal(s.advertReads(), 0);
+      assert.equal(s.sup.calls.length, 0);
+    });
+    test('an address that is no wallet key address is no buyer, and nothing is asked of anyone', async () => {
+      for (const buyerAddress of [ESCROW_ADDRESS, 'not-an-address', '', undefined, null, 7]) {
+        const s = scenario();
+        await rejectsWith(s.send({ buyerAddress: buyerAddress as never }), (message) => {
+          cleanOf(message);
+          assert.equal(message, `Cannot send a job for escrow ${ESCROW_REF}: ${NOT_A_BUYER} Nothing was sent.`);
+        });
+        assert.equal(s.koios.calls.length, 0, String(buyerAddress));
+        assert.equal(s.sup.calls.length, 0, String(buyerAddress));
+      }
+    });
+  });
+
+  // The payload is the buyer's too: the escrow committed to exactly one, and an escrow that names the caller as its buyer but committed
+  // to something else (anyone can post one, with an advert on a host of their own) must not be a place to send data.
+  describe('only the payload the escrow committed to is sent', () => {
+    test('any other payload is refused, whatever the difference, before anything reaches the supplier', async () => {
+      for (const payload of ['summarise the filing.', 'Summarise the filing', ' summarise the filing', 'summarise the filing\n', 'summarise  the filing', 'something else entirely']) {
+        const s = scenario();
+        await rejectsWith(s.send({ payload }), (message) => {
+          cleanOf(message);
+          assert.equal(message, `Cannot send a job for escrow ${ESCROW_REF}: the payload does not match the escrow's prompt_hash: it must be exactly the payload the escrow was posted with. Nothing was sent.`);
+        });
+        assert.equal(s.sup.calls.length, 0, JSON.stringify(payload));
+      }
+    });
+    test('an escrow posted with another payload takes that payload and no other', async () => {
+      const s = scenario({ committed: 'the other payload' });
+      await rejectsWith(s.send(), (message) => assert.match(message, /the payload does not match the escrow's prompt_hash/));
+      assert.equal(s.sup.calls.length, 0);
+      await s.send({ payload: 'the other payload' });
+      assert.equal(JSON.parse(s.sup.calls[0].body).payload, wirePayloadFor('the other payload'));
+    });
+    test('the hash is the one a buyer commits: promptHashForPayload of the payload, the hash of its canonical message array', async () => {
+      const payload = '{"records":[1,2,3],"note":"café"}';
+      const s = scenario({ committed: payload });
+      assert.equal(s.posted.prompt_hash, sha256(wirePayloadFor(payload)));
+      assert.equal((await s.send({ payload })).jobId, JOB_ID);
+    });
+  });
+
+  // This release serves template-contract suppliers only. The route table keeps the fleet routes (tested above); nothing reaches them.
+  describe('template-contract suppliers only', () => {
+    for (const capability of FLEET_CAPABILITIES) {
+      test(`${capability} uses a fleet route and is refused, before anything reaches the supplier`, async () => {
+        const s = scenario({ capability });
+        await rejectsWith(s.send(), (message) => {
+          cleanOf(message);
+          assert.equal(message, `Cannot send a job for escrow ${ESCROW_REF}: ${capability} uses the fleet route; this tool supports template-contract suppliers only in this release. Nothing was sent.`);
+        });
+        assert.equal(s.sup.calls.length, 0);
+        // forcing the template route does not make a fleet supplier a template one
+        await rejectsWith(s.send({ route: 'template' }), (message) => assert.match(message, /uses the fleet route; this tool supports template-contract suppliers only in this release/));
+        assert.equal(s.sup.calls.length, 0);
+      });
+    }
+    test('what an advert calls its capability cannot break the line the refusal is shown on', async () => {
+      const s = scenario({ capability: 'ocr.page.extract.evil | cap\n## injected `x`' });
+      await rejectsWith(s.send(), (message) => { assert.ok(!/[\n|`]/.test(message), message); assert.match(message, /ocr\.page\.extract\.evil ¦ cap ## injected 'x' uses the fleet route/); });
+    });
+    test('a fleet route the caller forces is refused before anything at all is asked; the template route may be named', async () => {
+      for (const route of ['chat', 'ocr', 'tts'] as const) {
+        const s = scenario();
+        await rejectsWith(s.send({ route }), (message) => {
+          cleanOf(message);
+          assert.equal(message, `Cannot send a job for escrow ${ESCROW_REF}: the ${route} route is a fleet route; this tool supports template-contract suppliers only in this release. Nothing was sent.`);
+        });
+        assert.equal(s.koios.calls.length, 0, route);
+        assert.equal(s.sup.calls.length, 0, route);
+      }
+      const t = scenario();
+      assert.equal((await t.send({ route: 'template' })).route, 'template');
+    });
+    test('a route that is no route at all is refused as such, before anything is asked', async () => {
+      const s = scenario();
+      await assert.rejects(s.send({ route: 'nope' as never }), /Unknown route "nope"/);
+      assert.equal(s.koios.calls.length, 0);
+    });
   });
 
   // Nothing is sent to a supplier unless the escrow is live and Open and its advert is live, Active and on an https endpoint.
@@ -368,17 +451,20 @@ describe('sendJob', () => {
     const s = scenario();
     await rejectsWith(s.send({ payload: '' }), (message) => { cleanOf(message); assert.match(message, /the payload must be a non-empty string\. Nothing was sent\.$/); });
     assert.equal(s.koios.calls.length, 0, 'not even Koios was asked');
-    await rejectsWith(s.send({ payload: 'x'.repeat(1_000_000) }), (message) => { cleanOf(message); assert.match(message, /the request is \d+ bytes, over the 1000000 byte limit\. Nothing was sent\.$/); });
-    assert.equal(s.sup.calls.length, 0);
-    // a body of exactly the limit goes through (an OCR route sends the payload as it is)
-    const ocr = scenario({ capability: 'ocr.page.extract.chandra-ocr-2.v1' });
-    await ocr.send({ payload: 'x'.repeat(1_000_000) });
-    assert.equal(ocr.sup.calls[0].body.length, 1_000_000);
-    await rejectsWith(ocr.send({ payload: 'x'.repeat(1_000_001) }), (message) => assert.match(message, /the request is 1000001 bytes, over the 1000000 byte limit/));
+    // The request is the body that goes on the wire, which wraps the payload: build payloads that make it exactly the limit and one over.
+    const wrapping = Buffer.byteLength(ROUTES.template.body(ESCROW_REF, '').body);
+    const atLimit = 'x'.repeat(1_000_000 - wrapping);
+    const full = scenario({ committed: atLimit });
+    await full.send({ payload: atLimit });
+    assert.equal(full.sup.calls[0].body.length, 1_000_000);
+    const over = `${atLimit}x`;
+    const tooBig = scenario({ committed: over });
+    await rejectsWith(tooBig.send({ payload: over }), (message) => { cleanOf(message); assert.match(message, /the request is 1000001 bytes, over the 1000000 byte limit\. Nothing was sent\.$/); });
+    assert.equal(tooBig.sup.calls.length, 0);
   });
   test('a lineage the resolver refuses is the refusal, with its words and none of what Koios said', async () => {
     const failing = world([], { status: 502 });
-    await rejectsWith(sendJob(failing.node, KOIOS, { escrowRef: ESCROW_REF, payload: PAYLOAD }, failing.koios.f), (message) => {
+    await rejectsWith(sendJob(failing.node, KOIOS, { escrowRef: ESCROW_REF, payload: PAYLOAD, buyerAddress: OWN_ADDRESS }, failing.koios.f), (message) => {
       cleanOf(message);
       assert.equal(message, `Could not read escrow ${ESCROW_REF}: Koios utxo_info answered 502`);
     });
@@ -467,23 +553,6 @@ describe('getJob', () => {
     assert.equal(s.sup.calls.length, 1);
     assert.deepEqual(s.sup.calls[0], { url: `${SUPPLIER}/v1/job/${JOB_ID}`, method: 'GET', headers: { accept: 'application/json' }, body: '' });
   });
-  const fleet: Array<[capability: string, path: string]> = [
-    ['llm.text.generate.v1', '/v1/responses'], ['ocr.page.extract.chandra-ocr-2.v1', '/v1/ocr/extract'], ['audio.synthesize.piper.v1', '/v1/audio/synthesize'],
-  ];
-  for (const [capability, path] of fleet) {
-    test(`${capability} is polled at ${path}/<job id>, with no escrow header`, async () => {
-      const s = scenario({ capability, escrow: 'claimed', answer: () => reply(202, { status: 'running', escrow_ref: ESCROW_REF }) });
-      const r = await s.poll();
-      assert.deepEqual(r.view, { state: 'pending', status: 'running' });
-      assert.deepEqual(s.sup.calls[0], { url: `${SUPPLIER}${path}/${JOB_ID}`, method: 'GET', headers: { accept: 'application/json' }, body: '' });
-    });
-  }
-  test('a forced route overrides the capability', async () => {
-    const s = scenario({ escrow: 'claimed', answer: () => reply(202, { status: 'running' }) });
-    const r = await s.poll({ route: 'tts' });
-    assert.equal(r.route, 'tts');
-    assert.equal(s.sup.calls[0].url, `${SUPPLIER}/v1/audio/synthesize/${JOB_ID}`);
-  });
   test('a job that failed is the failed view', async () => {
     const s = scenario({ escrow: 'claimed', answer: () => reply(502, { status: 'failed', reason: 'service_timeout', message: 'the service did not answer' }) });
     assert.deepEqual((await s.poll()).view, { state: 'failed', reason: 'service_timeout', message: 'the service did not answer' });
@@ -495,19 +564,86 @@ describe('getJob', () => {
       assert.equal(s.sup.calls.length, 1, escrow);
     }
   });
-  test('the submitted_ref the supplier reports comes with a finished job, for the verification that follows', async () => {
-    const s = scenario({ capability: 'ocr.page.extract.chandra-ocr-2.v1', escrow: 'submitted', answer: () => reply(200, { kind: 'ocr', content: '# page', receipt: {}, receipt_signature: 'cd', submitted_ref: SUBMITTED_REF }) });
+  test('the submitted_ref a supplier reports comes with a finished job, for the verification that follows', async () => {
+    const s = scenario({ escrow: 'submitted', answer: () => reply(200, { ...done, submitted_ref: SUBMITTED_REF }) });
     const r = await s.poll();
     assert.ok(r.view.state === 'done');
     assert.equal(r.view.submittedRef, SUBMITTED_REF);
   });
 
+  // A poll asks for a job the supplier already has, so it resolves the endpoint from the advert whatever the advert's state is now:
+  // only a send needs a live, Active advert.
+  test('polls through an advert that has since been retired or spent, or whose spent status Koios does not report', async () => {
+    const adverts: Array<NonNullable<Scenario['advert']>> = [{ status: 'Retired' }, { spent: true }, { spentUnreported: true }, { status: 'Retired', spent: true }];
+    for (const advert of adverts) {
+      const s = scenario({ escrow: 'claimed', advert, answer: () => reply(202, { status: 'running' }) });
+      assert.deepEqual((await s.poll()).view, { state: 'pending', status: 'running' }, JSON.stringify(advert));
+      assert.equal(s.sup.calls[0].url, `${SUPPLIER}/v1/job/${JOB_ID}`, JSON.stringify(advert));
+    }
+  });
+
+  describe('only the buyer polls', () => {
+    test('the buyer is a key: a base address and an enterprise address of that key are the same buyer', async () => {
+      for (const buyerAddress of [OWN_ADDRESS, enterpriseAddressOf(BUYER_PKH)]) {
+        const s = scenario({ escrow: 'claimed', answer: () => reply(202, { status: 'running' }) });
+        assert.equal((await s.poll({ buyerAddress })).view.state, 'pending', buyerAddress);
+      }
+    });
+    test('an escrow someone else posted is refused, naming the address, before the advert is read or anything reaches the supplier', async () => {
+      const s = scenario({ escrow: 'claimed' });
+      await rejectsWith(s.poll({ buyerAddress: SUPPLIER_ADDRESS }), (message) => {
+        cleanOf(message);
+        assert.equal(message, `Cannot poll a job for escrow ${ESCROW_REF}: it was not posted by ${SUPPLIER_ADDRESS}. Nothing was sent.`);
+      });
+      assert.equal(s.advertReads(), 0);
+      assert.equal(s.sup.calls.length, 0);
+    });
+    test('an address that is no wallet key address is no buyer, and nothing is asked of anyone', async () => {
+      for (const buyerAddress of [ESCROW_ADDRESS, 'not-an-address', '', undefined, null, 7]) {
+        const s = scenario({ escrow: 'claimed' });
+        await rejectsWith(s.poll({ buyerAddress: buyerAddress as never }), (message) => {
+          cleanOf(message);
+          assert.equal(message, `Cannot poll a job for escrow ${ESCROW_REF}: ${NOT_A_BUYER} Nothing was sent.`);
+        });
+        assert.equal(s.koios.calls.length, 0, String(buyerAddress));
+        assert.equal(s.sup.calls.length, 0, String(buyerAddress));
+      }
+    });
+  });
+
+  describe('template-contract suppliers only', () => {
+    for (const capability of FLEET_CAPABILITIES) {
+      test(`${capability} uses a fleet route and is refused, before anything reaches the supplier`, async () => {
+        const s = scenario({ capability, escrow: 'claimed' });
+        await rejectsWith(s.poll(), (message) => {
+          cleanOf(message);
+          assert.equal(message, `Cannot poll a job for escrow ${ESCROW_REF}: ${capability} uses the fleet route; this tool supports template-contract suppliers only in this release. Nothing was sent.`);
+        });
+        assert.equal(s.sup.calls.length, 0);
+        await rejectsWith(s.poll({ route: 'template' }), (message) => assert.match(message, /uses the fleet route; this tool supports template-contract suppliers only in this release/));
+        assert.equal(s.sup.calls.length, 0);
+      });
+    }
+    test('a fleet route the caller forces is refused before anything at all is asked; the template route may be named', async () => {
+      for (const route of ['chat', 'ocr', 'tts'] as const) {
+        const s = scenario({ escrow: 'claimed' });
+        await rejectsWith(s.poll({ route }), (message) => {
+          cleanOf(message);
+          assert.equal(message, `Cannot poll a job for escrow ${ESCROW_REF}: the ${route} route is a fleet route; this tool supports template-contract suppliers only in this release. Nothing was sent.`);
+        });
+        assert.equal(s.koios.calls.length, 0, route);
+        assert.equal(s.sup.calls.length, 0, route);
+      }
+      const t = scenario({ escrow: 'claimed', answer: () => reply(202, { status: 'running' }) });
+      assert.equal((await t.poll({ route: 'template' })).route, 'template');
+    });
+  });
+
   const refusals: Array<[name: string, o: Scenario, expected: RegExp]> = [
     ['an escrow with no live output', { escrow: 'finished' }, /no live output was found for it .*Nothing was sent\.$/],
-    ['a retired advert', { escrow: 'claimed', advert: { status: 'Retired' } }, /is Retired\. Nothing was sent\.$/],
-    ['a spent advert', { escrow: 'claimed', advert: { spent: true } }, /has been spent/],
-    ['an advert whose spent status Koios does not report', { escrow: 'claimed', advert: { spentUnreported: true } }, /Koios did not report whether its advert .* is spent\. Nothing was sent\.$/],
     ['an endpoint that is plain http', { escrow: 'claimed', endpoint: 'http://203.0.113.7' }, /is not an https URL/],
+    ['an advert UTxO at the wrong address', { escrow: 'claimed', advert: { address: 'addr1' + 'q'.repeat(54) } }, /is not at the advert script address\. Nothing was sent\.$/],
+    ['an advert the ledger does not know', { escrow: 'claimed', advert: { missing: true } }, /No UTxO at .* Nothing was sent\.$/],
     ['an advert Koios cannot be asked about', { escrow: 'claimed', advert: { httpStatus: 502 } }, /Koios utxo_info answered 502/],
   ];
   for (const [name, o, expected] of refusals) {
@@ -548,18 +684,20 @@ describe('getJob', () => {
   });
 });
 
-// A supplier that never answers must cost a bounded wait and say what to check, not hang (Review Focus 1).
+// A supplier that never answers must cost a bounded wait and say what to check, not hang (Review Focus 1). The job POST waits for the
+// supplier's Claim to confirm (its own limit is 60 s), so it is given 90 s; a poll is given 20 s.
 describe('a supplier that never answers', () => {
   afterEach(() => { mock.restoreAll(); });
   /**
-   * The budget becomes a number in exactly one place, AbortSignal.timeout inside safeFetch. It is recorded there, and the 20 s is
-   * shortened to 30 ms so that the test does not sit through it; every other timeout (Koios, 15 s) is left alone.
+   * The budget becomes a number in exactly one place, AbortSignal.timeout inside safeFetch. It is recorded there, and the supplier
+   * budgets (90 s and 20 s) are shortened to 30 ms so that the test does not sit through them; every other timeout (Koios, 15 s) is
+   * left alone.
    */
   function shortened() {
     const budgets: number[] = [];
     const real = AbortSignal.timeout.bind(AbortSignal);
-    mock.method(AbortSignal, 'timeout', (ms: number) => { budgets.push(ms); return real(ms === 20_000 ? 30 : ms); });
-    return budgets;
+    mock.method(AbortSignal, 'timeout', (ms: number) => { budgets.push(ms); return real(ms === 90_000 || ms === 20_000 ? 30 : ms); });
+    return () => budgets.filter((ms) => ms === 90_000 || ms === 20_000);
   }
   /** Answers when the request is abandoned and not before, as a connection to a dead supplier does. */
   const hangs = (_call: Call, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
@@ -568,37 +706,37 @@ describe('a supplier that never answers', () => {
     else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
   });
 
-  test('sendJob gives up after 20 s and says the escrow may have been claimed', async () => {
-    const budgets = shortened();
+  test('sendJob gives up after 90 s and says the escrow may have been claimed', async () => {
+    const supplierBudgets = shortened();
     const s = scenario({ answer: hangs });
     const started = Date.now();
     await rejectsWith(s.send(), (message) => {
       cleanOf(message);
-      assert.equal(message, `Could not send the job for escrow ${ESCROW_REF}: the supplier did not answer within 20 s. It may have claimed the escrow anyway, so check its state before sending again; if it stays Open, reclaim it after deliver_by.`);
+      assert.equal(message, `Could not send the job for escrow ${ESCROW_REF}: the supplier did not answer within 90 s. It may have claimed the escrow anyway, so check its state before sending again; if it stays Open, reclaim it after deliver_by.`);
     });
     assert.ok(Date.now() - started < 5_000, 'it did not wait for the real budget');
-    assert.deepEqual(budgets.filter((ms) => ms === 20_000), [20_000], 'the supplier call is given 20 s, once');
+    assert.deepEqual(supplierBudgets(), [90_000], 'the job POST is given 90 s, once, and nothing else is given a supplier budget');
     assert.equal(s.sup.calls.length, 1, 'and is not retried');
   });
-  test('getJob gives up after 20 s too, without the claim warning (a poll claims nothing)', async () => {
-    const budgets = shortened();
+  test('getJob gives up after 20 s, without the claim warning (a poll claims nothing)', async () => {
+    const supplierBudgets = shortened();
     const s = scenario({ escrow: 'claimed', answer: hangs });
     await rejectsWith(s.poll(), (message) => {
       cleanOf(message);
       assert.equal(message, `Could not poll job ${JOB_ID} of escrow ${ESCROW_REF}: the supplier did not answer within 20 s.`);
     });
-    assert.deepEqual(budgets.filter((ms) => ms === 20_000), [20_000]);
+    assert.deepEqual(supplierBudgets(), [20_000], 'the poll is given 20 s, once');
     assert.equal(s.sup.calls.length, 1);
   });
   test('an aborted call is a timeout whichever way the abort is named', async () => {
     for (const name of ['TimeoutError', 'AbortError']) {
       const s = scenario({ answer: () => { throw Object.assign(new Error('The operation was aborted due to timeout'), { name }); } });
-      await rejectsWith(s.send(), (message) => assert.match(message, /the supplier did not answer within 20 s\. It may have claimed the escrow anyway/, name));
+      await rejectsWith(s.send(), (message) => assert.match(message, /the supplier did not answer within 90 s\. It may have claimed the escrow anyway/, name));
     }
   });
   test('a Koios that never answers is an error naming the escrow, not a hang', async () => {
     const never = (async () => { await new Promise((resolve) => setTimeout(resolve, 50)); throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }); }) as unknown as typeof fetch;
-    await rejectsWith(sendJob({} as never, KOIOS, { escrowRef: ESCROW_REF, payload: 'x' }, never), (message) => {
+    await rejectsWith(sendJob({} as never, KOIOS, { escrowRef: ESCROW_REF, payload: 'x', buyerAddress: OWN_ADDRESS }, never), (message) => {
       assert.equal(message, `Could not read escrow ${ESCROW_REF}: Koios request failed (network error or timeout)`);
     });
   });
