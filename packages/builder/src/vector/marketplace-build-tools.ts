@@ -54,7 +54,7 @@ export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit:
 
   server.tool(
     "vector_build_marketplace_accept",
-    "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. Verify the receipt first with vector_marketplace_verify_receipt. " + SIGN_COPY,
+    "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. Verify the receipt first with vector_marketplace_verify_receipt. It builds only for a Submitted escrow and prints the seconds left in the window, so it is also the way to check where an escrow stands (vector_marketplace_get_job cannot see the chain): a refusal names the state. " + SIGN_COPY,
     {
       changeAddress: z.string().describe("The buyer wallet address that posted the escrow"),
       escrow_ref: z.string().describe("The escrow_ref returned by vector_build_marketplace_post_escrow"),
@@ -74,7 +74,7 @@ export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit:
         return text(withJson(md, { escrow_ref: r.escrowRef, tx_hash: r.txHash, supplier_pkh: r.supplierPkh, supplier_lovelace: r.supplierLovelace, buyer_lovelace: r.buyerLovelace, seconds_left: r.secondsLeft }));
       } catch (err) {
         return fail('build accept', err, [
-          'The job must be in Submitted state: poll vector_marketplace_get_job first',
+          'The escrow must be in Submitted state; the refusal above names the state when one was found. Verify the receipt first with vector_marketplace_verify_receipt',
           `Accept must land within ${ACCEPT_WINDOW_S} s of Submit; after that the supplier may Release and ${RELEASE_TAKE}`,
           'The wallet needs one pure 5-unit output as collateral',
         ]);
