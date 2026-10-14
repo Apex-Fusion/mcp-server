@@ -6,6 +6,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { assertSafeUrl, isPrivateAddress, safeFetch } from '../src/vector/safe-fetch.ts';
+import { heldOpen } from './fixtures/held-open.ts';
 
 describe('safeFetch policy', () => {
   test('refuses non-https', () => { assert.throws(() => assertSafeUrl('http://example.com/x'), /https/); });
@@ -131,7 +132,7 @@ describe('safeFetch body cap and abort handling', () => {
       s.addEventListener('abort', () => fail(s.reason), { once: true });
       entered();
     })) as any;
-    await assert.rejects(() => safeFetch(URL_, { signal: new AbortController().signal }, { lookup, timeoutMs: 20, fetchImpl: hang() }), { name: 'TimeoutError' });
+    await assert.rejects(() => heldOpen(safeFetch(URL_, { signal: new AbortController().signal }, { lookup, timeoutMs: 20, fetchImpl: hang() })), { name: 'TimeoutError' });
     let entered!: () => void;
     const started = new Promise<void>((r) => { entered = r; });
     const ac = new AbortController();
@@ -151,7 +152,7 @@ describe('safeFetch: the budget covers the host lookup', () => {
     const lookup = () => new Promise<never>(() => {});
     const f = (async () => { fetched = true; return new Response('x'); }) as any;
     const t0 = performance.now();
-    await assert.rejects(() => safeFetch('https://slow.example/', {}, { lookup, timeoutMs: 30, fetchImpl: f }), { name: 'TimeoutError' });
+    await assert.rejects(() => heldOpen(safeFetch('https://slow.example/', {}, { lookup, timeoutMs: 30, fetchImpl: f })), { name: 'TimeoutError' });
     assert.ok(performance.now() - t0 < 2_000, 'it did not wait for a resolver that never answers');
     assert.equal(fetched, false);
   });
@@ -160,7 +161,7 @@ describe('safeFetch: the budget covers the host lookup', () => {
     // a fetch that never answers and rejects with the signal reason, as the real one does
     const hang = (async (_u: any, init?: RequestInit) => new Promise((_ok, fail) => { const s = init!.signal!; if (s.aborted) fail(s.reason); s.addEventListener('abort', () => fail(s.reason), { once: true }); })) as any;
     const t0 = performance.now();
-    await assert.rejects(() => safeFetch('https://slow.example/', {}, { lookup, timeoutMs: 600, fetchImpl: hang }), { name: 'TimeoutError' });
+    await assert.rejects(() => heldOpen(safeFetch('https://slow.example/', {}, { lookup, timeoutMs: 600, fetchImpl: hang })), { name: 'TimeoutError' });
     const ms = performance.now() - t0;
     assert.ok(ms >= 520, `${ms} ms: the whole budget was used`);
     assert.ok(ms < 850, `${ms} ms: and not the lookup time on top of it (300 + 600)`);

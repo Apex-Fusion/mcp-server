@@ -41,6 +41,7 @@ import { OWN_ADDRESS } from './fixtures/fixture-provider.ts';
 import { world, credentialRequests, txInfoRequests, ESCROW_TX, CLAIM_TX, SUBMIT_TX, SUPPLIER_ADDRESS } from './fixtures/escrow-koios.fixture.ts';
 import { KOIOS, PAYLOAD, SUPPLIER, JOB_ID, HOSTILE, reply, accepted, BUYER_PKH, MAY_HAVE_CLAIMED, scenario, DECOY_SUBMITTED_REF, SUPPLIER_KEY, OTHER_KEY, pkhOf, pubHexOf, RESULT, receiptOf, signWith, committedHash } from './fixtures/transport-world.fixture.ts';
 import type { Call, Scenario } from './fixtures/transport-world.fixture.ts';
+import { heldOpen } from './fixtures/held-open.ts';
 
 const SUBMITTED_REF = `${'ee'.repeat(32)}#0`;
 const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
@@ -888,7 +889,7 @@ describe('a supplier that never answers', () => {
     const supplierBudgets = shortened();
     const s = scenario({ answer: hangs });
     const started = Date.now();
-    await rejectsWith(s.send(), (message) => {
+    await rejectsWith(heldOpen(s.send()), (message) => {
       cleanOf(message);
       assert.equal(message, `Could not send the job for escrow ${ESCROW_REF}: the supplier did not answer within 90 s.${MAY_HAVE_CLAIMED}`);
     });
@@ -899,7 +900,7 @@ describe('a supplier that never answers', () => {
   test('getJob gives up after 20 s, without the claim warning (a poll claims nothing)', async () => {
     const supplierBudgets = shortened();
     const s = scenario({ escrow: 'claimed', answer: hangs });
-    await rejectsWith(s.poll(), (message) => {
+    await rejectsWith(heldOpen(s.poll()), (message) => {
       cleanOf(message);
       assert.equal(message, `Could not poll job ${JOB_ID} of escrow ${ESCROW_REF}: the supplier did not answer within 20 s.`);
     });
@@ -1507,7 +1508,7 @@ describe('a supplier that never answers GET /capability', () => {
     const receipt = receiptOf(SUPPLIER_KEY, ESCROW_REF);
     const signature = signWith(SUPPLIER_KEY, receipt);
     const s = scenario({ escrow: 'submitted', supplierPkh: pkhOf(SUPPLIER_KEY), receiptHash: committedHash(receipt, signature), answer: hangs });
-    await rejectsWith(s.verify({ receipt, signature, result: RESULT }), (message) => {
+    await rejectsWith(heldOpen(s.verify({ receipt, signature, result: RESULT })), (message) => {
       assert.equal(message, `Cannot verify a receipt for escrow ${ESCROW_REF}: the supplier's public key could not be read (the supplier did not answer within 20 s); pass supplier_pub_key_hex.`);
     });
     assert.deepEqual(budgets.filter((ms) => ms === 20_000), [20_000], 'the key is asked for once, with a 20 s budget');
@@ -1584,7 +1585,7 @@ describe('a manifest host that never answers', () => {
       if (signal.aborted) reject(signal.reason);
       else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
     })) as unknown as typeof fetch;
-    assert.deepEqual(await fetchManifest('https://203.0.113.9/manifest.json', hangs), { error: 'the supplier did not answer within 15 s' });
+    assert.deepEqual(await heldOpen(fetchManifest('https://203.0.113.9/manifest.json', hangs)), { error: 'the supplier did not answer within 15 s' });
     assert.deepEqual(budgets, [15_000], 'one call, one 15 s budget');
   });
 });

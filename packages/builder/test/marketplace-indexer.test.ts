@@ -6,6 +6,7 @@ import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { fetchSuppliers, fetchCapabilities, fetchSupplier, fetchEscrows, ESCROWS_MAX_BYTES, koiosUtxoInfo, koiosTxInputCreds, koiosTxInputRefs, koiosCredentialUtxos, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
 import { ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_SCRIPT_HASH, INDEXER_URL, indexerUrlFrom } from '../src/vector/marketplace-constants.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
+import { heldOpen } from './fixtures/held-open.ts';
 
 const fakeFetch = (body: unknown, status = 200) => (async () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
 
@@ -597,7 +598,7 @@ describe('fetchEscrows', () => {
       const slow = (async (_url: string, init: { signal: AbortSignal }) => new Response(new ReadableStream<Uint8Array>({
         start(c) { c.enqueue(enc.encode('[{"utxo_ref":"')); init.signal.addEventListener('abort', () => c.error(init.signal.reason)); },
       }), { status: 200 })) as unknown as typeof fetch;
-      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: slow, timeoutMs: 30 }), safeMessage(/^list escrows: indexer list read timed out after 14 bytes$/));
+      await assert.rejects(() => heldOpen(fetchEscrows(buyer, { fetchImpl: slow, timeoutMs: 30 })), safeMessage(/^list escrows: indexer list read timed out after 14 bytes$/));
     });
     test('an answer with no body is no list', async () => {
       await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: (async () => new Response(null, { status: 200 })) as unknown as typeof fetch }), safeMessage(/^list escrows: response was not valid JSON$/));
