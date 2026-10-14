@@ -9,6 +9,11 @@ on:
         default: 'latest'
         type: string
 
+# One mainnet deploy at a time, for the reason given in deploy.yml.
+concurrency:
+  group: deploy-mainnet
+  cancel-in-progress: false
+
 jobs:
   deploy-mainnet:
     runs-on: nixos

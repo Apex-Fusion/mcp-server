@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
 
+# One deploy at a time. Two pushes a few seconds apart (two merges) otherwise start two runs that race on the
+# VM's single `vector-mcp` container, and the loser's `docker run` fails on the name. A push that lands during a
+# deploy waits; of several waiting pushes only the newest deploys. A running deploy is never cancelled: a cancel
+# between `docker rm` and `docker run` would leave the VM with no container.
+concurrency:
+  group: deploy-testnet
+  cancel-in-progress: false
+
 jobs:
   build-and-deploy:
     runs-on: nixos
