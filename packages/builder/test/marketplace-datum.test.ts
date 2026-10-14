@@ -2,10 +2,11 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { Data } from '@lucid-evolution/lucid';
+import { Data, Constr, fromText } from '@lucid-evolution/lucid';
 import {
   decodeAdvertDatum, decodeEscrowDatum, encodeEscrowDatum, canonicalize,
   requestSpecHash, wirePayloadFor, promptHashForPayload, escrowLockFloor, parseOutRef, formatOutRef,
+  advertTextFieldsRoundTrip,
 } from '../src/vector/marketplace-datum.ts';
 import {
   ADVERT_DATUM_HEX, ADVERT_EXPECTED, ESCROW_OPEN_DATUM_HEX, ESCROW_EXPECTED, ESCROW_LOCKED_LOVELACE, ESCROW_REF,
@@ -22,6 +23,19 @@ describe('advert datum', () => {
   });
   test('request_spec_hash of that advert matches the live escrow datum', () => {
     assert.equal(requestSpecHash(decodeAdvertDatum(ADVERT_DATUM_HEX)), ESCROW_EXPECTED.request_spec_hash);
+  });
+  // max_output_tokens and max_processing_ms become JS numbers that later code does arithmetic on (deliver_by = now + window).
+  // Past 2^53 a Number silently rounds, so the decoder refuses instead of handing on a wrong duration.
+  test('max_output_tokens and max_processing_ms must be safe integers, and the error names the field', () => {
+    const withField = (index: number, value: bigint) => { const c = Data.from(ADVERT_DATUM_HEX) as Constr<Data>; c.fields[index] = value; return Data.to(c); };
+    const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+    for (const [index, name] of [[3, 'max_output_tokens'], [4, 'max_processing_ms']] as const) {
+      assert.equal(decodeAdvertDatum(withField(index, MAX_SAFE))[name], Number.MAX_SAFE_INTEGER, `${name}: 2^53 - 1 is fine`);
+      assert.equal(decodeAdvertDatum(withField(index, -MAX_SAFE))[name], -Number.MAX_SAFE_INTEGER, `${name}: the decoder stays lenient about sign`);
+      for (const bad of [MAX_SAFE + 1n, MAX_SAFE + 2n, -MAX_SAFE - 1n, 2n ** 64n, 10n ** 40n]) {
+        assert.throws(() => decodeAdvertDatum(withField(index, bad)), new RegExp(`advert\\.${name}: .*safe`), `${name} = ${bad}`);
+      }
+    }
   });
 });
 
@@ -96,5 +110,39 @@ describe('hashing', () => {
     assert.deepEqual(parseOutRef(ESCROW_REF), { txHash: ESCROW_REF.slice(0, 64), outputIndex: 0 });
     assert.equal(formatOutRef(ESCROW_REF.slice(0, 64), 0), ESCROW_REF);
     assert.throws(() => parseOutRef('nope#1'), /out ref/);
+  });
+});
+
+// decodeAdvertDatum reads the four text fields with toText, which is lossy for bytes that are not UTF-8 (invalid
+// sequences become U+FFFD, a leading BOM is dropped). Writing such an advert's capability id into an escrow datum
+// would produce different bytes than the advert holds, so the Post builder checks the raw bytes first.
+describe('advertTextFieldsRoundTrip', () => {
+  const TEXT_FIELDS = { capability_id: 1, model: 2, endpoint_url: 8, detail_uri: 9 } as const;
+  const withField = (index: number, value: unknown): string => {
+    const c = Data.from(ADVERT_DATUM_HEX) as Constr<Data>;
+    c.fields[index] = value as Data;
+    return Data.to(c);
+  };
+  test('the live advert round-trips, empty detail_uri included', () => {
+    assert.equal(advertTextFieldsRoundTrip(ADVERT_DATUM_HEX), true);
+  });
+  test('valid multi-byte UTF-8 round-trips in every text field', () => {
+    const text = fromText('café ☕ 日本語 🚀');
+    for (const [name, index] of Object.entries(TEXT_FIELDS)) assert.equal(advertTextFieldsRoundTrip(withField(index, text)), true, name);
+  });
+  test('a long text field (chunked bytestring in Lucid-compact framing) round-trips', () => {
+    const datum = withField(TEXT_FIELDS.endpoint_url, fromText('https://' + 'a'.repeat(200) + '.example'));
+    assert.ok(datum.startsWith('d8799f'), 'Lucid-compact framing');
+    assert.equal(advertTextFieldsRoundTrip(datum), true);
+  });
+  test('a lone ff byte in any of the four text fields does not', () => {
+    for (const [name, index] of Object.entries(TEXT_FIELDS)) assert.equal(advertTextFieldsRoundTrip(withField(index, 'ff')), false, name);
+  });
+  test('other byte sequences toText cannot reproduce do not: truncated, overlong, surrogate, leading BOM, mid-string', () => {
+    for (const hex of ['c3', 'c080', 'eda080', 'efbbbf61', '61ff62']) assert.equal(advertTextFieldsRoundTrip(withField(TEXT_FIELDS.model, hex)), false, hex);
+  });
+  test('anything that is not a well-formed advert datum is false, not a throw', () => {
+    for (const hex of [ESCROW_OPEN_DATUM_HEX, 'd87980', 'ff', 'zz', '']) assert.equal(advertTextFieldsRoundTrip(hex), false, JSON.stringify(hex));
+    assert.equal(advertTextFieldsRoundTrip(withField(TEXT_FIELDS.capability_id, 5n)), false, 'integer where bytes belong');
   });
 });

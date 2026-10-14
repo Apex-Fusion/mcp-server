@@ -50,6 +50,17 @@ export class FixtureProvider implements Provider {
     return fixtureProtocolParameters();
   }
 
+  // Chain-clock stand-ins. OgmiosProvider has both; the base Provider interface does not, but ensureSlotConfig
+  // (gov-build.ts, called by every builder that sets a validity bound) needs getSystemStartMs. The start is Vector
+  // mainnet's, so slot arithmetic in a test lands where it does on the real chain. A test that wants another clock
+  // overrides them per instance (see gov-build.test.ts).
+  async getSystemStartMs(): Promise<number> {
+    return 1756485600000;
+  }
+  async getNetworkTip(): Promise<{ slot: number; hash: string }> {
+    return { slot: 0, hash: '' };
+  }
+
   async getUtxos(addressOrCredential: Address | Credential): Promise<UTxO[]> {
     if (typeof addressOrCredential !== 'string') {
       throw new Error('FixtureProvider: credential queries not supported offline');

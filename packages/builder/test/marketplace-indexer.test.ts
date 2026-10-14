@@ -1,9 +1,12 @@
 // packages/builder/test/marketplace-indexer.test.ts
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
-import { ADVERT_ADDRESS, ESCROW_ADDRESS, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
+import { Constr, Data, credentialToAddress } from '@lucid-evolution/lucid';
+import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
+import { fetchSuppliers, fetchCapabilities, fetchSupplier, fetchEscrows, ESCROWS_MAX_BYTES, koiosUtxoInfo, koiosTxInputCreds, koiosTxInputRefs, koiosCredentialUtxos, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
+import { ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_SCRIPT_HASH, INDEXER_URL, indexerUrlFrom } from '../src/vector/marketplace-constants.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
+import { heldOpen } from './fixtures/held-open.ts';
 
 const fakeFetch = (body: unknown, status = 200) => (async () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
 
@@ -59,6 +62,19 @@ describe('indexer client failure surfaces', () => {
   });
   test('koiosUtxoInfo reports the status of a failed call', async () => {
     await assert.rejects(() => koiosUtxoInfo('https://koios.example', ['a'.repeat(64) + '#0'], fakeFetch({}, 500)), safeMessage(/^Koios utxo_info answered 500$/));
+  });
+});
+
+describe('indexer base URL', () => {
+  test('is the configured URL without trailing slashes, so no request path starts with a double slash', () => {
+    assert.equal(indexerUrlFrom('https://idx.example'), 'https://idx.example');
+    assert.equal(indexerUrlFrom('https://idx.example/'), 'https://idx.example');
+    assert.equal(indexerUrlFrom('https://idx.example///'), 'https://idx.example');
+    assert.equal(indexerUrlFrom('https://idx.example/base/'), 'https://idx.example/base');
+    assert.ok(!INDEXER_URL.endsWith('/'));
+  });
+  test('is the public indexer when nothing is configured', () => {
+    for (const unset of [undefined, '']) assert.equal(indexerUrlFrom(unset), 'https://mp-indexer.vector.apexfusion.org');
   });
 });
 
@@ -134,6 +150,12 @@ const errorOf = (r: Awaited<ReturnType<typeof readAdvert>>): string => {
 };
 
 describe('readAdvert', () => {
+  test('asks the Koios it is given, and the configured one when it is given none', async () => {
+    const { f, calls } = koiosReturning([utxoAt(ADVERT_REF, ADVERT_ADDRESS, ADVERT_DATUM_HEX)]);
+    await readAdvert(ADVERT_REF, f, 'https://other-koios.example//');
+    await readAdvert(ADVERT_REF, f);
+    assert.deepEqual(calls.map((c) => c.url), ['https://other-koios.example/api/v1/utxo_info', `${VECTOR_KOIOS_URL.replace(/\/+$/, '')}/api/v1/utxo_info`]);
+  });
   test('returns the decoded advert, the UTxO and the spent flag for an advert at the advert script address', async () => {
     const { f, calls } = koiosReturning([utxoAt(ADVERT_REF, ADVERT_ADDRESS, ADVERT_DATUM_HEX)]);
     const r = await readAdvert(ADVERT_REF, f);
@@ -179,6 +201,16 @@ describe('readAdvert', () => {
       assert.equal(errorOf(r), `UTxO ${ESCROW_REF} does not hold an advert datum.`, `datum ${String(datum).slice(0, 12)}`);
     }
   });
+  test('a refused advert says why when the decoder names the field that is out of range, and only then', async () => {
+    const advertWith = (change: (c: Constr<Data>) => void) => { const c = Data.from(ADVERT_DATUM_HEX) as Constr<Data>; change(c); return Data.to(c); };
+    const refusal = async (datum: string) => errorOf(await readAdvert(ESCROW_REF, koiosReturning([utxoAt(ESCROW_REF, ADVERT_ADDRESS, datum)]).f));
+    const plain = `UTxO ${ESCROW_REF} does not hold an advert datum.`;
+    assert.equal(await refusal(advertWith((c) => { c.fields[3] = 2n ** 60n; })), `${plain} advert.max_output_tokens: integer outside the safe range.`);
+    assert.equal(await refusal(advertWith((c) => { c.fields[4] = -(2n ** 60n); })), `${plain} advert.max_processing_ms: integer outside the safe range.`);
+    // Field-named decoder messages are fixed text; anything else the decoder says (shape, CBOR) stays out of the caller's text.
+    assert.equal(await refusal(ESCROW_OPEN_DATUM_HEX), plain);
+    assert.equal(await refusal('ff'), plain);
+  });
   test('a malformed ref is refused without calling Koios', async () => {
     const { f, calls } = koiosReturning([]);
     assert.match(errorOf(await readAdvert('nope#1', f)), /^Invalid out ref/);
@@ -187,5 +219,395 @@ describe('readAdvert', () => {
   test('Koios failures still throw, with the safe messages', async () => {
     await assert.rejects(() => readAdvert(ADVERT_REF, fakeFetch({}, 500)), safeMessage(/^Koios utxo_info answered 500$/));
     await assert.rejects(() => readAdvert(ADVERT_REF, fakeFetch({ not: 'a list' })), safeMessage(/^Koios utxo_info: Koios returned a non-list response$/));
+  });
+});
+
+// koiosTxInputCreds: who funded a transaction. Koios tx_info answers with an EMPTY inputs list unless the request asks
+// for inputs (verified live 2026-10-13), and an empty list would read as "nobody signed", so the flags are pinned here.
+describe('koiosTxInputCreds', () => {
+  const TX = ADVERT_REF.slice(0, 64);
+  const SUPPLIER_ADDR = 'addr1v9qp4aqc5ln0kyrzwu5j3q0um64pes2mtvgja8ytmvk5djgfj3cl6'; // enterprise address of ADVERT_EXPECTED.supplier_pkh
+  const input = (cred: unknown, bech32 = SUPPLIER_ADDR) => ({ tx_hash: 'cc'.repeat(32), tx_index: 2, payment_addr: { bech32, cred }, stake_addr: null });
+  const row = (over: Record<string, unknown> = {}) => ({ tx_hash: TX, inputs: [input(ADVERT_EXPECTED.supplier_pkh)], ...over });
+
+  test('asks tx_info for the inputs and assets and returns the input payment credentials', async () => {
+    const { f, calls } = koiosReturning([row()]);
+    assert.deepEqual(await koiosTxInputCreds('https://koios.example/', TX, f), [ADVERT_EXPECTED.supplier_pkh]);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://koios.example/api/v1/tx_info');
+    assert.deepEqual(calls[0].body, { _tx_hashes: [TX], _inputs: true, _assets: true });
+  });
+  test('keeps every input credential, lowercased, and skips inputs that have none (Byron addresses)', async () => {
+    const entries = [row({ inputs: [input(ADVERT_EXPECTED.supplier_pkh.toUpperCase()), input(null, 'Ae2tdPwUPEZ'), input('bb'.repeat(28)), { tx_hash: 'dd'.repeat(32), tx_index: 0 }] })];
+    assert.deepEqual(await koiosTxInputCreds('https://koios.example', TX, koiosReturning(entries).f), [ADVERT_EXPECTED.supplier_pkh, 'bb'.repeat(28)]);
+  });
+  test('inputs that all lack a payment credential give an empty list (the caller refuses on that)', async () => {
+    assert.deepEqual(await koiosTxInputCreds('https://koios.example', TX, koiosReturning([row({ inputs: [input(null, 'Ae2tdPwUPEZ')] })]).f), []);
+  });
+  test('asks for, and matches, the lowercase hash', async () => {
+    const { f, calls } = koiosReturning([row()]);
+    assert.deepEqual(await koiosTxInputCreds('https://koios.example', TX.toUpperCase(), f), [ADVERT_EXPECTED.supplier_pkh]);
+    assert.deepEqual(calls[0].body._tx_hashes, [TX]);
+  });
+  test('POSTs to <base>/api/v1/tx_info however many slashes end the base', async () => {
+    const urls: string[] = [];
+    const f = (async (u: string) => { urls.push(u); return new Response(JSON.stringify([row()]), { status: 200 }); }) as unknown as typeof fetch;
+    for (const base of ['https://koios.example/', 'https://koios.example', 'https://koios.example//']) await koiosTxInputCreds(base, TX, f);
+    assert.deepEqual(urls, Array(3).fill('https://koios.example/api/v1/tx_info'));
+  });
+  test('failures name the operation and the status, never the URL or a body snippet', async () => {
+    const run = (f: typeof fetch) => koiosTxInputCreds('https://koios.example', TX, f);
+    await assert.rejects(() => run(fakeFetch({}, 500)), safeMessage(/^Koios tx_info answered 500$/));
+    await assert.rejects(() => run(htmlFetch), safeMessage(/^Koios tx_info: .*not valid JSON/));
+    for (const body of [{}, { error: 'x' }, null, 'oops', 7]) await assert.rejects(() => run(fakeFetch(body)), safeMessage(/^Koios tx_info: Koios returned a non-list response$/));
+  });
+  test('a transaction Koios does not know is a clear error, not an empty list that would read as "nobody signed"', async () => {
+    const run = (entries: unknown[]) => koiosTxInputCreds('https://koios.example', TX, koiosReturning(entries).f);
+    await assert.rejects(() => run([]), safeMessage(/^Koios tx_info: transaction not found$/));
+    await assert.rejects(() => run([row({ tx_hash: 'ee'.repeat(32) })]), safeMessage(/^Koios tx_info: transaction not found$/));
+  });
+  test('a row without inputs is a clear error: a ledger transaction always has one, so an empty list is Koios misbehaving', async () => {
+    for (const inputs of [undefined, null, 'x', {}, []]) {
+      await assert.rejects(() => koiosTxInputCreds('https://koios.example', TX, koiosReturning([row({ inputs })]).f), safeMessage(/^Koios tx_info: response has no inputs$/));
+    }
+  });
+});
+
+// koiosTxInputRefs: which outputs a set of transactions spent, in one tx_info call. The escrow lineage is read off that: the
+// transaction that created an escrow output spent the previous one. Same request and same guards as koiosTxInputCreds.
+describe('koiosTxInputRefs', () => {
+  const [TX_A, TX_B, TX_C] = ['aa', 'bb', 'cc'].map((b) => b.repeat(32));
+  const WALLET = 'addr1v9qp4aqc5ln0kyrzwu5j3q0um64pes2mtvgja8ytmvk5djgfj3cl6';
+  const WALLET_CRED = 'dd'.repeat(28);
+  /** An input as tx_info reports it: the ref of the output it spends, and the address and payment credential that output sits at. */
+  const input = (ref: string, cred: unknown = WALLET_CRED, bech32: unknown = WALLET) => ({ tx_hash: ref.slice(0, 64), tx_index: Number(ref.slice(65)), payment_addr: { bech32, cred }, stake_addr: null });
+  const row = (tx_hash: string, inputs: unknown) => ({ tx_hash, inputs });
+  const KOIOS = 'https://koios.example';
+
+  test('asks tx_info once for every transaction, inputs and assets included, and maps each to the refs of its inputs', async () => {
+    const { f, calls } = koiosReturning([row(TX_A, [input(`${TX_C}#0`, ESCROW_SCRIPT_HASH, ESCROW_ADDRESS), input(`${TX_C}#1`)]), row(TX_B, [input(`${TX_A}#2`)])]);
+    const refs = await koiosTxInputRefs('https://koios.example/', [TX_A, TX_B], f);
+    assert.deepEqual([...refs], [[TX_A, [`${TX_C}#0`, `${TX_C}#1`]], [TX_B, [`${TX_A}#2`]]]);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://koios.example/api/v1/tx_info');
+    assert.deepEqual(calls[0].body, { _tx_hashes: [TX_A, TX_B], _inputs: true, _assets: true });
+  });
+  test('asks for the distinct lowercase hashes and keys the map, and the refs, by lowercase', async () => {
+    const { f, calls } = koiosReturning([row(TX_A.toUpperCase(), [input(`${TX_B.toUpperCase()}#0`)])]);
+    const refs = await koiosTxInputRefs(KOIOS, [TX_A.toUpperCase(), TX_A], f);
+    assert.deepEqual(calls[0].body._tx_hashes, [TX_A]);
+    assert.deepEqual([...refs], [[TX_A, [`${TX_B}#0`]]]);
+  });
+  test('given a payment credential, keeps only the inputs held at addresses with it, whatever their stake part (case ignored); a transaction that spent nothing there maps to an empty list', async () => {
+    const staked = credentialToAddress('Mainnet', { type: 'Script', hash: ESCROW_SCRIPT_HASH }, { type: 'Key', hash: 'ee'.repeat(28) });
+    const rows = [
+      row(TX_A, [input(`${TX_C}#0`, ESCROW_SCRIPT_HASH, ESCROW_ADDRESS), input(`${TX_C}#1`, ESCROW_SCRIPT_HASH, staked), input(`${TX_C}#2`)]),
+      row(TX_B, [input(`${TX_C}#3`)]),
+    ];
+    const refs = await koiosTxInputRefs(KOIOS, [TX_A, TX_B], koiosReturning(rows).f, ESCROW_SCRIPT_HASH.toUpperCase());
+    assert.deepEqual([...refs], [[TX_A, [`${TX_C}#0`, `${TX_C}#1`]], [TX_B, []]]);
+  });
+  test('the filter reads the payment credential Koios reports, not the address text', async () => {
+    const rows = [row(TX_A, [input(`${TX_C}#0`, WALLET_CRED, ESCROW_ADDRESS), input(`${TX_C}#1`, ESCROW_SCRIPT_HASH, WALLET), input(`${TX_C}#2`, undefined, ESCROW_ADDRESS)])];
+    const refs = await koiosTxInputRefs(KOIOS, [TX_A], koiosReturning(rows).f, ESCROW_SCRIPT_HASH);
+    assert.deepEqual(refs.get(TX_A), [`${TX_C}#1`]);
+  });
+  test('a transaction Koios does not know is absent from the map, and rows nobody asked about are ignored', async () => {
+    const refs = await koiosTxInputRefs(KOIOS, [TX_A, TX_B], koiosReturning([row(TX_A, [input(`${TX_C}#0`)]), row(TX_C, [input(`${TX_A}#0`)])]).f);
+    assert.deepEqual([...refs.keys()], [TX_A]);
+    assert.equal(refs.has(TX_B), false);
+    assert.equal((await koiosTxInputRefs(KOIOS, [TX_B], koiosReturning([]).f)).size, 0);
+  });
+  test('no hashes: nothing is asked and nothing comes back', async () => {
+    const { f, calls } = koiosReturning([]);
+    assert.equal((await koiosTxInputRefs(KOIOS, [], f)).size, 0);
+    assert.equal(calls.length, 0);
+  });
+  test('inputs without a usable ref are skipped', async () => {
+    const odd = [input(`${TX_C}#0`), { payment_addr: { bech32: WALLET } }, { tx_hash: 7, tx_index: 0 }, { tx_hash: TX_B, tx_index: 'x' }, { tx_hash: TX_B, tx_index: 1.5 }, null];
+    assert.deepEqual((await koiosTxInputRefs(KOIOS, [TX_A], koiosReturning([row(TX_A, odd)]).f)).get(TX_A), [`${TX_C}#0`]);
+  });
+  test('a known transaction whose inputs are missing or empty is an error: a ledger transaction always has one, so that is Koios misbehaving', async () => {
+    for (const inputs of [undefined, null, 'x', {}, []]) {
+      await assert.rejects(() => koiosTxInputRefs(KOIOS, [TX_A], koiosReturning([row(TX_A, inputs)]).f), safeMessage(/^Koios tx_info: response has no inputs$/));
+    }
+  });
+  test('POSTs to <base>/api/v1/tx_info however many slashes end the base', async () => {
+    const urls: string[] = [];
+    const f = (async (u: string) => { urls.push(u); return new Response(JSON.stringify([row(TX_A, [input(`${TX_C}#0`)])]), { status: 200 }); }) as unknown as typeof fetch;
+    for (const base of ['https://koios.example/', 'https://koios.example', 'https://koios.example//']) await koiosTxInputRefs(base, [TX_A], f);
+    assert.deepEqual(urls, Array(3).fill('https://koios.example/api/v1/tx_info'));
+  });
+  test('failures name the operation and the status, never the URL or a body snippet', async () => {
+    const run = (f: typeof fetch) => koiosTxInputRefs(KOIOS, [TX_A], f);
+    await assert.rejects(() => run(fakeFetch({}, 500)), safeMessage(/^Koios tx_info answered 500$/));
+    await assert.rejects(() => run(htmlFetch), safeMessage(/^Koios tx_info: .*not valid JSON/));
+    for (const body of [{}, { error: 'x' }, null, 'oops', 7]) await assert.rejects(() => run(fakeFetch(body)), safeMessage(/^Koios tx_info: Koios returned a non-list response$/));
+  });
+});
+
+// koiosCredentialUtxos: every unspent output at an address with a given payment credential, stake part and all. The escrow
+// validator finds the continuation of a Claim or Submit by payment credential alone, so the live escrow can sit at an address
+// the enterprise address does not cover; only a credential query sees it. Koios pages at 1,000 rows, so it is read page by page.
+describe('koiosCredentialUtxos', () => {
+  const CRED = ESCROW_SCRIPT_HASH;
+  const KOIOS = 'https://koios.example';
+  const rowN = (i: number) => ({ tx_hash: i.toString(16).padStart(64, '0'), tx_index: 0, address: ESCROW_ADDRESS, value: '2261030', payment_cred: CRED, inline_datum: { bytes: 'd87980' }, is_spent: false });
+  /** A Koios that pages the way PostgREST does: offset and limit from the query string, rows from `all`, never more than `cap` at once. */
+  const paging = (all: unknown[], cap = 1000) => {
+    const calls: Array<{ url: string; body: any; offset: number; limit: number }> = [];
+    const f = (async (u: string, init: any) => {
+      const q = new URL(u).searchParams;
+      const offset = Number(q.get('offset') ?? 0);
+      const limit = Math.min(Number(q.get('limit') ?? cap), cap);
+      calls.push({ url: u, body: JSON.parse(init.body), offset, limit });
+      return new Response(JSON.stringify(all.slice(offset, offset + limit)), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { f, calls };
+  };
+
+  test('asks credential_utxos for the credential with extended rows, in a fixed order, and returns the rows', async () => {
+    const { f, calls } = paging([rowN(1), rowN(2)]);
+    const rows = await koiosCredentialUtxos('https://koios.example/', CRED.toUpperCase(), f);
+    assert.deepEqual(rows.map((r) => r.tx_hash), [rowN(1).tx_hash, rowN(2).tx_hash]);
+    assert.equal(calls.length, 1);
+    const url = new URL(calls[0].url);
+    assert.equal(`${url.origin}${url.pathname}`, 'https://koios.example/api/v1/credential_utxos');
+    assert.equal(url.searchParams.get('order'), 'tx_hash.asc,tx_index.asc');
+    assert.deepEqual([calls[0].offset, calls[0].limit], [0, 100]);
+    assert.deepEqual(calls[0].body, { _payment_credentials: [CRED], _extended: true });
+  });
+  test('reads page after page until a short one, and the pages join up', async () => {
+    const all = [1, 2, 3, 4, 5].map(rowN);
+    const { f, calls } = paging(all);
+    const rows = await koiosCredentialUtxos(KOIOS, CRED, f, { pageSize: 2 });
+    assert.deepEqual(calls.map((c) => [c.offset, c.limit]), [[0, 2], [2, 2], [4, 2]]);
+    assert.deepEqual(rows, all);
+  });
+  test('a page that is exactly full costs one more request, which comes back empty', async () => {
+    const { f, calls } = paging([1, 2, 3, 4].map(rowN));
+    assert.equal((await koiosCredentialUtxos(KOIOS, CRED, f, { pageSize: 2 })).length, 4);
+    assert.deepEqual(calls.map((c) => c.offset), [0, 2, 4]);
+  });
+  test('a datum slice narrows the read on the server (hex only); what Koios sends is returned as it comes', async () => {
+    const { f, calls } = paging([rowN(1)]);
+    await koiosCredentialUtxos(KOIOS, CRED, f, { datumContains: 'ABCD01' });
+    assert.equal(new URL(calls[0].url).searchParams.get('inline_datum->>bytes'), 'like.*abcd01*');
+    const none = paging([]);
+    for (const slice of ['', 'xyz', 'ab cd', 'ab*', '%', 'ab'.repeat(200)]) {
+      await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, none.f, { datumContains: slice }), /hex/, JSON.stringify(slice.slice(0, 12)));
+    }
+    assert.equal(none.calls.length, 0, 'nothing was asked for a slice that is not hex');
+  });
+  test('refuses to read without end: maxRows caps what one call collects', async () => {
+    const { f, calls } = paging(Array.from({ length: 10 }, (_, i) => rowN(i + 1)));
+    await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, f, { pageSize: 2, maxRows: 4 }), safeMessage(/^Koios credential_utxos: 4 or more outputs matched; refusing to read them all$/));
+    assert.equal(calls.length, 2);
+  });
+  test('the credential must be 28 bytes of hex, checked before anything is asked', async () => {
+    const { f, calls } = paging([]);
+    for (const bad of ['', 'zz', 'ab'.repeat(27), 'ab'.repeat(29)]) await assert.rejects(() => koiosCredentialUtxos(KOIOS, bad, f), /payment credential/, JSON.stringify(bad.slice(0, 8)));
+    assert.equal(calls.length, 0);
+  });
+  test('entries that are not rows are dropped', async () => {
+    const { f } = paging([rowN(1), null, 'x', {}, { tx_hash: 'ab', tx_index: 'x' }, { tx_hash: rowN(2).tx_hash, tx_index: 1.5 }, rowN(3)]);
+    assert.deepEqual((await koiosCredentialUtxos(KOIOS, CRED, f)).map((r) => r.tx_hash), [rowN(1).tx_hash, rowN(3).tx_hash]);
+  });
+  // The loop ends on a short page or on maxRows. maxRows counts everything Koios sent, not only the well-formed rows: a Koios that
+  // sends full pages of junk (or the same page again and again) would otherwise never reach it. The fakes below give up after 50
+  // requests so that a loop that does not end fails the test instead of hanging it.
+  const runaway = (page: (call: number) => unknown[]) => {
+    let calls = 0;
+    const f = (async () => {
+      if (++calls > 50) throw new Error('runaway: still paging after 50 requests');
+      return new Response(JSON.stringify(page(calls)), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { f, calls: () => calls };
+  };
+  test('full pages of entries that are not rows still count toward maxRows: the read is refused, not run for ever', async () => {
+    const junk = runaway(() => [null, 'x']);
+    await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, junk.f, { pageSize: 2, maxRows: 6 }), safeMessage(/^Koios credential_utxos: 6 or more outputs matched; refusing to read them all$/));
+    assert.equal(junk.calls(), 3);
+  });
+  test('the same page sent again and again (an offset that is ignored) is stopped by maxRows too', async () => {
+    const same = runaway(() => [rowN(1), rowN(2)]);
+    await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, same.f, { pageSize: 2, maxRows: 6 }), safeMessage(/^Koios credential_utxos: 6 or more outputs matched/));
+    assert.equal(same.calls(), 3);
+  });
+  test('a row that is listed on two pages (the set shifted while it was read) comes back once, in the order it first appeared', async () => {
+    const { f } = paging([1, 2, 3, 2, 4].map(rowN)); // pages of two: [1, 2] [3, 2] [4]
+    assert.deepEqual((await koiosCredentialUtxos(KOIOS, CRED, f, { pageSize: 2 })).map((r) => r.tx_hash), [1, 2, 3, 4].map((i) => rowN(i).tx_hash));
+  });
+  test('a ref is the same ref whatever the case of its hash, and an output index tells two rows of one transaction apart', async () => {
+    const lower = rowN(0xab); // a hash with letters in it
+    const upper = { ...lower, tx_hash: lower.tx_hash.toUpperCase() };
+    const sibling = { ...lower, tx_index: 1 };
+    assert.notEqual(upper.tx_hash, lower.tx_hash);
+    const { f } = paging([lower, upper, sibling]);
+    assert.deepEqual((await koiosCredentialUtxos(KOIOS, CRED, f)).map((r) => [r.tx_hash, r.tx_index]), [[lower.tx_hash, 0], [lower.tx_hash, 1]]);
+  });
+  test('maxRows is honoured to the entry: the last page asked for is cut to what is left, so no more than maxRows are read', async () => {
+    const { f, calls } = paging(Array.from({ length: 1000 }, (_, i) => rowN(i + 1)));
+    await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, f, { pageSize: 100, maxRows: 150 }), safeMessage(/^Koios credential_utxos: 150 or more outputs matched; refusing to read them all$/));
+    assert.deepEqual(calls.map((c) => [c.offset, c.limit]), [[0, 100], [100, 50]]);
+    const small = paging(Array.from({ length: 10 }, (_, i) => rowN(i + 1)));
+    await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, small.f, { pageSize: 100, maxRows: 7 }), /7 or more outputs/);
+    assert.deepEqual(small.calls.map((c) => [c.offset, c.limit]), [[0, 7]], 'a cap below the page size cuts the first page too');
+  });
+  test('fewer entries than maxRows are all returned; exactly maxRows are refused, as a full last page cannot say there is no more', async () => {
+    const four = paging([1, 2, 3, 4].map(rowN));
+    assert.equal((await koiosCredentialUtxos(KOIOS, CRED, four.f, { pageSize: 2, maxRows: 5 })).length, 4);
+    assert.deepEqual(four.calls.map((c) => [c.offset, c.limit]), [[0, 2], [2, 2], [4, 1]]);
+    await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, paging([1, 2, 3, 4].map(rowN)).f, { pageSize: 2, maxRows: 4 }), /4 or more outputs matched/);
+  });
+  test('maxRows must be a positive whole number, checked before anything is asked', async () => {
+    const none = runaway(() => []);
+    for (const maxRows of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, none.f, { maxRows }), /row limit/, String(maxRows));
+    assert.equal(none.calls(), 0);
+  });
+  test('a page size that is not a positive whole number is refused before anything is asked', async () => {
+    const none = runaway(() => []);
+    for (const pageSize of [0, -1, 1.5, Number.NaN]) await assert.rejects(() => koiosCredentialUtxos(KOIOS, CRED, none.f, { pageSize }), /page size/, String(pageSize));
+    assert.equal(none.calls(), 0);
+  });
+  test('POSTs to <base>/api/v1/credential_utxos however many slashes end the base', async () => {
+    const urls: string[] = [];
+    const f = (async (u: string) => { urls.push(u); return new Response('[]', { status: 200 }); }) as unknown as typeof fetch;
+    for (const base of ['https://koios.example/', 'https://koios.example', 'https://koios.example//']) await koiosCredentialUtxos(base, CRED, f);
+    assert.deepEqual(urls.map((u) => u.split('?')[0]), Array(3).fill('https://koios.example/api/v1/credential_utxos'));
+  });
+  test('failures name the operation and the status, never the URL or a body snippet', async () => {
+    const run = (f: typeof fetch) => koiosCredentialUtxos(KOIOS, CRED, f);
+    await assert.rejects(() => run(fakeFetch({}, 500)), safeMessage(/^Koios credential_utxos answered 500$/));
+    await assert.rejects(() => run(htmlFetch), safeMessage(/^Koios credential_utxos: .*not valid JSON/));
+    for (const body of [{}, { error: 'x' }, null, 'oops', 7]) await assert.rejects(() => run(fakeFetch(body)), safeMessage(/^Koios credential_utxos: Koios returned a non-list response$/));
+  });
+});
+
+// The escrow rows of the marketplace indexer: the one place that says where a settled escrow's Submitted output was. They are untrusted
+// rows, handed back as they came.
+describe('fetchEscrows', () => {
+  const recording = (body: unknown = []) => {
+    const urls: string[] = [];
+    const f = (async (url: string) => { urls.push(String(url)); return new Response(JSON.stringify(body), { status: 200 }); }) as unknown as typeof fetch;
+    return { f, urls };
+  };
+  test('asks for the escrows of a buyer and returns the list as it came, junk and all', async () => {
+    const body = [{ utxo_ref: 'a'.repeat(64) + '#0', state: 'Submitted' }, 'junk', null, 7];
+    const { f, urls } = recording(body);
+    assert.deepEqual(await fetchEscrows('ab'.repeat(28), { fetchImpl: f }), body);
+    assert.deepEqual(urls, [`${INDEXER_URL}/escrows?buyer=${'ab'.repeat(28)}`]);
+  });
+  test('escapes what it is given: nothing a caller passes becomes another parameter or another path', async () => {
+    const { f, urls } = recording();
+    await fetchEscrows('x&supplier=y#z /../w', { fetchImpl: f });
+    assert.deepEqual(urls, [`${INDEXER_URL}/escrows?buyer=x%26supplier%3Dy%23z%20%2F..%2Fw`]);
+  });
+  test('failures name the operation and the status, and carry neither the endpoint nor a snippet of the body', async () => {
+    const buyer = 'ab'.repeat(28);
+    await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: fakeFetch({}, 502) }), safeMessage(/^list escrows: indexer answered 502$/));
+    await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: htmlFetch }), safeMessage(/^list escrows: .*not valid JSON/));
+    for (const body of [{}, { rows: [] }, null, 'oops', 7]) await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: fakeFetch(body) }), safeMessage(/^list escrows: indexer returned a non-list response$/));
+  });
+
+  // Anyone can post escrows under a key of their own, so the list of one key's escrows has no natural end, and every verify of a settled
+  // escrow of that buyer would read it whole. It is read to ESCROWS_MAX_BYTES and no further: by its content-length before a byte is read, and by
+  // a running count while it streams (a content-length can be absent or can lie).
+  describe('the cap on the list', () => {
+    const buyer = 'ab'.repeat(28);
+    const enc = new TextEncoder();
+    const eAcute = String.fromCharCode(0xe9); // two bytes in UTF-8
+    const overCap = new RegExp(`^list escrows: the answer is over the ${ESCROWS_MAX_BYTES} byte limit$`);
+    const bodyFetch = (text: string) => (async () => new Response(text, { status: 200 })) as unknown as typeof fetch;
+    /** A JSON list of one string, `bytes` bytes long in all ('[' + '"' + text + '"' + ']'). */
+    const listOfSize = (bytes: number, char = 'x') => '[' + JSON.stringify(char.repeat((bytes - 4) / enc.encode(char).byteLength)) + ']';
+    /**
+     * A stream that records how often it was pulled (highWaterMark 0: only when something reads) and whether it was cancelled. With `loop` it
+     * gives its chunks over and over, 64 of them in all, which is far more than the cap: a reader without the cap reads to the end and fails on
+     * what it read, where an endless stream would hang it.
+     */
+    const watched = (chunks: Uint8Array[], loop = false) => {
+      const seen = { pulls: 0, cancelled: false };
+      let next = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(c) { seen.pulls++; if (next >= (loop ? 64 : chunks.length)) c.close(); else c.enqueue(chunks[next++ % chunks.length]); },
+        cancel() { seen.cancelled = true; },
+      }, { highWaterMark: 0 });
+      return { seen, stream };
+    };
+    const streamed = (stream: ReadableStream<Uint8Array>, headers: Record<string, string> = {}) => (async () => new Response(stream, { status: 200, headers })) as unknown as typeof fetch;
+
+    test('a list of exactly the cap is read, and one byte more is refused', async () => {
+      assert.equal(ESCROWS_MAX_BYTES, 8 * 1024 * 1024, 'the cap is 8 MiB: about 10,000 rows of the indexer');
+      const atCap = listOfSize(ESCROWS_MAX_BYTES);
+      assert.equal(enc.encode(atCap).byteLength, ESCROWS_MAX_BYTES);
+      assert.deepEqual(await fetchEscrows(buyer, { fetchImpl: bodyFetch(atCap) }), ['x'.repeat(ESCROWS_MAX_BYTES - 4)]);
+      const over = listOfSize(ESCROWS_MAX_BYTES + 1);
+      assert.equal(enc.encode(over).byteLength, ESCROWS_MAX_BYTES + 1);
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: bodyFetch(over) }), safeMessage(overCap));
+    });
+    test('the cap counts bytes, not characters', async () => {
+      const wide = listOfSize(ESCROWS_MAX_BYTES + 2, eAcute); // 2 bytes a character: about 4.2 million characters, 8 MiB + 2 bytes
+      assert.ok(wide.length < ESCROWS_MAX_BYTES, 'fewer characters than the cap');
+      assert.equal(enc.encode(wide).byteLength, ESCROWS_MAX_BYTES + 2);
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: bodyFetch(wide) }), safeMessage(overCap));
+    });
+    test('an answer that announces more than the cap is refused before a byte is read, and its stream is cancelled', async () => {
+      const { seen, stream } = watched([enc.encode('[]')]);
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: streamed(stream, { 'content-length': String(ESCROWS_MAX_BYTES + 1) }) }), safeMessage(overCap));
+      assert.equal(seen.pulls, 0, 'nothing was read');
+      assert.equal(seen.cancelled, true);
+    });
+    test('an answer that announces exactly the cap is read', async () => {
+      const { stream } = watched([enc.encode('[{"a":1}]')]);
+      assert.deepEqual(await fetchEscrows(buyer, { fetchImpl: streamed(stream, { 'content-length': String(ESCROWS_MAX_BYTES) }) }), [{ a: 1 }]);
+    });
+    test('a long answer that announces nothing is cut off after the cap, and its stream is cancelled', async () => {
+      const { seen, stream } = watched([new Uint8Array(1024 * 1024).fill(0x20)], true); // one MiB of spaces for every read, and no content-length
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: streamed(stream) }), safeMessage(overCap));
+      assert.ok(seen.pulls <= ESCROWS_MAX_BYTES / (1024 * 1024) + 2, `read ${seen.pulls} MiB before it stopped`);
+      assert.equal(seen.cancelled, true);
+    });
+    test('an answer that announces less than it sends is cut off just the same', async () => {
+      const { seen, stream } = watched([new Uint8Array(1024 * 1024).fill(0x20)], true);
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: streamed(stream, { 'content-length': '12' }) }), safeMessage(overCap));
+      assert.equal(seen.cancelled, true);
+    });
+    test('a list that arrives in pieces is joined before it is decoded: a character split between two pieces is whole', async () => {
+      const bytes = enc.encode('[{"state":"Submitted","note":"caf' + eAcute + '"}]');
+      const at = bytes.indexOf(0xc3) + 1; // between the two bytes of the e-acute
+      const { stream } = watched([bytes.slice(0, at), bytes.slice(at)]);
+      assert.deepEqual(await fetchEscrows(buyer, { fetchImpl: streamed(stream) }), [{ state: 'Submitted', note: 'caf' + eAcute }]);
+    });
+    test('a byte order mark is let through as a plain res.json() lets it through', async () => {
+      assert.deepEqual(await fetchEscrows(buyer, { fetchImpl: bodyFetch(String.fromCharCode(0xfeff) + '[1]') }), [1]);
+    });
+    test('a stream that breaks in the middle fails like any unreadable body, without what the break said', async () => {
+      const stream = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(enc.encode('[{"a"')); c.error(new Error('socket hang up talking to http://internal-proxy.example')); } });
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: streamed(stream) }), safeMessage(/^list escrows: response was not valid JSON$/));
+    });
+    test('a body that stalls past the time budget says so and how far it got, not "not valid JSON"', async () => {
+      for (const name of ['TimeoutError', 'AbortError']) {
+        const stalls = (async () => new Response(new ReadableStream<Uint8Array>({
+          start(c) { c.enqueue(enc.encode('[{"a"')); setTimeout(() => c.error(new DOMException('The operation was aborted due to timeout', name)), 5); },
+        }), { status: 200 })) as unknown as typeof fetch;
+        await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: stalls }), safeMessage(/^list escrows: indexer list read timed out after 5 bytes$/), name);
+      }
+    });
+    test('the time budget of the call runs to the end of the body: a list that never finishes is cut off and counted', async () => {
+      const slow = (async (_url: string, init: { signal: AbortSignal }) => new Response(new ReadableStream<Uint8Array>({
+        start(c) { c.enqueue(enc.encode('[{"utxo_ref":"')); init.signal.addEventListener('abort', () => c.error(init.signal.reason)); },
+      }), { status: 200 })) as unknown as typeof fetch;
+      await assert.rejects(() => heldOpen(fetchEscrows(buyer, { fetchImpl: slow, timeoutMs: 30 })), safeMessage(/^list escrows: indexer list read timed out after 14 bytes$/));
+    });
+    test('an answer with no body is no list', async () => {
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: (async () => new Response(null, { status: 200 })) as unknown as typeof fetch }), safeMessage(/^list escrows: response was not valid JSON$/));
+    });
+    test('only the list of escrows has the cap: the others are read whole', async () => {
+      const big = Array.from({ length: Math.ceil(ESCROWS_MAX_BYTES / 40) }, (_, n) => ({ capability_id: `c${n}`, supplier_count: n }));
+      const text = JSON.stringify(big);
+      assert.ok(enc.encode(text).byteLength > ESCROWS_MAX_BYTES);
+      assert.equal((await fetchCapabilities({ fetchImpl: bodyFetch(text) })).length, big.length);
+    });
   });
 });
