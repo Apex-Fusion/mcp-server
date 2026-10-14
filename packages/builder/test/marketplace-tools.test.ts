@@ -560,7 +560,7 @@ function escrowWorld(chain: UTxO[], posted: EscrowDatum, spent: boolean, koios: 
 
 // The troubleshooting tips, whole: they name what a missed accept window costs (escrow.ak handle_release only bounds the supplier's
 // take from below, at price + supplier bond + buyer bond, so it may keep everything locked), and the transport tool by name.
-const ACCEPT_TIPS = '\n\n**Troubleshooting Tips:**\n1. The escrow must be in Submitted state; the refusal above names the state when one was found. Verify the receipt first with vector_marketplace_verify_receipt\n' +
+const ACCEPT_TIPS = '\n\n**Troubleshooting Tips:**\n1. The escrow must be in Submitted state; the refusal above names the state when one was found. If a receipt has arrived, verify it first with vector_marketplace_verify_receipt\n' +
   '2. Accept must land within 600 s of Submit; after that the supplier may Release and keep everything locked (price + both bonds + any floor excess)\n3. The wallet needs one pure 5-unit output as collateral';
 const RECLAIM_TIPS = '\n\n**Troubleshooting Tips:**\n1. Reclaim opens only after deliver_by\n' +
   '2. A Submitted escrow cannot be reclaimed: accept within 600 s of Submit; after that the supplier may Release and keep everything locked (price + both bonds + any floor excess)';
@@ -609,7 +609,7 @@ describe('vector_build_marketplace_accept', () => {
     assert.equal(t, `Failed to build accept: Accept window closed at ${new Date(submitted.submitted_at! + 600_000).toISOString()}; the supplier may now Release. (escrow ${ESCROW_REF})${ACCEPT_TIPS}`);
     // a poll cannot see the chain, so the tips do not send the buyer to one: the refusal above names the state, and the receipt is verified first
     assert.doesNotMatch(t, /get_job|poll/);
-    assert.ok(t.includes('1. The escrow must be in Submitted state; the refusal above names the state when one was found. Verify the receipt first with vector_marketplace_verify_receipt\n'), t);
+    assert.ok(t.includes('1. The escrow must be in Submitted state; the refusal above names the state when one was found. If a receipt has arrived, verify it first with vector_marketplace_verify_receipt\n'), t);
   });
   test('says when a payout was raised to the 1-unit minimum: the supplier\'s, and the buyer bond', async () => {
     const now = Date.now();

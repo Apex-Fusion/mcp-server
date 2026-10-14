@@ -57,11 +57,13 @@ const askedConfiguredKoios = (urls: Array<string | undefined>) => {
 const TIPS = '\n\n**Troubleshooting Tips:**\n';
 /** The accept clock, word for word, as every text that has to carry it says it. */
 const ACCEPT_CLOCK = "Accept must land within 600 s of the supplier's Submit; after that the supplier may Release and keep everything locked (price + both bonds + any floor excess).";
-/** How to see where the escrow stands, word for word: a poll asks the supplier and never the chain; the Accept builder is the way to check. */
-const CHECK_BY_ACCEPT = 'A poll cannot see the escrow on chain: vector_build_marketplace_accept is the way to check it (it builds only for a Submitted escrow, prints the seconds left, and its refusal names the state; what it builds is unsigned, so do not sign it before the receipt is checked).';
 /** What the buyer's two choices cost, word for word. */
-const CHOICES = 'accepting pays the supplier price + supplier bond and returns your buyer bond; not accepting lets the supplier Release and keep everything locked (price + both bonds + any floor excess)';
-const NO_DISPUTE = 'There is no dispute path: the buyer decides.';
+const CHOICES = 'accepting pays the supplier price + supplier bond and returns your buyer bond and any floor excess; not accepting lets the supplier Release and keep everything locked (price + both bonds + any floor excess)';
+const NO_DISPUTE = 'There is no dispute path.';
+/** The choice for a Submitted escrow whose receipt cannot be checked in time, word for word: the one sentence of every text that can meet that case. */
+const NO_RECEIPT = `If it is Submitted and no receipt can be checked before the seconds left run out, you choose without one: ${CHOICES}. ${NO_DISPUTE}`;
+/** How to see where the escrow stands, word for word: a poll cannot see where it stands now; the Accept builder is the way to check. */
+const CHECK_BY_ACCEPT = `A poll cannot see where the escrow stands now: vector_build_marketplace_accept is the way to check it (it builds only for a Submitted escrow, prints the seconds left, and its refusal names the state when one was found; what it builds is unsigned, so if a receipt has arrived, check it before you sign). ${NO_RECEIPT}`;
 /**
  * What a failed send or a failed job says about the escrow, word for word. A tool that gave up does not know where the escrow stands: the
  * supplier's Submit may still land (after a submit_timeout, and a 200 is served only after the Submit confirmed), a Submitted escrow cannot be
@@ -69,7 +71,7 @@ const NO_DISPUTE = 'There is no dispute path: the buyer decides.';
  * The send tool's tip follows a refusal that may already name the state, so it opens with "Unless the error names it".
  */
 const NOT_KNOWN = "tool does not know the escrow's state and the supplier's Submit may still land. ";
-const CHECK = 'Check the escrow with vector_build_marketplace_accept, which builds only for a Submitted escrow, prints the seconds left, and refuses with the state otherwise: if it is Submitted, accept within the window. ' + `${ACCEPT_CLOCK} `;
+const CHECK = 'Check the escrow with vector_build_marketplace_accept, which builds only for a Submitted escrow, prints the seconds left, and refuses with the state when one was found: if it is Submitted, accept within the window. ' + `${ACCEPT_CLOCK} ${NO_RECEIPT} `;
 const CHECK_THE_ESCROW = `This ${NOT_KNOWN}${CHECK}`;
 const CHECK_THE_ESCROW_UNLESS_NAMED = `Unless the error names it, this ${NOT_KNOWN}${CHECK}`;
 const RECLAIM_AFTER = (when: string) => `If it is Open or Claimed, reclaim after ${when} with vector_build_marketplace_reclaim.`;
@@ -188,7 +190,7 @@ describe(POLL, () => {
   const signature = signWith(SUPPLIER_KEY, receipt);
   const finished = (result: string, over: Record<string, unknown> = {}) => reply(200, { choices: [{ message: { content: result } }], usage: {}, receipt, receipt_signature: signature, escrow_ref: ESCROW_REF, ...over });
   const POLL_TIPS = `${TIPS}1. Check escrow_ref and job_id, and use the buyerAddress that posted and funded the escrow\n2. The supplier may be restarting or slow; poll again in a few seconds\n` +
-    `3. A failed poll says nothing about the escrow on chain, and its accept clock may be running: ${ACCEPT_CLOCK} ${CHECK_BY_ACCEPT}`;
+    `3. A failed poll says nothing about where the escrow stands now, and its accept clock may be running: ${ACCEPT_CLOCK} ${CHECK_BY_ACCEPT}`;
 
   test('pending says to poll again, and that a poll cannot see the accept clock: it carries the clock and the way to check', async () => {
     const s = run({ escrow: 'claimed', answer: () => reply(202, { status: 'running', escrow_ref: ESCROW_REF }) });
@@ -359,6 +361,10 @@ describe(VERIFY, () => {
   const VERIFIED_COPY = `${VERIFIED_HEAD} before you accept. Next: vector_build_marketplace_accept, which must land within 600 s of the supplier's Submit.`;
   const SETTLED_COPY = `${VERIFIED_HEAD}. The escrow is already settled, so there is nothing left to accept.`;
   const CLOCK = ACCEPT_CLOCK;
+  const REPORT = "If the receipt is wrong, report the supplier to the marketplace operator (the contact in the supplier's registry record or manifest).";
+  /** What the advice says when no Submitted output was found, word for word. */
+  const NOTHING_TO_ACCEPT = "No Submitted output was found on chain. If the escrow is Open or Claimed there is nothing to accept yet, and declining costs nothing: if the supplier never submits, vector_build_marketplace_reclaim after deliver_by returns everything. " +
+    `Check where it stands with vector_build_marketplace_accept (it builds only for a Submitted escrow, prints the seconds left, and its refusal names the state when one was found); if it is Submitted, the accept clock is running: ${CLOCK}`;
   const CHECKS = (over: Record<string, string> = {}) => ({ escrow_ref_matches: 'pass', response_hash_matches: 'pass', supplier_key_matches: 'pass', signature_valid: 'pass', on_chain_hash_matches: 'pass', prompt_hash_matches: 'pass', ...over });
   /** What a verdict that is not "verified" may say in words: nothing that calls the receipt verified. (The JSON block carries the flag, false.) */
   const notVerified = (t: string, verdict: string) => {
@@ -413,20 +419,60 @@ describe(VERIFY, () => {
     const t = await call(VERIFY, { ...args, receipt: other, receipt_signature: sig });
     assert.ok(markdownOf(t).includes(table(['FAIL (the receipt names another escrow)', 'pass', 'pass', 'pass', 'pass', 'pass'])));
     assert.ok(t.startsWith('# Receipt check: FAILED\n'));
-    assert.ok(markdownOf(t).endsWith(`At least one check failed. Whether to accept on this receipt is your call, and neither choice is free: ${CHOICES}. ${NO_DISPUTE} ${CLOCK} Report a supplier whose receipt is wrong.`));
+    assert.ok(markdownOf(t).endsWith(`At least one check failed. Whether to accept on this receipt is your call, and neither choice is free: ${CHOICES}. ${NO_DISPUTE} ${CLOCK} ${REPORT}`));
     notVerified(t, 'failed');
   });
-  test('a failed verdict states the trade-off instead of "do not accept": what accepting and not accepting each cost, no dispute path, the clock, and to report the supplier', async () => {
+  test('a failed verdict on a Submitted escrow states the trade-off instead of "do not accept": what accepting and not accepting each cost, no dispute path, the clock, and who to report the supplier to', async () => {
     submitted();
     const t = await call(VERIFY, { ...args, result: `${RESULT}…` });
     const advice = markdownOf(t).split('\n\n').at(-1)!;
     assert.doesNotMatch(advice, /do not accept/i);
-    assert.match(advice, /accepting pays the supplier price \+ supplier bond and returns your buyer bond/);
+    assert.match(advice, /accepting pays the supplier price \+ supplier bond and returns your buyer bond and any floor excess/);
     assert.match(advice, /not accepting lets the supplier Release and keep everything locked \(price \+ both bonds \+ any floor excess\)/);
-    assert.match(advice, /There is no dispute path: the buyer decides\./);
+    assert.match(advice, /There is no dispute path\./);
     assert.ok(advice.includes(ACCEPT_CLOCK));
-    assert.match(advice, /Report a supplier whose receipt is wrong\.$/);
+    assert.ok(advice.endsWith("If the receipt is wrong, report the supplier to the marketplace operator (the contact in the supplier's registry record or manifest)."));
     notVerified(t, 'failed');
+  });
+  // No Submitted output was found (the escrow is Open or Claimed, or the output was not locatable): the advice about an Accept and its clock
+  // would be about an escrow that may not be Submitted at all. It says there may be nothing to accept, that declining costs nothing then, that
+  // a reclaim after deliver_by returns everything, and how to find out where the escrow stands. Failed and incomplete verdicts alike.
+  describe('when no Submitted output was found', () => {
+    test('a failed verdict says there is nothing to accept yet, that declining costs nothing, and that a reclaim after deliver_by returns everything', async () => {
+      submitted({ escrow: 'claimed' });
+      const t = await call(VERIFY, { ...args, result: `${RESULT}…` });
+      assert.ok(t.startsWith('# Receipt check: FAILED\n'));
+      assert.equal(jsonOf(t).submitted_ref, null);
+      assert.ok(markdownOf(t).endsWith(`At least one check failed. If the result text may have been shortened or edited, pass it again exactly as it is in the JSON block of vector_marketplace_get_job. ${NOTHING_TO_ACCEPT}`));
+      const advice = markdownOf(t).split('\n\n').at(-1)!;
+      assert.doesNotMatch(advice, /do not accept|neither choice is free|report the supplier|your call/i); // the trade-off and the reporting are for a receipt that failed on a Submitted escrow
+      notVerified(t, 'failed');
+    });
+    test('an incomplete verdict says the same, and not "before you accept"', async () => {
+      submitted({ escrow: 'claimed' });
+      const t = await call(VERIFY, args);
+      assert.ok(t.startsWith('# Receipt check: INCOMPLETE\n'));
+      assert.equal(jsonOf(t).submitted_ref, null);
+      assert.ok(markdownOf(t).endsWith(`Nothing failed, but not every check ran (see the rows marked skipped), so this is not a verification: run it again with what is missing. ${NOTHING_TO_ACCEPT}`));
+      assert.doesNotMatch(markdownOf(t).split('\n\n').at(-1)!, /before you accept/);
+      notVerified(t, 'incomplete');
+    });
+    test('an output that could not be located (a settled escrow the indexer knows nothing of) gets the same advice, which sends the caller to the Accept builder to see where the escrow stands', async () => {
+      submitted({ escrow: 'finished', indexer: { rows: [] } });
+      const t = await call(VERIFY, args);
+      assert.equal(jsonOf(t).submitted_ref, null);
+      assert.ok(markdownOf(t).endsWith(NOTHING_TO_ACCEPT));
+      assert.ok(NOTHING_TO_ACCEPT.includes('vector_build_marketplace_accept (it builds only for a Submitted escrow, prints the seconds left, and its refusal names the state when one was found)'));
+    });
+    test('a Submitted output that was found keeps the advice of before (the clock and the trade-off), and a settled one drops the clock', async () => {
+      submitted();
+      const live = await call(VERIFY, { ...args, result: undefined });
+      assert.ok(markdownOf(live).endsWith(`run it again with what is missing before you accept. ${CLOCK}`));
+      assert.doesNotMatch(markdownOf(live), /nothing to accept yet/);
+      submitted({ escrow: 'finished' });
+      const settled = await call(VERIFY, { ...args, result: undefined });
+      assert.ok(markdownOf(settled).endsWith('run it again with what is missing.'));
+    });
   });
   test('a receipt signed by another key fails the signature check and the text never says verified', async () => {
     submitted();
@@ -563,6 +609,36 @@ describe(VERIFY, () => {
   });
 });
 
+// A Submitted escrow whose receipt cannot be checked in time: the Submit is on chain and the poll is pending or has failed, so there is nothing to
+// verify, and the seconds left are running. Every text that can meet that case says, in the same sentence, that the buyer chooses without a receipt and
+// what each choice costs; and none tells the buyer not to sign before a receipt exists.
+describe('a Submitted escrow with no receipt to check', () => {
+  const SENTENCE = 'If it is Submitted and no receipt can be checked before the seconds left run out, you choose without one: accepting pays the supplier price + supplier bond and returns your buyer bond and any floor excess; not accepting lets the supplier Release and keep everything locked (price + both bonds + any floor excess). There is no dispute path.';
+  test('the send success, a pending poll, a failed job, a failed poll and a failed send all carry that one sentence, once', async () => {
+    const texts: Array<[string, string]> = [];
+    run();
+    texts.push(['send success', await call(SEND, { escrow_ref: ESCROW_REF, payload: PAYLOAD, ...BUYER })]);
+    run({ escrow: 'submitted', answer: () => reply(202, { status: 'running', escrow_ref: ESCROW_REF }) });
+    texts.push(['poll pending', await call(POLL, { escrow_ref: ESCROW_REF, job_id: JOB_ID, ...BUYER })]);
+    run({ escrow: 'submitted', answer: () => reply(504, { status: 'failed', reason: 'submit_timeout', message: 'the submit did not confirm' }) });
+    texts.push(['poll failed (the job)', await call(POLL, { escrow_ref: ESCROW_REF, job_id: JOB_ID, ...BUYER })]);
+    run({ escrow: 'claimed' });
+    texts.push(['poll error (the tips)', await call(POLL, { escrow_ref: ESCROW_REF, job_id: '../capability', ...BUYER })]);
+    run({ funder: 'stranger', endpoint: 'https://203.0.113.99' });
+    texts.push(['send error (the tips)', await call(SEND, { escrow_ref: ESCROW_REF, payload: PAYLOAD, ...BUYER })]);
+    for (const [where, t] of texts) {
+      assert.equal(t.split(SENTENCE).length - 1, 1, `${where}: the sentence, once`);
+      assert.doesNotMatch(t, /do not sign it before the receipt is checked/, where);
+      assert.match(t, /vector_build_marketplace_accept/, `${where}: and the way to check`);
+    }
+  });
+  test('what it says of the unsigned Accept is narrower than "do not sign": if a receipt has arrived, check it first', async () => {
+    run({ escrow: 'submitted', answer: () => reply(202, { status: 'running', escrow_ref: ESCROW_REF }) });
+    const t = await call(POLL, { escrow_ref: ESCROW_REF, job_id: JOB_ID, ...BUYER });
+    assert.ok(t.includes('what it builds is unsigned, so if a receipt has arrived, check it before you sign)'));
+  });
+});
+
 describe('a caller over budget', () => {
   test('is turned away by each transport tool before the node or the network is touched', async () => {
     const spent = new RateLimiter(1);
@@ -599,7 +675,8 @@ describe('the tool texts', () => {
     assert.match(text(SEND), /waits up to 90 s/);
     assert.match(text(POLL), /waits up to 20 s/);
     assert.match(text(POLL), /after it has been accepted or released/);
-    assert.match(text(POLL), /It asks the supplier, not the chain, so it cannot show the escrow's state or the accept clock: vector_build_marketplace_accept is the way to check \(it builds only for a Submitted escrow and prints the seconds left\)\./);
+    assert.match(text(POLL), /It reads the Post output and asks the supplier, so it cannot show where the escrow stands now or the accept clock: vector_build_marketplace_accept is the way to check \(it builds only for a Submitted escrow and prints the seconds left\)\./);
+    assert.doesNotMatch(text(POLL), /not the chain|on chain/);
     assert.match(text(POLL), /malformed_response/);
     assert.match(text(POLL), /escrow_mismatch/);
     assert.match(text(POLL), /A job id is a bearer token for its result/);
