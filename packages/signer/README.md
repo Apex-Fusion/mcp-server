@@ -6,6 +6,76 @@ The hosted builder is keyless: it constructs unsigned transactions but cannot si
 package signs them locally, so your key never reaches a shared server or your model
 provider.
 
+## Install with npx
+
+> **Written for after the first npm release.** At the time of writing,
+> `@apexfusion/vector-mcp-signer` is not on npm, so `npx` cannot find it. If it still cannot,
+> build from this repo (`npm run build`) and use `node packages/signer/build/index.js` in place
+> of `npx -y @apexfusion/vector-mcp-signer`; the MCP client entry for that is under
+> [Running it](#running-it).
+
+Needs Node 22 or newer. No clone, no build.
+
+**1. Generate your key.** Run this once, in your own terminal:
+
+```bash
+npx -y @apexfusion/vector-mcp-signer keygen
+```
+
+> **Never run `keygen` through an AI assistant's shell tool.** Its output goes back into the
+> conversation, so the only copy of your key would reach your model provider.
+
+It makes a fresh Ed25519 key that controls one address and nothing else, and prints it with
+that address (a mainnet enterprise address: payment key only, no stake key):
+
+```text
+# Paste these two lines into the signer's env in your MCP client config. Keep the key private.
+VECTOR_SIGNER_PRIVATE_KEY=ed25519_sk1…
+VECTOR_SIGNER_ADDRESS=addr1v…
+
+# Send this address (only this) to whoever funds your key: addr1v…
+```
+
+**The key line is the only copy.** `keygen` prints it once, to your terminal, and stores
+nothing: no file, no log, no mnemonic that could rebuild it. Lose it and whatever sits at that
+address is gone, so save it in your password manager before you close the terminal. The address
+is public. The key is not: it goes in step 2 and nowhere else (not a chat, a ticket or a prompt).
+
+**2. Register the signer in your MCP client** (Claude Desktop's `claude_desktop_config.json`,
+for example). Paste the two values from step 1 into `env`, and set a path for the audit log:
+
+```json
+{
+  "mcpServers": {
+    "vector-signer": {
+      "command": "npx",
+      "args": ["-y", "@apexfusion/vector-mcp-signer"],
+      "env": {
+        "VECTOR_SIGNER_PRIVATE_KEY": "ed25519_sk1…",
+        "VECTOR_SIGNER_ADDRESS": "addr1v…",
+        "VECTOR_SIGNER_AUDIT_LOG_PATH": "C:/Users/you/vector-signer-audit-log.json"
+      }
+    }
+  }
+}
+```
+
+Replace the audit log path with a file in a folder that already exists. Use forward slashes
+even on Windows (backslashes would need doubling in JSON); on Linux or macOS use an absolute
+path in your home folder instead. Your daily spend limit is counted from that log, and under
+`npx` the default lands inside npm's cache (`_npx/<hash>/node_modules/`), so the daily total can
+reset when the cache is cleared, and two spellings of the package spec (with and without
+`@2.0.0`, say) would get two separate logs.
+
+Restart the client, then ask your agent to call `vector_signer_get_address` (it should return
+the address `keygen` printed) and `vector_signer_get_spend_limits` (its `Audit log:` line shows
+the path in use).
+
+**3. Fund the address.** Send the address, and only the address, to whoever funds your key.
+
+`keygen` is the quickest way to a dedicated key with a small blast radius. If you would rather
+use a mnemonic you already hold, see [Configuration](#configuration).
+
 ## Why it has no network
 
 - **stdio transport only** - no port, no HTTP listener, nothing to connect to
@@ -205,7 +275,7 @@ last bullet under Known limitations above for the full evidence.
 
 ```bash
 npm run test:unit          # pure logic, no wallet, no network (from the repo root)
-npm run test:smoke:signer  # builds the signer, boots it over stdio, exercises all 4 tools
+npm run test:smoke:signer  # builds the signer, boots it over stdio, exercises all 4 tools and `keygen`
 ```
 
 Both run in CI on every PR.
