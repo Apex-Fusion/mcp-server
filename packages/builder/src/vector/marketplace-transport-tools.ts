@@ -162,7 +162,7 @@ export function registerMarketplaceTransportTools(server: McpServer, checkRateLi
           `**Signature:** \`${cell(v.receiptSignature, 140)}\`\n` +
           (v.submittedRef ? `**Submitted output the supplier reports:** \`${v.submittedRef}\` (the supplier's word; vector_marketplace_verify_receipt reads the chain)\n` : '') +
           '\nNext: vector_marketplace_verify_receipt with the receipt, receipt_signature and result from the JSON block, then vector_build_marketplace_accept if the result is what you asked for. ' +
-          `The accept clock runs from the supplier's Submit, which is normally on chain by the time a result is served: ${ACCEPT_CLOCK} Declining is not free: ${CHOICES}. ${NO_DISPUTE}`;
+          `If the escrow is not settled yet, its accept clock runs from the supplier's Submit, which is normally on chain by the time a result is served: ${ACCEPT_CLOCK} Declining is not free: ${CHOICES}. ${NO_DISPUTE}`;
         return text(withJson(md, { state: 'done', job_id, escrow_ref: ref, result: v.result, receipt: v.receipt, receipt_signature: v.receiptSignature, submitted_ref: v.submittedRef, supplier_pkh: r.supplierPkh }));
       } catch (err) {
         return fail('poll job', err, [

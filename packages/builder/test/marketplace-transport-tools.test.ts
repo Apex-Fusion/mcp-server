@@ -215,7 +215,7 @@ describe(POLL, () => {
     assert.equal(lineOf(md, '**Receipt names:**'), `**Receipt names:** supplier key hash \`${pkhOf(SUPPLIER_KEY)}\` · escrow \`${ESCROW_REF}\` · model \`echo-v1\``);
     assert.equal(lineOf(md, '**Signature:**'), `**Signature:** \`${signature}\``);
     assert.ok(md.endsWith('Next: vector_marketplace_verify_receipt with the receipt, receipt_signature and result from the JSON block, then vector_build_marketplace_accept if the result is what you asked for. ' +
-      `The accept clock runs from the supplier's Submit, which is normally on chain by the time a result is served: ${ACCEPT_CLOCK} Declining is not free: ${CHOICES}. ${NO_DISPUTE}`));
+      `If the escrow is not settled yet, its accept clock runs from the supplier's Submit, which is normally on chain by the time a result is served: ${ACCEPT_CLOCK} Declining is not free: ${CHOICES}. ${NO_DISPUTE}`));
     assert.ok(!md.includes('Shortened'), 'a short result has no note');
     assert.deepEqual(jsonOf(t), { state: 'done', job_id: JOB_ID, escrow_ref: ESCROW_REF, result: RESULT, receipt, receipt_signature: signature, submitted_ref: null, supplier_pkh: jsonOf(t).supplier_pkh });
     assert.match(jsonOf(t).supplier_pkh, /^[0-9a-f]{56}$/);
