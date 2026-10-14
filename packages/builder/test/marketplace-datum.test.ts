@@ -33,7 +33,7 @@ describe('advert datum', () => {
       assert.equal(decodeAdvertDatum(withField(index, MAX_SAFE))[name], Number.MAX_SAFE_INTEGER, `${name}: 2^53 - 1 is fine`);
       assert.equal(decodeAdvertDatum(withField(index, -MAX_SAFE))[name], -Number.MAX_SAFE_INTEGER, `${name}: the decoder stays lenient about sign`);
       for (const bad of [MAX_SAFE + 1n, MAX_SAFE + 2n, -MAX_SAFE - 1n, 2n ** 64n, 10n ** 40n]) {
-        assert.throws(() => decodeAdvertDatum(withField(index, bad)), new RegExp(`advert\.${name}: .*safe`), `${name} = ${bad}`);
+        assert.throws(() => decodeAdvertDatum(withField(index, bad)), new RegExp(`advert\\.${name}: .*safe`), `${name} = ${bad}`);
       }
     }
   });
