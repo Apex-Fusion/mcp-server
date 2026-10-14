@@ -92,7 +92,49 @@ describe('planPostEscrow', () => {
     assert.equal(plan.supplierBondLovelace, 1_000_000n);
     assert.equal(plan.buyerBondLovelace, 1_000_000n);
     assert.equal(plan.deliverBy, plan.datum.deliver_by);
+    assert.equal(plan.validTo, NOW + DELIVER_BY_BUFFER_MS);
     assert.equal(plan.lockLovelace, ESCROW_LOCKED_LOVELACE);
+  });
+  // A Post that lands late gives the supplier less than its window: deliver_by = posted_at + window + buffer, so a Post valid only for the
+  // buffer after posted_at leaves the supplier its full window even when it lands at the last moment.
+  describe('the Post is valid for at most the buffer after posted_at, not until deliver_by', () => {
+    test('validTo is posted_at + the buffer, and at the last moment the supplier still has its full window', () => {
+      const plan = planPostEscrow(advert, ADVERT_REF, OWN_PKH, 'hello', NOW);
+      assert.equal(plan.validTo, plan.datum.posted_at + DELIVER_BY_BUFFER_MS);
+      assert.equal(plan.deliverBy - plan.validTo, advert.max_processing_ms);
+      assert.ok(plan.validTo < plan.deliverBy);
+    });
+    test('whatever the window: the longest allowed (24 h) and none at all are valid for the same buffer', () => {
+      for (const max_processing_ms of [0, 10_000, MAX_PROCESSING_MS_CEILING]) {
+        const plan = planPostEscrow({ ...advert, max_processing_ms }, ADVERT_REF, OWN_PKH, 'x', NOW);
+        assert.equal(plan.validTo, NOW + DELIVER_BY_BUFFER_MS, `window ${max_processing_ms}`);
+        assert.equal(plan.deliverBy - plan.validTo, max_processing_ms, `window ${max_processing_ms}`);
+      }
+    });
+    test('a deliver_by the caller chose, however far, does not move it', () => {
+      for (const later of [NOW + advert.max_processing_ms + DELIVER_BY_BUFFER_MS, NOW + advert.max_processing_ms + 3_600_000, NOW + MAX_PROCESSING_MS_CEILING + DELIVER_BY_BUFFER_MS]) {
+        assert.equal(planPostEscrow(advert, ADVERT_REF, OWN_PKH, 'x', NOW, later).validTo, NOW + DELIVER_BY_BUFFER_MS, String(later));
+      }
+    });
+    test('a deliver_by nearer than that ends the validity sooner, at the last moment that still leaves the supplier its full window', () => {
+      const short = { ...advert, max_processing_ms: 10_000 };
+      assert.equal(planPostEscrow(short, ADVERT_REF, OWN_PKH, 'x', NOW, NOW + 11_000).validTo, NOW + 1_000, 'deliver_by - window');
+      assert.equal(planPostEscrow(short, ADVERT_REF, OWN_PKH, 'x', NOW, NOW + DELIVER_BY_BUFFER_MS).validTo, NOW + DELIVER_BY_BUFFER_MS - 10_000);
+      assert.equal(planPostEscrow(short, ADVERT_REF, OWN_PKH, 'x', NOW, NOW + 10_000 + DELIVER_BY_BUFFER_MS).validTo, NOW + DELIVER_BY_BUFFER_MS, 'the default: the two are the same');
+    });
+    test('whatever deliver_by the caller chooses, a Post that lands in time leaves the supplier its full window, and the validity is at most the buffer', () => {
+      for (const max_processing_ms of [0, 10_000, 300_000, MAX_PROCESSING_MS_CEILING]) {
+        for (const slack of [1, 1_000, 60_000, DELIVER_BY_BUFFER_MS - 1, DELIVER_BY_BUFFER_MS, DELIVER_BY_BUFFER_MS + 1, 3_600_000]) {
+          const deliverBy = NOW + max_processing_ms + slack;
+          if (deliverBy - NOW > MAX_PROCESSING_MS_CEILING + DELIVER_BY_BUFFER_MS) continue; // refused: more than 24 h plus the buffer
+          const plan = planPostEscrow({ ...advert, max_processing_ms }, ADVERT_REF, OWN_PKH, 'x', NOW, deliverBy);
+          const name = `window ${max_processing_ms}, slack ${slack}`;
+          assert.ok(plan.deliverBy - plan.validTo >= max_processing_ms, `${name}: the supplier keeps its window`);
+          assert.ok(plan.validTo > NOW && plan.validTo <= NOW + DELIVER_BY_BUFFER_MS, `${name}: validTo ${plan.validTo - NOW} ms after posted_at`);
+          assert.equal(plan.validTo, Math.min(NOW + DELIVER_BY_BUFFER_MS, deliverBy - max_processing_ms), name);
+        }
+      }
+    });
   });
   test('the endpoint host is the host the URL really connects to, port included, IDN in punycode', () => {
     const host = (endpoint_url: string) => planPostEscrow({ ...advert, endpoint_url }, ADVERT_REF, OWN_PKH, 'x', NOW).endpointHost;
@@ -307,14 +349,18 @@ describe('buildPostEscrow (offline)', () => {
     assert.equal(r.lockLovelace, 7_000_000n);
     assert.ok(inputRefs(r.txCbor).includes(`${FIXTURE_TXHASH}#0`), 'the 5-unit output funds the lock');
   });
-  test('requires the buyer key to sign and carries the validity window [now - 60 s, deliver_by] in slots of the Vector clock', async () => {
+  test('requires the buyer key to sign and carries the validity window [now - 60 s, now + the buffer] in slots of the Vector clock', async () => {
     const r = await post(koiosFake());
     const body = CML.Transaction.from_cbor_hex(r.txCbor).body();
     const signers = body.required_signers();
     assert.ok(signers && signers.len() === 1 && signers.get(0).to_hex() === OWN_PKH);
     const ZERO_TIME_MS = 1_756_485_600_000; // FixtureProvider.getSystemStartMs
     assert.equal(body.validity_interval_start(), BigInt(Math.floor((NOW - 60_000 - ZERO_TIME_MS) / 1000)));
-    assert.equal(body.ttl(), BigInt(Math.floor((r.deliverBy - ZERO_TIME_MS) / 1000)));
+    assert.equal(r.validTo, NOW + DELIVER_BY_BUFFER_MS);
+    assert.equal(body.ttl(), BigInt(Math.floor((r.validTo - ZERO_TIME_MS) / 1000)));
+    assert.notEqual(body.ttl(), BigInt(Math.floor((r.deliverBy - ZERO_TIME_MS) / 1000)), 'it is no longer valid until deliver_by');
+    // a Post that lands in the last valid second still leaves the supplier its full window
+    assert.ok(r.deliverBy - (ZERO_TIME_MS + Number(body.ttl()) * 1000) >= ADVERT_EXPECTED.max_processing_ms, 'the supplier keeps its window');
     assert.ok(BigInt(r.fee) >= MARKETPLACE_MIN_FEE, `fee ${r.fee} is below the marketplace minimum`);
   });
   test('stamps posted_at from the clock when nowMs is not given', async () => {
@@ -326,11 +372,23 @@ describe('buildPostEscrow (offline)', () => {
     assert.ok(d.posted_at >= before && d.posted_at <= after, `posted_at ${d.posted_at} not in [${before}, ${after}]`);
     assert.equal(d.deliver_by, d.posted_at + ADVERT_EXPECTED.max_processing_ms + DELIVER_BY_BUFFER_MS);
   });
-  test('an explicit deliver_by flows into the datum, the validity end and the result', async () => {
+  test('a deliver_by nearer than the buffer flows into the transaction: it is valid only until the supplier would have less than its window', async () => {
+    const short = koiosFake({ advertDatum: advertWith((c) => { c.fields[4] = 10_000n; }) }); // a 10 s window
+    const deliverByMs = NOW + 10_000 + 20_000; // 20 s of slack beyond the window
+    const r = await post(short, { deliverByMs });
+    const ZERO_TIME_MS = 1_756_485_600_000; // FixtureProvider.getSystemStartMs
+    assert.equal(r.deliverBy, deliverByMs);
+    assert.equal(r.validTo, NOW + 20_000);
+    assert.equal(CML.Transaction.from_cbor_hex(r.txCbor).body().ttl(), BigInt(Math.floor((NOW + 20_000 - ZERO_TIME_MS) / 1000)));
+  });
+  test('an explicit deliver_by flows into the datum and the result; the validity end stays posted_at + the buffer', async () => {
     const deliverByMs = NOW + ADVERT_EXPECTED.max_processing_ms + 3_600_000;
     const r = await post(koiosFake(), { deliverByMs });
     assert.equal(r.deliverBy, deliverByMs);
     assert.equal(decodeEscrowDatum(outputs(r.txCbor)[0].datum!).deliver_by, deliverByMs);
+    const ZERO_TIME_MS = 1_756_485_600_000; // FixtureProvider.getSystemStartMs
+    assert.equal(r.validTo, NOW + DELIVER_BY_BUFFER_MS);
+    assert.equal(CML.Transaction.from_cbor_hex(r.txCbor).body().ttl(), BigInt(Math.floor((NOW + DELIVER_BY_BUFFER_MS - ZERO_TIME_MS) / 1000)));
   });
 
   // The advert is checked in this order: Koios read (existence, address, datum) → spent → text → scope → plan → author.

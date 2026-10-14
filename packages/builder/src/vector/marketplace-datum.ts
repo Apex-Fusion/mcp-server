@@ -190,6 +190,8 @@ export function canonicalize(value: unknown): string {
   return JSON.stringify(sort(value));
 }
 export function sha256Utf8Hex(s: string): string { return createHash('sha256').update(s, 'utf8').digest('hex'); }
+/** The sha256 of bytes as they are, lower-case hex: for what arrives as bytes (a file served by a supplier), where decoding to text first would change them. */
+export function sha256BytesHex(bytes: Uint8Array): string { return createHash('sha256').update(bytes).digest('hex'); }
 export function requestSpecHash(a: Pick<AdvertDatum, 'capability_id' | 'max_output_tokens' | 'model'>): string {
   return sha256Utf8Hex(canonicalize({ capability_id: a.capability_id, max_output_tokens: a.max_output_tokens, model: a.model }));
 }

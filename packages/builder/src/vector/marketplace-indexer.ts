@@ -25,8 +25,15 @@ interface Opts { fetchImpl?: typeof fetch; timeoutMs?: number }
 // operator configuration and a JSON parse failure quotes the start of the response body (same rule as
 // formatServiceError in shared/provider.ts).
 async function readJson<T>(res: Response, what: string): Promise<T> {
-  try { return (await res.json()) as T; } catch { throw new Error(`${what}: response was not valid JSON`); }
+  try { return (await res.json()) as T; } catch (err) {
+    // The call's time budget runs to the end of the body (AbortSignal.timeout), so an answer that stalls part-way ends in the signal's
+    // own error: said as what it is, and not as a body that is not JSON.
+    if (isAbort(err)) throw new Error(`${what}: the answer timed out before it was read in full`);
+    throw new Error(`${what}: response was not valid JSON`);
+  }
 }
+/** Did the call's time budget (or an abort) end the read? AbortSignal.timeout says TimeoutError; an abort says AbortError. */
+const isAbort = (err: unknown): boolean => err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
 
 /**
  * The body of `res` as JSON, holding no more than `max` bytes: a longer answer is refused, by its content-length before a byte is read,
@@ -50,7 +57,7 @@ async function readJsonCapped<T>(res: Response, what: string, max: number): Prom
     }
   } catch (err) {
     // The call's time budget runs to the end of the body (AbortSignal.timeout), so a list that stalls part-way says so, and how far it got.
-    if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) throw new Error(`${what}: indexer list read timed out after ${total} bytes`);
+    if (isAbort(err)) throw new Error(`${what}: indexer list read timed out after ${total} bytes`);
     throw new Error(`${what}: response was not valid JSON`);
   }
   if (over) { await reader.cancel().catch(() => {}); throw tooLong(); }
@@ -143,6 +150,23 @@ export async function koiosUtxoInfo(koiosUrl: string, refs: string[], fetchImpl:
 }
 
 /**
+ * The most outputs one credential_utxos read will hold before it refuses (koiosCredentialUtxos `maxRows`). Anyone can lock outputs at the
+ * escrow credential, so a read that has no end would have none; the escrow resolver (marketplace-lineage.ts) says what a refusal means.
+ */
+export const CREDENTIAL_UTXOS_MAX_ROWS = 5_000;
+/**
+ * More outputs matched than a credential_utxos read will hold (see koiosCredentialUtxos). Not a failure of Koios: a set that big is not
+ * what an escrow leaves behind, and its message is the refusal, as it always was. A class of its own so that the resolver can tell it
+ * from a Koios that is down, and say what it means for the buyer (marketplace-lineage.ts).
+ */
+export class TooManyOutputs extends Error {
+  constructor(readonly maxRows: number) {
+    super(`Koios credential_utxos: ${maxRows} or more outputs matched; refusing to read them all`);
+    this.name = 'TooManyOutputs';
+  }
+}
+
+/**
  * Koios credential_utxos: the unspent outputs at every address whose payment credential is `paymentCredential` (28 bytes, hex),
  * whatever its stake part. The escrow validator finds the continuation of a Claim or Submit by payment credential alone, so the
  * live escrow can sit at an address that the enterprise address does not cover; only a credential query sees it. Koios pages at
@@ -151,7 +175,7 @@ export async function koiosUtxoInfo(koiosUrl: string, refs: string[], fetchImpl:
  * outputs whose inline datum contains it, which keeps a call small however many outputs the credential holds; the caller still
  * checks every row it gets. A row listed on two pages (the set can shift while it is read) is returned once. At most `maxRows`
  * entries are read, counting everything Koios sent whether or not it is a usable row: the last page asked for is cut to what the
- * cap leaves, and a full page that reaches the cap is refused, as it cannot say there is no more. A Koios that sends full pages
+ * cap leaves, and a full page that reaches the cap is refused (TooManyOutputs), as it cannot say there is no more. A Koios that sends full pages
  * of junk, or the same page again and again, cannot keep the read going. `pageSize` and `maxRows` must be positive whole numbers.
  * Errors name the operation and the status only.
  */
@@ -167,7 +191,7 @@ export async function koiosCredentialUtxos(
     filter = `&inline_datum->>bytes=like.*${opts.datumContains.toLowerCase()}*`;
   }
   const pageSize = opts.pageSize ?? 100;
-  const maxRows = opts.maxRows ?? 5_000;
+  const maxRows = opts.maxRows ?? CREDENTIAL_UTXOS_MAX_ROWS;
   // With a page size below one every page would count as full and add nothing to `read`: the loop below could not end. A cap
   // that is not a finite whole number of at least one is no cap.
   if (!Number.isInteger(pageSize) || pageSize < 1) throw new Error('The page size must be a positive whole number.');
@@ -185,7 +209,7 @@ export async function koiosCredentialUtxos(
       if (!rows.has(ref)) rows.set(ref, row as KoiosUtxo);
     }
     if (page.length < limit) return [...rows.values()];
-    if (read >= maxRows) throw new Error(`Koios credential_utxos: ${maxRows} or more outputs matched; refusing to read them all`);
+    if (read >= maxRows) throw new TooManyOutputs(maxRows);
   }
 }
 

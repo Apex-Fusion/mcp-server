@@ -11,6 +11,7 @@ import { ADVERT_ADDRESS, ESCROW_ADDRESS, INDEXER_URL } from '../../src/vector/ma
 import { canonicalize, decodeEscrowDatum, encodeEscrowDatum, promptHashForPayload } from '../../src/vector/marketplace-datum.ts';
 import type { EscrowDatum } from '../../src/vector/marketplace-datum.ts';
 import { sendJob, getJob, verifyJob } from '../../src/vector/marketplace-transport.ts';
+import type { SendClock } from '../../src/vector/marketplace-transport.ts';
 import { ADVERT_DATUM_HEX, ADVERT_REF, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './marketplace.fixture.ts';
 import { OWN_ADDRESS } from './fixture-provider.ts';
 import { world, escrowAt, ESCROW_TX, CLAIM_TX, SUBMIT_TX, DECOY_TX, SUPPLIER_ADDRESS, GENUINE_TXS, DECOY_TXS } from './escrow-koios.fixture.ts';
@@ -22,6 +23,9 @@ export const PAYLOAD = 'summarise the filing';
 export const SUPPLIER = 'https://203.0.113.7';
 export const JOB_ID = '3f2b8c1e-5a47-4d6e-9b0a-7c1d2e3f4a5b';
 export const HOSTILE = '{"error":"db password=hunter2 at https://internal.koios.example"}';
+
+/** A clock that does not move: a send in a test has its whole 90 s however long the machine takes. A test of the deadline hands in a clock that does. */
+export const FROZEN_CLOCK: SendClock = { startedAt: 0, now: () => 0 };
 
 export type Call = { url: string; method: string; headers: Record<string, string>; body: string };
 type Answer = Response | Promise<Response>;
@@ -189,7 +193,7 @@ export function scenario(o: Scenario = {}) {
     indexerCalls: () => indexerUrls,
     /** The tx_info questions asked about the Post transaction (who funded it). */
     fundingChecks: () => w.koios.calls.filter((c) => c.path === '/api/v1/tx_info' && (c.body._tx_hashes as string[]).includes(ESCROW_TX)).map((c) => c.body),
-    send: (over: Partial<Parameters<typeof sendJob>[2]> = {}) => sendJob(w.node, KOIOS, { escrowRef: named, payload: PAYLOAD, buyerAddress: OWN_ADDRESS, ...over }, fetchImpl),
+    send: (over: Partial<Parameters<typeof sendJob>[2]> = {}, clock: SendClock = FROZEN_CLOCK) => sendJob(w.node, KOIOS, { escrowRef: named, payload: PAYLOAD, buyerAddress: OWN_ADDRESS, ...over }, fetchImpl, clock),
     poll: (over: Partial<Parameters<typeof getJob>[1]> = {}) => getJob(KOIOS, { escrowRef: named, jobId: JOB_ID, buyerAddress: OWN_ADDRESS, ...over }, fetchImpl),
     verify: (p: Omit<Parameters<typeof verifyJob>[2], 'escrowRef'> & { escrowRef?: string }) => verifyJob(w.node, KOIOS, { escrowRef: named, ...p }, fetchImpl),
     /** What the tools are handed in a handler test: the node, and the fetch that answers for Koios, the advert and the supplier. */

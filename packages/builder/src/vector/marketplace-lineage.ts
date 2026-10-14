@@ -6,8 +6,9 @@ import type { Provider, UTxO } from '@lucid-evolution/lucid';
 import { ESCROW_SCRIPT_HASH } from './marketplace-constants.js';
 import { decodeEscrowDatum, encodeEscrowDatum, parseOutRef, formatOutRef } from './marketplace-datum.js';
 import type { EscrowDatum, EscrowState } from './marketplace-datum.js';
-import { koiosUtxoInfo, koiosCredentialUtxos, koiosTxInputRefs } from './marketplace-indexer.js';
+import { koiosUtxoInfo, koiosCredentialUtxos, koiosTxInputRefs, TooManyOutputs } from './marketplace-indexer.js';
 import type { KoiosUtxo } from './marketplace-indexer.js';
+import { ACCEPT_CLOCK } from './marketplace-shared.js';
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -27,12 +28,24 @@ export interface EscrowLineage {
 type Candidate = { txHash: string; outputIndex: number; datum: EscrowDatum };
 
 /**
+ * What a flood of decoys means for the buyer. Anyone can lock an output at the escrow credential that copies this escrow's public
+ * prompt hash, for the minimum value of an output each, and enough of them (the cap of the candidate read, 5,000) make the read
+ * refuse. Every Accept and every Reclaim of an escrow whose Post output is spent then goes unbuilt through these tools, because the
+ * escrow's own output cannot be told from the decoys. The escrow itself is untouched: what runs out is the accept clock.
+ */
+const FLOOD_RESIDUAL = "Only a flood of decoys leaves that many (anyone can lock an output at the escrow address that copies this escrow's public prompt hash), " +
+  "and these tools cannot tell the escrow's own output from them: they cannot build its Accept or its Reclaim while it lasts. " +
+  `If the supplier has submitted, the accept clock is running: ${ACCEPT_CLOCK} These tools cannot help within that window; the marketplace buyer SDK (agents-marketplace, acceptResult) can build the Accept.`;
+
+/**
  * What a failed Koios call may tell a caller. The messages of koiosUtxoInfo, koiosCredentialUtxos and koiosTxInputRefs name only
  * the operation and the status; any other failure (a transport error can carry the endpoint's host or URL) becomes a fixed phrase.
+ * A candidate read that refused because too many outputs matched (TooManyOutputs) says what that means for the buyer (FLOOD_RESIDUAL).
  * Exported for the transport module, whose advert read goes through the same Koios call.
  */
 export function koiosFailure(err: unknown): string {
   const message = errorText(err);
+  if (err instanceof TooManyOutputs) return `${message}. ${FLOOD_RESIDUAL}`;
   return /^Koios (utxo_info|credential_utxos|tx_info)/.test(message) ? message : 'Koios request failed (network error or timeout)';
 }
 
@@ -262,6 +275,12 @@ export async function readSubmittedOutput(
  * on Koios but not on the node, or the node's copy of an output differs from the one Koios described); UTxOs carry the escrow's
  * fields but none provably descends from it, or Koios does not know a transaction on the way yet; when two of them do; and when
  * the one that does differs from the escrow in a field Claim and Submit keep.
+ *
+ * Residual: the candidate read holds at most CREDENTIAL_UTXOS_MAX_ROWS (5,000) outputs, and anyone can lock decoys that copy the
+ * escrow's public prompt hash, so a flood of them makes a spent Post output unresolvable here, and with it every Accept and Reclaim
+ * that goes through these tools. The refusal says so, names the accept clock and the way out (the buyer SDK of agents-marketplace builds
+ * the Accept; FLOOD_RESIDUAL). It cannot be closed on this side: a bigger cap only raises the price of the flood, and the indexer's list
+ * is a third party's word.
  * `fetchImpl` stands in for fetch in the Koios calls (tests).
  */
 export async function resolveEscrowLineage(provider: Provider, koiosUrl: string, escrowRef: string, fetchImpl: typeof fetch = fetch): Promise<EscrowLineage> {

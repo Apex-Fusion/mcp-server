@@ -21,7 +21,12 @@ export function generateKey(): { privateKeyBech32: string; address: string; pubK
   return { privateKeyBech32: sk.to_bech32(), address, pubKeyHash: pkh.to_hex() };
 }
 
-export function printKeygen(): void {
+/**
+ * Prints the key and the address (see the header). `done` is called when stdout has taken the text, or has failed to: the one-shot
+ * command exits from it, because process.exit() straight after write() can drop what a pipe has not yet delivered, and this line is the
+ * only copy of the key.
+ */
+export function printKeygen(done?: (err?: Error | null) => void): void {
   const k = generateKey();
   process.stdout.write([
     "# Paste these two lines into the signer's env in your MCP client config. Keep the key private.",
@@ -30,5 +35,5 @@ export function printKeygen(): void {
     '',
     `# Send this address (only this) to whoever funds your key: ${k.address}`,
     '',
-  ].join('\n'));
+  ].join('\n'), (err) => done?.(err));
 }

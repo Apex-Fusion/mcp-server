@@ -41,6 +41,7 @@ import { OWN_ADDRESS } from './fixtures/fixture-provider.ts';
 import { world, credentialRequests, txInfoRequests, ESCROW_TX, CLAIM_TX, SUBMIT_TX, SUPPLIER_ADDRESS } from './fixtures/escrow-koios.fixture.ts';
 import { KOIOS, PAYLOAD, SUPPLIER, JOB_ID, HOSTILE, reply, accepted, BUYER_PKH, MAY_HAVE_CLAIMED, scenario, DECOY_SUBMITTED_REF, SUPPLIER_KEY, OTHER_KEY, pkhOf, pubHexOf, RESULT, receiptOf, signWith, committedHash } from './fixtures/transport-world.fixture.ts';
 import type { Call, Scenario } from './fixtures/transport-world.fixture.ts';
+import type { SendClock } from '../src/vector/marketplace-transport.ts';
 import { heldOpen } from './fixtures/held-open.ts';
 
 const SUBMITTED_REF = `${'ee'.repeat(32)}#0`;
@@ -921,6 +922,107 @@ describe('a supplier that never answers', () => {
   });
 });
 
+// A send has ONE budget of 90 s, started when the tool is entered. The reads before the POST (the escrow, who funded it, the advert) are
+// paid from it, and the POST is given what is left, so the whole call stays under the ~100 s at which the proxy drops it. The clocks
+// are injected: `slowKoios` makes every Koios read take `step` ms on a clock of its own.
+describe('the send deadline', () => {
+  afterEach(() => { mock.restoreAll(); });
+  /** Every budget a call is given, in order. AbortSignal.timeout is where a budget becomes a number; all but the Koios reads' 15 s are shortened to 30 ms. */
+  function recordBudgets() {
+    const budgets: number[] = [];
+    const real = AbortSignal.timeout.bind(AbortSignal);
+    mock.method(AbortSignal, 'timeout', (ms: number) => { budgets.push(ms); return real(ms === 15_000 ? ms : 30); });
+    return budgets;
+  }
+  /** Answers when the request is abandoned and not before, as a connection to a dead supplier does. */
+  const hangs = (_call: Call, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    const signal = init.signal as AbortSignal;
+    if (signal.aborted) reject(signal.reason);
+    else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+  /** A world whose Koios reads each take `step` ms on the clock it hands out; the supplier's answer takes none. */
+  function slowKoios(s: ReturnType<typeof scenario>, step: number, start = 1_700_000_000_000) {
+    let t = start;
+    const f = (async (url: string, init: RequestInit) => { if (String(url).includes('/api/v1/')) t += step; return s.fetchImpl(url, init); }) as unknown as typeof fetch;
+    const send = (clock: SendClock) => sendJob(s.node, KOIOS, { escrowRef: ESCROW_REF, payload: PAYLOAD, buyerAddress: OWN_ADDRESS }, f, clock);
+    return { send, elapsed: () => t - start, start, now: () => t };
+  }
+  const READS = 3; // a send of an Open escrow reads its Post output, who funded it, and its advert
+
+  test('the POST is given 90 s less what the reads before it took, counted from the start of the call', async () => {
+    const budgets = recordBudgets();
+    const s = scenario();
+    const k = slowKoios(s, 5_000);
+    const sent = await k.send({ startedAt: k.start, now: k.now });
+    assert.equal(sent.jobId, JOB_ID);
+    assert.equal(k.elapsed(), READS * 5_000, 'three reads of 5 s each');
+    assert.deepEqual(budgets.filter((ms) => ms !== 15_000), [75_000], 'the POST has 90 s less the 15 s the reads took');
+    assert.equal(s.sup.calls.length, 1);
+  });
+  test('the clock starts when sendJob is entered when the caller names no start', async () => {
+    const budgets = recordBudgets();
+    const s = scenario();
+    const k = slowKoios(s, 10_000);
+    await k.send({ now: k.now });
+    assert.deepEqual(budgets.filter((ms) => ms !== 15_000), [60_000], 'three reads of 10 s from the entry of sendJob');
+  });
+  test('a fresh call has the whole 90 s, and a clock that runs backwards never gives more', async () => {
+    const budgets = recordBudgets();
+    await scenario().send({}, { startedAt: 5_000, now: () => 5_000 });
+    await scenario().send({}, { startedAt: 10_000, now: () => 0 });
+    assert.deepEqual(budgets.filter((ms) => ms !== 15_000), [90_000, 90_000]);
+  });
+  test('a POST that outlasts what was left says how long it was given, rounded to the second, and that the escrow may have been claimed', async () => {
+    recordBudgets();
+    const s = scenario({ answer: hangs });
+    const k = slowKoios(s, 4_450); // three reads: 13.35 s of the 90, so the POST has 76.65 s
+    await rejectsWith(heldOpen(k.send({ startedAt: k.start, now: k.now })), (message) => {
+      cleanOf(message);
+      assert.equal(message, `Could not send the job for escrow ${ESCROW_REF}: the supplier did not answer within 77 s.${MAY_HAVE_CLAIMED}`);
+    });
+    assert.equal(s.sup.calls.length, 1, 'and is not retried');
+  });
+  test('exactly the supplier\'s own 60 s claim limit left is enough: the POST is sent with it', async () => {
+    const budgets = recordBudgets();
+    const s = scenario();
+    const k = slowKoios(s, 10_000);
+    await k.send({ startedAt: k.start, now: k.now });
+    assert.equal(k.elapsed(), 30_000);
+    assert.deepEqual(budgets.filter((ms) => ms !== 15_000), [60_000]);
+    assert.equal(s.sup.calls.length, 1);
+  });
+  test('a millisecond less than that sends nothing: the reads used so much that the supplier could be cut off while still within its limit', async () => {
+    recordBudgets();
+    const s = scenario();
+    const k = slowKoios(s, 10_000);
+    await rejectsWith(k.send({ startedAt: k.start, now: () => k.now() + 1 }), (message) => {
+      cleanOf(message);
+      assert.equal(message, `Cannot send a job for escrow ${ESCROW_REF}: the checks before the send took 31 s of the 90 s this call may use, which leaves less than the 60 s a supplier may need to claim the escrow and answer; send again. Nothing was sent.`);
+    });
+    assert.equal(s.sup.calls.length, 0, 'the supplier was not called');
+  });
+  test('the seconds the checks took are rounded up, so that the text never says it was enough: 30 s taken is allowed, anything more reads 31 s or more', async () => {
+    for (const [extra, said] of [[1, 31], [999, 31], [1_000, 31], [1_001, 32], [59_999, 90]] as const) {
+      const s = scenario();
+      const k = slowKoios(s, 10_000);
+      await rejectsWith(k.send({ startedAt: k.start, now: () => k.now() + extra }), (message) => {
+        assert.ok(message.includes(`the checks before the send took ${said} s of the 90 s this call may use, which leaves less than the 60 s`), `${extra}: ${message}`);
+      });
+      assert.equal(s.sup.calls.length, 0, String(extra));
+    }
+  });
+  test('reads that outlast the whole 90 s send nothing either, and do not ask for a negative budget', async () => {
+    const budgets = recordBudgets();
+    const s = scenario();
+    const k = slowKoios(s, 100_000);
+    await rejectsWith(k.send({ startedAt: k.start, now: k.now }), (message) => {
+      assert.equal(message, `Cannot send a job for escrow ${ESCROW_REF}: the checks before the send took 300 s of the 90 s this call may use, which leaves less than the 60 s a supplier may need to claim the escrow and answer; send again. Nothing was sent.`);
+    });
+    assert.equal(s.sup.calls.length, 0);
+    assert.deepEqual(budgets.filter((ms) => ms !== 15_000), [], 'no budget was made for the supplier');
+  });
+});
+
 // ─── verifying a receipt ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 // A receipt is checked five ways and one more, and "verified" is said only when every row passes. The signed receipts here are made the
 // way the template's supplier makes them: the eight fields, Ed25519 over canonicalize(receipt), and a result_receipt_hash on chain that
@@ -1526,12 +1628,41 @@ describe('fetchManifest', () => {
   };
   const plainly = (error: string) => { for (const secret of ['203.0.113.9', 'evil.example', 'hunter2', 'manifest.json', 'Bad gateway']) assert.ok(!error.includes(secret), `${secret} leaked into: ${error}`); };
 
-  test('GETs the URI once, asking for JSON, and returns whatever JSON it serves', async () => {
+  test('GETs the URI once, asking for JSON, and returns whatever JSON it serves with the sha256 of the bytes it was served as', async () => {
     const manifest = { name: 'Chandra OCR', capabilities: ['ocr.page.extract.chandra-ocr-2.v1'], nested: { a: [1, 2, { b: null }] } };
     const { f, calls } = fetching(() => reply(200, manifest));
-    assert.deepEqual(await fetchManifest(URI, f), { manifest });
+    assert.deepEqual(await fetchManifest(URI, f), { manifest, sha256: sha256(JSON.stringify(manifest)) });
     assert.deepEqual(calls, [{ url: URI, method: 'GET', headers: { accept: 'application/json' } }]);
-    for (const served of [null, [], 7, 'text', true]) assert.deepEqual(await fetchManifest(URI, fetching(() => reply(200, JSON.stringify(served))).f), { manifest: served }, JSON.stringify(served));
+    for (const served of [null, [], 7, 'text', true]) assert.deepEqual(await fetchManifest(URI, fetching(() => reply(200, JSON.stringify(served))).f), { manifest: served, sha256: sha256(JSON.stringify(served)) }, JSON.stringify(served));
+  });
+  // The advert commits to the file with detail_hash, the sha256 of its bytes. safeFetch hands back text, so the bytes are taken from the stream
+  // it reads: a hash of the decoded text would be another hash for any file that is not valid UTF-8.
+  test('the hash is that of the raw bytes, not of the text they decode to: a file with bytes that are not UTF-8 has the hash of its bytes', async () => {
+    const raw = Buffer.concat([Buffer.from('{"name":"caf'), Buffer.from([0xe9, 0xff, 0xfe]), Buffer.from('"}')]); // Latin-1 e-acute and two bytes that are never UTF-8
+    const r = await fetchManifest(URI, fetching(() => new Response(raw, { status: 200 })).f);
+    assert.ok('manifest' in r, JSON.stringify(r));
+    assert.equal(r.sha256, createHash('sha256').update(raw).digest('hex'));
+    assert.notEqual(r.sha256, sha256(raw.toString('utf8')), 'the decoded text has another hash: a hash of the text would not be the file\'s');
+    assert.equal((r.manifest as { name: string }).name, 'caf\ufffd\ufffd\ufffd', 'the JSON is read from the decoded text, as before');
+  });
+  test('the hash covers every byte however the body is cut into chunks, a multi-byte character split between two chunks included', async () => {
+    const raw = Buffer.from('{"name":"Zagreb \u0161\u0111\u010d\u0107\u017e \ud83d\ude00","n":[1,2,3]}', 'utf8');
+    const oneByteAtATime = new ReadableStream<Uint8Array>({ start(c) { for (const byte of raw) c.enqueue(Uint8Array.of(byte)); c.close(); } });
+    const r = await fetchManifest(URI, fetching(() => new Response(oneByteAtATime, { status: 200 })).f);
+    assert.ok('manifest' in r, JSON.stringify(r));
+    assert.equal(r.sha256, createHash('sha256').update(raw).digest('hex'));
+    assert.deepEqual(r.manifest, JSON.parse(raw.toString('utf8')));
+  });
+  test('an answer that is not 200, not JSON or not fetched at all carries no hash: there is nothing to compare', async () => {
+    for (const r of [
+      await fetchManifest(URI, fetching(() => reply(404, '{}')).f),
+      await fetchManifest(URI, fetching(() => reply(200, 'not json')).f),
+      await fetchManifest(URI, fetching(() => { throw new TypeError('fetch failed'); }).f),
+      await fetchManifest(URI, fetching(() => new Response('', { status: 302, headers: { location: 'https://evil.example/x' } })).f),
+    ]) {
+      assert.ok('error' in r, JSON.stringify(r));
+      assert.ok(!('sha256' in r) && !('manifest' in r));
+    }
   });
   test('an answer that is not 200, and one that is not JSON, are reported without what the host said', async () => {
     for (const status of [201, 206, 401, 404, 500, 503]) {
@@ -1571,6 +1702,17 @@ describe('fetchManifest', () => {
     const full = await fetchManifest(URI, fetching(() => sized(262_144)).f);
     assert.ok('manifest' in full, 'exactly 256 KiB is read');
     assert.deepEqual(await fetchManifest(URI, fetching(() => sized(262_145)).f), { error: "the supplier's answer is over the 262144 byte limit" });
+  });
+});
+
+describe('a manifest host that stops sending part-way', () => {
+  test('a body cut by the time budget after its first bytes is reported as a timeout, whatever tap the bytes pass through', async () => {
+    let sent = false;
+    const stalls = new ReadableStream<Uint8Array>({
+      pull(c) { if (!sent) { sent = true; c.enqueue(new TextEncoder().encode('{"name":')); } else c.error(new DOMException('The operation was aborted due to timeout', 'TimeoutError')); },
+    });
+    const f = (async () => new Response(stalls, { status: 200 })) as unknown as typeof fetch;
+    assert.deepEqual(await heldOpen(fetchManifest('https://203.0.113.9/manifest.json', f)), { error: 'the supplier did not answer within 15 s' });
   });
 });
 

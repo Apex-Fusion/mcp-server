@@ -11,24 +11,42 @@ import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { withJson } from './marketplace-indexer.js';
 import { sendJob, getJob, verifyJob } from './marketplace-transport.js';
 import type { Check, ReceiptChecks, VerifiedJob } from './marketplace-transport.js';
-import { text, fail, cell, isoOrRaw, ACCEPT_WINDOW_S, RELEASE_TAKE } from './marketplace-shared.js';
+import { text, fail, cell, isoOrRaw, ACCEPT_WINDOW_S, RELEASE_TAKE, ACCEPT_CLOCK } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
 
 /** How much of a result the markdown shows. The fenced JSON block always carries all of it. */
 const RESULT_VIEW_CHARS = 4_000;
 /** What these tools cannot know, in the words every description uses (see the residual in marketplace-transport.ts). */
 const BUYER_NOTE = "This tool trusts the buyer address and escrow ref your assistant passes; keep its tool use scoped to escrows you posted. A client-side binding to your signer key is planned.";
-/** What a missed accept window costs, as the build tools say it. */
-const ACCEPT_CLOCK = `Accept must land within ${ACCEPT_WINDOW_S} s of the supplier's Submit; after that the supplier may Release and ${RELEASE_TAKE}.`;
+/**
+ * What the buyer's two choices cost. The supplier posts no bond and there is no dispute path, so not accepting never gets anything
+ * back: the supplier may Release and keep all that is locked, the buyer bond and any floor excess included.
+ */
+const CHOICES = `accepting pays the supplier price + supplier bond and returns your buyer bond and any floor excess; not accepting lets the supplier Release and ${RELEASE_TAKE}`;
+const NO_DISPUTE = 'There is no dispute path.';
+/**
+ * The choice for a Submitted escrow whose receipt cannot be checked in time: the Submit is on chain and the poll is pending or has failed,
+ * so there is nothing to verify, and the seconds left are running. One sentence, for every text that can meet that case.
+ */
+const NO_RECEIPT = `If it is Submitted and no receipt can be checked before the seconds left run out, you choose without one: ${CHOICES}. ${NO_DISPUTE}`;
+/**
+ * How to see where an escrow stands. A poll reads the Post output and asks the supplier; it cannot see where the escrow stands now, so it
+ * cannot tell a Submitted escrow (the accept clock is running) from an Open one. The Accept builder can: it builds only for a Submitted
+ * escrow, prints the seconds left, and refuses with the state when it found one. What it builds is unsigned: a receipt that has arrived
+ * is checked before it is signed, and one that cannot be checked in time leaves the choice of NO_RECEIPT.
+ */
+const CHECK_BY_ACCEPT = `A poll cannot see where the escrow stands now: vector_build_marketplace_accept is the way to check it (it builds only for a Submitted escrow, prints the seconds left, and its refusal names the state when one was found; what it builds is unsigned, so if a receipt has arrived, check it before you sign). ${NO_RECEIPT}`;
 
 /**
  * What a failed send or a failed job leaves open. A tool that gave up does not know where the escrow stands: the supplier's Submit may
  * still land after a submit_timeout, and a 200 without a usable receipt (malformed_response) is served only after the Submit has
- * confirmed. A Submitted escrow cannot be reclaimed, and the supplier may Release it once the accept window is over.
+ * confirmed. A Submitted escrow cannot be reclaimed, and the supplier may Release it once the accept window is over. A refusal from
+ * before anything was sent can already name the state (`unlessNamed`: the send tool's tip, which follows such a refusal).
  */
-const CHECK_THE_ESCROW = (reclaimAfter: string): string =>
-  "This tool does not know the escrow's state and the supplier's Submit may still land. Check the escrow: if it is Submitted, accept within the window. " +
-  `${ACCEPT_CLOCK} If it is Open or Claimed, reclaim after ${reclaimAfter} with vector_build_marketplace_reclaim.`;
+const CHECK_THE_ESCROW = (reclaimAfter: string, unlessNamed = false): string =>
+  `${unlessNamed ? 'Unless the error names it, this' : 'This'} tool does not know the escrow's state and the supplier's Submit may still land. ` +
+  'Check the escrow with vector_build_marketplace_accept, which builds only for a Submitted escrow, prints the seconds left, and refuses with the state when one was found: if it is Submitted, accept within the window. ' +
+  `${ACCEPT_CLOCK} ${NO_RECEIPT} If it is Open or Claimed, reclaim after ${reclaimAfter} with vector_build_marketplace_reclaim.`;
 
 /** `body` in a code fence that nothing inside it can close: longer than any run of backticks in the text. */
 function fenced(body: string): string {
@@ -62,45 +80,64 @@ const FOUND_VIA = {
 /** `pass`, `FAIL (why)` or `skipped (why)`. A note is a supplier-influenced sentence, so it is one escaped line. */
 const resultOf = (c: Check): string => (c.state === 'pass' ? 'pass' : `${c.state === 'fail' ? 'FAIL' : 'skipped'} (${cell(c.note, 450)})`);
 
+/**
+ * What to do when no Submitted output was found (submittedRef is null): the escrow may be Open or Claimed, and then nothing is Submitted,
+ * so there is nothing to accept and nothing to decline, and no clock. Or the output was not locatable (row 5 says why), and the Accept
+ * builder will say which it is.
+ */
+const NOTHING_TO_ACCEPT = "No Submitted output was found on chain. If the escrow is Open or Claimed there is nothing to accept yet, and declining costs nothing: if the supplier never submits, vector_build_marketplace_reclaim after deliver_by returns everything. " +
+  `Check where it stands with vector_build_marketplace_accept (it builds only for a Submitted escrow, prints the seconds left, and its refusal names the state when one was found); if it is Submitted, the accept clock is running: ${ACCEPT_CLOCK}`;
+
 /** What a verdict says to do, with nothing in it that calls a receipt verified unless all five checks passed. */
 function verdictAdvice(v: VerifiedJob): string {
   // Koios reports the Submitted output spent: the Accept or the Release has landed, so there is nothing left to accept and no clock.
   const settled = v.submittedSpent === true;
+  // No Submitted output found: the advice about an accept and its clock would be about an escrow that may not be Submitted at all.
+  const nothingOnChain = v.submittedRef === null;
   if (v.verdict === 'verified') {
     return "All five checks passed, and so did the extra row: the receipt is for this escrow and for the request it committed to, it hashes the result text you gave, it is signed by the key that belongs to the escrow's supplier, and the hash of that signed receipt is the one the supplier committed on chain. That says nothing about whether the result is any good: read it" +
       (settled ? '. The escrow is already settled, so there is nothing left to accept.' : ` before you accept. Next: vector_build_marketplace_accept, which must land within ${ACCEPT_WINDOW_S} s of the supplier's Submit.`);
   }
   if (v.verdict === 'failed') {
     const hint = v.checks.response_hash_matches.state === 'fail' ? ' If the result text may have been shortened or edited, pass it again exactly as it is in the JSON block of vector_marketplace_get_job.' : '';
-    return settled ? `At least one check failed.${hint}` : `At least one check failed: do not accept the job on this receipt.${hint} ${ACCEPT_CLOCK}`;
+    if (settled) return `At least one check failed.${hint}`;
+    if (nothingOnChain) return `At least one check failed.${hint} ${NOTHING_TO_ACCEPT}`;
+    // Neither choice is free: the buyer is told what each costs, not only "do not accept" (declining hands the supplier the whole lock).
+    return `At least one check failed.${hint} Whether to accept on this receipt is your call, and neither choice is free: ${CHOICES}. ${NO_DISPUTE} ${ACCEPT_CLOCK} ` +
+      "If the receipt is wrong, report the supplier to the marketplace operator (the contact in the supplier's registry record or manifest).";
   }
   const open = 'Nothing failed, but not every check ran (see the rows marked skipped), so this is not a verification: run it again with what is missing';
-  return settled ? `${open}.` : `${open} before you accept. ${ACCEPT_CLOCK}`;
+  if (settled) return `${open}.`;
+  if (nothingOnChain) return `${open}. ${NOTHING_TO_ACCEPT}`;
+  return `${open} before you accept. ${ACCEPT_CLOCK}`;
 }
 
 export function registerMarketplaceTransportTools(server: McpServer, checkRateLimit: RateGate, providerFor: () => Provider) {
   server.tool(
     "vector_marketplace_send_job",
-    "Send the job payload to the supplier of a posted escrow and get back a job id. Call it once the post is confirmed (vector_await_transaction). Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). payload must be byte-identical to the one given at post time. The payload goes to the endpoint named by the escrow's advert, and the call waits up to 90 s for the supplier to answer. Then poll with vector_marketplace_get_job. " + BUYER_NOTE,
+    "Send the job payload to the supplier of a posted escrow and get back a job id. Call it once the post is confirmed (vector_await_transaction). Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). payload must be byte-identical to the one given at post time. The payload goes to the endpoint named by the escrow's advert, and the whole call, checks included, waits up to 90 s for the supplier to answer. Then poll with vector_marketplace_get_job. " + BUYER_NOTE,
     {
       escrow_ref: z.string().describe("The escrow_ref that vector_build_marketplace_post_escrow returned, once its transaction is confirmed"),
       payload: z.string().min(1).describe("The same payload string you gave vector_build_marketplace_post_escrow, byte for byte"),
       buyerAddress: z.string().describe("The wallet address that posted AND funded the escrow (vector_signer_get_address). Escrows funded from another key are refused"),
     },
     async ({ escrow_ref, payload, buyerAddress }) => {
+      // The send's 90 s budget runs from here: the reads before the POST count against it (see sendJob), so the whole call stays under the proxy's cut.
+      const entered = Date.now();
       const limited = checkRateLimit(); if (limited) return limited;
       try {
-        const r = await sendJob(providerFor(), VECTOR_KOIOS_URL, { escrowRef: escrow_ref, payload, buyerAddress });
+        const r = await sendJob(providerFor(), VECTOR_KOIOS_URL, { escrowRef: escrow_ref, payload, buyerAddress }, fetch, { startedAt: entered });
         const ref = r.escrowRef;
         const md = `# Job sent\n\n**Job id:** \`${r.jobId}\` · **status:** ${cell(r.status, 100)}\n**Escrow:** \`${ref}\` · **capability:** \`${cell(r.capabilityId)}\`\n\n` +
           `The supplier answered with this job id. Poll with vector_marketplace_get_job { escrow_ref, job_id, buyerAddress } every few seconds until it returns a result and a receipt. ` +
-          `Nothing is verified yet: check the receipt with vector_marketplace_verify_receipt before you accept.`;
+          `Nothing is verified yet: check the receipt with vector_marketplace_verify_receipt before you accept. ` +
+          `The accept clock starts when the supplier submits on chain: ${ACCEPT_CLOCK} ${CHECK_BY_ACCEPT}`;
         return text(withJson(md, { job_id: r.jobId, status: r.status, escrow_ref: ref, capability_id: r.capabilityId }));
       } catch (err) {
         return fail('send job', err, [
           'Wait for vector_await_transaction to confirm the post, and pass the escrow_ref the post returned',
           'buyerAddress must be the wallet that posted and funded the escrow, and payload exactly the one you posted with',
-          CHECK_THE_ESCROW('its deliver_by'),
+          CHECK_THE_ESCROW('its deliver_by', true),
         ]);
       }
     },
@@ -108,7 +145,7 @@ export function registerMarketplaceTransportTools(server: McpServer, checkRateLi
 
   server.tool(
     "vector_marketplace_get_job",
-    "Poll a marketplace job. Returns pending, failed, or done with the result and the supplier's signed receipt. Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned and job_id the one vector_marketplace_send_job returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). Works while the escrow is Open, Claimed or Submitted, and after it has been accepted or released. A failed answer can carry the reason malformed_response (the supplier said 200 without a receipt) or escrow_mismatch (its answer was for another escrow). The poll waits up to 20 s. A job id is a bearer token for its result: pass it only with the escrow it came from. " + BUYER_NOTE,
+    "Poll a marketplace job. Returns pending, failed, or done with the result and the supplier's signed receipt. Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned and job_id the one vector_marketplace_send_job returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). Works while the escrow is Open, Claimed or Submitted, and after it has been accepted or released. A failed answer can carry the reason malformed_response (the supplier said 200 without a receipt) or escrow_mismatch (its answer was for another escrow). The poll waits up to 20 s. It reads the Post output and asks the supplier, so it cannot show where the escrow stands now or the accept clock: vector_build_marketplace_accept is the way to check (it builds only for a Submitted escrow and prints the seconds left). A job id is a bearer token for its result: pass it only with the escrow it came from. " + BUYER_NOTE,
     {
       escrow_ref: z.string().describe("The escrow_ref that vector_build_marketplace_post_escrow returned"),
       job_id: z.string().describe("The job_id that vector_marketplace_send_job returned"),
@@ -121,7 +158,11 @@ export function registerMarketplaceTransportTools(server: McpServer, checkRateLi
         const ref = r.escrowRef;
         const v = r.view;
         if (v.state === 'pending') {
-          return text(withJson(`# Job ${job_id}: pending\n\n**Status:** ${cell(v.status, 100)}\n\nThe supplier is still working. Poll again in a few seconds.`, { state: 'pending', job_id, escrow_ref: ref, status: v.status }));
+          return text(withJson(
+            `# Job ${job_id}: pending\n\n**Status:** ${cell(v.status, 100)}\n\nThe supplier is still working. Poll again in a few seconds. ` +
+            `Its Submit may already be on chain, and then the accept clock is running: ${ACCEPT_CLOCK} ${CHECK_BY_ACCEPT}`,
+            { state: 'pending', job_id, escrow_ref: ref, status: v.status },
+          ));
         }
         if (v.state === 'failed') {
           const said = cell(v.message, 500);
@@ -140,12 +181,14 @@ export function registerMarketplaceTransportTools(server: McpServer, checkRateLi
           `\n**Receipt names:** supplier key hash \`${named('supplier_pkh')}\` · escrow \`${named('escrow_ref')}\` · model \`${named('model')}\`\n` +
           `**Signature:** \`${cell(v.receiptSignature, 140)}\`\n` +
           (v.submittedRef ? `**Submitted output the supplier reports:** \`${v.submittedRef}\` (the supplier's word; vector_marketplace_verify_receipt reads the chain)\n` : '') +
-          '\nNext: vector_marketplace_verify_receipt with the receipt, receipt_signature and result from the JSON block, then vector_build_marketplace_accept if the result is what you asked for.';
+          '\nNext: vector_marketplace_verify_receipt with the receipt, receipt_signature and result from the JSON block, then vector_build_marketplace_accept if the result is what you asked for. ' +
+          `If the escrow is not settled yet, its accept clock runs from the supplier's Submit, which is normally on chain by the time a result is served: ${ACCEPT_CLOCK} Declining is not free: ${CHOICES}. ${NO_DISPUTE}`;
         return text(withJson(md, { state: 'done', job_id, escrow_ref: ref, result: v.result, receipt: v.receipt, receipt_signature: v.receiptSignature, submitted_ref: v.submittedRef, supplier_pkh: r.supplierPkh }));
       } catch (err) {
         return fail('poll job', err, [
           'Check escrow_ref and job_id, and use the buyerAddress that posted and funded the escrow',
           'The supplier may be restarting or slow; poll again in a few seconds',
+          `A failed poll says nothing about where the escrow stands now, and its accept clock may be running: ${ACCEPT_CLOCK} ${CHECK_BY_ACCEPT}`,
         ]);
       }
     },

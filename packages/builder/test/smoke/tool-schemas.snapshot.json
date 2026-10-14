@@ -160,7 +160,7 @@
     }
   },
   "vector_build_marketplace_accept": {
-    "description": "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. Verify the receipt first with vector_marketplace_verify_receipt. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. If a receipt has arrived, verify it first with vector_marketplace_verify_receipt. It builds only for a Submitted escrow and prints the seconds left in the window, so it is also the way to check where an escrow stands (vector_marketplace_get_job cannot see where it stands now): a refusal names the state when one was found. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -181,7 +181,7 @@
     }
   },
   "vector_build_marketplace_post_escrow": {
-    "description": "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Template-contract suppliers only in this release. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref, the same payload and your wallet address as buyerAddress. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Template-contract suppliers only in this release. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref, the same payload (the JSON block echoes it verbatim) and your wallet address as buyerAddress. The transaction is valid for at most 180 s, so sign and submit it at once. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -878,7 +878,7 @@
     }
   },
   "vector_marketplace_get_job": {
-    "description": "Poll a marketplace job. Returns pending, failed, or done with the result and the supplier's signed receipt. Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned and job_id the one vector_marketplace_send_job returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). Works while the escrow is Open, Claimed or Submitted, and after it has been accepted or released. A failed answer can carry the reason malformed_response (the supplier said 200 without a receipt) or escrow_mismatch (its answer was for another escrow). The poll waits up to 20 s. A job id is a bearer token for its result: pass it only with the escrow it came from. This tool trusts the buyer address and escrow ref your assistant passes; keep its tool use scoped to escrows you posted. A client-side binding to your signer key is planned.",
+    "description": "Poll a marketplace job. Returns pending, failed, or done with the result and the supplier's signed receipt. Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned and job_id the one vector_marketplace_send_job returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). Works while the escrow is Open, Claimed or Submitted, and after it has been accepted or released. A failed answer can carry the reason malformed_response (the supplier said 200 without a receipt) or escrow_mismatch (its answer was for another escrow). The poll waits up to 20 s. It reads the Post output and asks the supplier, so it cannot show where the escrow stands now or the accept clock: vector_build_marketplace_accept is the way to check (it builds only for a Submitted escrow and prints the seconds left). A job id is a bearer token for its result: pass it only with the escrow it came from. This tool trusts the buyer address and escrow ref your assistant passes; keep its tool use scoped to escrows you posted. A client-side binding to your signer key is planned.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -904,7 +904,7 @@
     }
   },
   "vector_marketplace_get_supplier": {
-    "description": "Read one supplier advert from the Vector ledger by advert_ref (all 13 advert fields) plus the indexer's live status, and the manifest its detail_uri points to when it has one (fetched from the supplier's host; the supplier's own JSON, shown as such). Read-only.",
+    "description": "Read one supplier advert from the Vector ledger by advert_ref (all 13 advert fields) plus the indexer's live status, and the manifest its detail_uri points to when it has one (fetched from the supplier's host; the supplier's own JSON, shown as such). The sha256 of the manifest's bytes is held against the advert's detail hash and reported as a match or a mismatch; a manifest that could not be fetched is reported as such and is never a match. Read-only.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -928,7 +928,7 @@
     }
   },
   "vector_marketplace_list_suppliers": {
-    "description": "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only. Pick an advert_ref here, then hire it with vector_build_marketplace_post_escrow.",
+    "description": "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only. Pick an advert_ref here, then hire it with vector_build_marketplace_post_escrow. Fleet adverts (llm.text.generate.*, llm.chat.*, ocr.page.extract.*, audio.synthesize.*) are marked 'not hireable through these tools (fleet route)': post_escrow refuses them.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -953,7 +953,7 @@
     }
   },
   "vector_marketplace_send_job": {
-    "description": "Send the job payload to the supplier of a posted escrow and get back a job id. Call it once the post is confirmed (vector_await_transaction). Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). payload must be byte-identical to the one given at post time. The payload goes to the endpoint named by the escrow's advert, and the call waits up to 90 s for the supplier to answer. Then poll with vector_marketplace_get_job. This tool trusts the buyer address and escrow ref your assistant passes; keep its tool use scoped to escrows you posted. A client-side binding to your signer key is planned.",
+    "description": "Send the job payload to the supplier of a posted escrow and get back a job id. Call it once the post is confirmed (vector_await_transaction). Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). payload must be byte-identical to the one given at post time. The payload goes to the endpoint named by the escrow's advert, and the whole call, checks included, waits up to 90 s for the supplier to answer. Then poll with vector_marketplace_get_job. This tool trusts the buyer address and escrow ref your assistant passes; keep its tool use scoped to escrows you posted. A client-side binding to your signer key is planned.",
     "inputSchema": {
       "type": "object",
       "properties": {

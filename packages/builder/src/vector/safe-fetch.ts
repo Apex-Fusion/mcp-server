@@ -1,11 +1,13 @@
 // packages/builder/src/vector/safe-fetch.ts
-// Vendored from Apex-Fusion/vector-service-agents packages/vector-read/src/safe-fetch.ts @ cfd036e; keep the two copies identical.
+// Vendored from Apex-Fusion/vector-service-agents packages/vector-read/src/safe-fetch.ts @ 17c8527; keep the two copies identical.
 // The only code path on the public server that fetches URLs taken from chain data
 // (advert endpoint_url, detail_uri). Rules: https only, no credentials, hosts that
-// resolve to loopback/private/link-local/site-local/multicast/CGNAT/unspecified ranges
-// are refused (an IPv4 address inside an IPv6 one counts as that IPv4 address, whatever
-// the spelling), bodies are capped, redirects never change scheme, and the whole call
-// has a budget: the host lookup is inside it.
+// resolve to a loopback, private, link-local, site-local, multicast, CGNAT, benchmarking
+// (198.18.0.0/15), IETF protocol (192.0.0.0/24), class E (240.0.0.0/4) or unspecified
+// range are refused. An IPv6 address in ::ffff:0:0/96 or 64:ff9b::/96 counts as the IPv4
+// address inside it, and one in ::/96 is refused whatever it carries, in any spelling.
+// Bodies are capped, redirects never change scheme, and the whole call has a budget: the
+// host lookup is inside it.
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
@@ -24,7 +26,19 @@ export function assertSafeUrl(url: string): URL {
   return u;
 }
 
-const isPrivateV4 = (a: number, b: number) => a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+// The first three octets place an IPv4 address in every range below (the /24 needs the third).
+const isPrivateV4 = (a: number, b: number, c: number) =>
+  a === 0 // 0.0.0.0/8 this network, the unspecified address included
+  || a === 10 // 10.0.0.0/8 private
+  || a === 127 // 127.0.0.0/8 loopback
+  || (a === 169 && b === 254) // 169.254.0.0/16 link-local
+  || (a === 172 && b >= 16 && b <= 31) // 172.16.0.0/12 private
+  || (a === 192 && b === 168) // 192.168.0.0/16 private
+  || (a === 100 && b >= 64 && b <= 127) // 100.64.0.0/10 CGNAT
+  || (a === 192 && b === 0 && c === 0) // 192.0.0.0/24 IETF protocol assignments
+  || (a === 198 && (b === 18 || b === 19)) // 198.18.0.0/15 benchmarking
+  || (a >= 224 && a <= 239) // 224.0.0.0/4 multicast
+  || a >= 240; // 240.0.0.0/4 class E, reserved for future use, and with it 255.255.255.255, the broadcast address
 
 // The eight 16-bit groups of an IPv6 address in any spelling: zero compression, leading zeros, upper case, an embedded dotted quad, a zone suffix.
 // Null when the text is not an IPv6 address. (A resolver may answer in any of these forms, not only the canonical one.)
@@ -52,13 +66,13 @@ function ipv6Groups(text: string): number[] | null {
 export function isPrivateAddress(ip: string): boolean {
   const v = isIP(ip);
   if (v === 4) {
-    const [a, b] = ip.split('.').map(Number);
-    return isPrivateV4(a, b);
+    const [a, b, c] = ip.split('.').map(Number);
+    return isPrivateV4(a, b, c);
   }
   if (v === 6) {
     const g = ipv6Groups(ip);
     if (!g) return true; // a form this function cannot read is not trusted
-    const embedded = () => isPrivateV4(g[6] >> 8, g[6] & 0xff); // the IPv4 address in the last 32 bits
+    const embedded = () => isPrivateV4(g[6] >> 8, g[6] & 0xff, g[7] >> 8); // the IPv4 address in the last 32 bits: g[6] holds its first two octets, g[7] the last two
     if (g.slice(0, 6).every((x) => x === 0)) return true; // ::/96: unspecified, loopback and the deprecated IPv4-compatible forms (::10.0.0.1)
     if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return embedded(); // IPv4-mapped (::ffff:10.0.0.1)
     if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return embedded(); // NAT64 (64:ff9b::a00:1 is 10.0.0.1)

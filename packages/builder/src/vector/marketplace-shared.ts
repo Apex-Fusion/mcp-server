@@ -29,6 +29,8 @@ export function isoOrRaw(ms: number): string { const d = new Date(ms); return Nu
 export const ACCEPT_WINDOW_S = ACCEPT_WINDOW_MS / 1000;
 /** What a missed accept window costs, in the one wording every tool uses. escrow.ak (handle_release) only bounds the supplier's take from below (the three amounts the datum names), so it may keep the floor excess of the lock as well. */
 export const RELEASE_TAKE = 'keep everything locked (price + both bonds + any floor excess)';
+/** The accept clock, as one sentence for every text that has to carry it. */
+export const ACCEPT_CLOCK = `Accept must land within ${ACCEPT_WINDOW_S} s of the supplier's Submit; after that the supplier may Release and ${RELEASE_TAKE}.`;
 
 export const SIGN_COPY = 'Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.';
 

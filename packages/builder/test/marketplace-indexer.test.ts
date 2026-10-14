@@ -600,6 +600,24 @@ describe('fetchEscrows', () => {
       }), { status: 200 })) as unknown as typeof fetch;
       await assert.rejects(() => heldOpen(fetchEscrows(buyer, { fetchImpl: slow, timeoutMs: 30 })), safeMessage(/^list escrows: indexer list read timed out after 14 bytes$/));
     });
+    test('every other read has the same reason for a body that stalls: it timed out, it was not "not valid JSON" (the list, the one supplier, Koios)', async () => {
+      const stalls = (name: string) => (async () => new Response(new ReadableStream<Uint8Array>({
+        start(c) { c.enqueue(enc.encode('[{"a"')); setTimeout(() => c.error(new DOMException('The operation was aborted due to timeout', name)), 5); },
+      }), { status: 200 })) as unknown as typeof fetch;
+      for (const name of ['TimeoutError', 'AbortError']) {
+        await assert.rejects(() => fetchCapabilities({ fetchImpl: stalls(name) }), safeMessage(/^list capabilities: the answer timed out before it was read in full$/), name);
+        await assert.rejects(() => fetchSuppliers({ fetchImpl: stalls(name) }), safeMessage(/^list suppliers: the answer timed out before it was read in full$/), name);
+        await assert.rejects(() => fetchSupplier('b'.repeat(56), { fetchImpl: stalls(name) }), safeMessage(/^get supplier: the answer timed out before it was read in full$/), name);
+        await assert.rejects(() => koiosUtxoInfo('https://koios.example', ['a'.repeat(64) + '#0'], stalls(name)), safeMessage(/^Koios utxo_info: the answer timed out before it was read in full$/), name);
+      }
+    });
+    test('a stream that breaks for another reason is still "not valid JSON", whatever the break said', async () => {
+      const broken = (async () => new Response(new ReadableStream<Uint8Array>({
+        start(c) { c.enqueue(enc.encode('[{"a"')); c.error(new TypeError('terminated: socket hang up talking to http://internal-proxy.example')); },
+      }), { status: 200 })) as unknown as typeof fetch;
+      await assert.rejects(() => fetchCapabilities({ fetchImpl: broken }), safeMessage(/^list capabilities: response was not valid JSON$/));
+      await assert.rejects(() => koiosUtxoInfo('https://koios.example', ['a'.repeat(64) + '#0'], broken), safeMessage(/^Koios utxo_info: response was not valid JSON$/));
+    });
     test('an answer with no body is no list', async () => {
       await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: (async () => new Response(null, { status: 200 })) as unknown as typeof fetch }), safeMessage(/^list escrows: response was not valid JSON$/));
     });
