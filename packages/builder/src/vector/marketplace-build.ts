@@ -41,9 +41,9 @@ const iso = (ms: number) => { const d = new Date(ms); return Number.isNaN(d.getT
 
 /**
  * What a Post commits the buyer to, in the terms the signer needs before signing: who is paid (the supplier key and the
- * host its endpoint is on), for which capability, the price and both bonds, the lock, and the deadline from which the
- * buyer can Reclaim. supplierPkh, endpointHost and capabilityId come from the advert, which anyone can write: show them
- * escaped.
+ * host its endpoint is on), for which capability, the price and both bonds, the lock, the deadline from which the
+ * buyer can Reclaim, and the last moment the Post can land. supplierPkh, endpointHost and capabilityId come from the
+ * advert, which anyone can write: show them escaped.
  */
 export interface PostEscrowTerms {
   supplierPkh: string; endpointHost: string; capabilityId: string;
@@ -52,6 +52,12 @@ export interface PostEscrowTerms {
   lockLovelace: bigint;
   /** POSIX ms. */
   deliverBy: number;
+  /**
+   * POSIX ms: the Post is invalid after this. deliver_by is posted_at + the supplier's window + the buffer, so a Post that lands
+   * by posted_at + the buffer leaves the supplier at least its full window; one that lands later would not. (A deliver_by the
+   * caller chose that is nearer than that ends the validity there, as before.)
+   */
+  validTo: number;
 }
 export interface PostEscrowPlan extends PostEscrowTerms { datum: EscrowDatum }
 export type PostEscrowBuild = VectorUnsignedBuildResult & PostEscrowTerms & {
@@ -77,7 +83,8 @@ function endpointHostOf(endpointUrl: string, advertRef: string): string {
  * Pure. The escrow datum a Post would write and the terms the signer is shown. Throws a readable Error for an advert it
  * must not post against: retired, the buyer's own, a window or endpoint that cannot work, numbers the datum cannot hold.
  * A buyer cannot Reclaim before deliver_by, so the supplier-chosen window is capped (MAX_PROCESSING_MS_CEILING) and so is a
- * caller-chosen deliver_by, which also catches a value given in microseconds.
+ * caller-chosen deliver_by, which also catches a value given in microseconds. The Post is valid until `validTo` (posted_at + the
+ * buffer), so that it cannot land late enough to give the supplier less than its window.
  */
 export function planPostEscrow(advert: AdvertDatum, advertRef: string, buyerPkh: string, payload: string, nowMs: number, deliverByMs?: number): PostEscrowPlan {
   if (advert.status !== 'Active') throw new Error(`Advert ${advertRef} is retired; pick another supplier.`);
@@ -94,6 +101,9 @@ export function planPostEscrow(advert: AdvertDatum, advertRef: string, buyerPkh:
   if (deliverByMs !== undefined && deliverByMs - nowMs > furthest) throw new Error(`deliver_by is ${deliverByMs - nowMs} ms from now, more than the ${furthest} ms (24 h plus the buffer) a Post will lock funds for; deliver_by is POSIX milliseconds, check the unit.`);
   const deliverBy = deliverByMs ?? nowMs + window + DELIVER_BY_BUFFER_MS;
   if (!Number.isSafeInteger(deliverBy) || deliverBy <= nowMs + window) throw new Error(`deliver_by must leave the supplier its full window of ${window} ms`);
+  // The Post is valid for the buffer after posted_at, not until deliver_by: one that lands later would leave the supplier less than its
+  // window. A deliver_by the caller chose can be nearer than that, and the validity never outlasts it.
+  const validTo = Math.min(nowMs + DELIVER_BY_BUFFER_MS, deliverBy);
   const datum: EscrowDatum = {
     buyer_pkh: buyerPkh, supplier_pkh: advert.supplier_pkh,
     advert_ref: { txHash: ref.txHash, index: ref.outputIndex }, capability_id: advert.capability_id,
@@ -107,7 +117,7 @@ export function planPostEscrow(advert: AdvertDatum, advertRef: string, buyerPkh:
   let lockLovelace: bigint;
   try { lockLovelace = escrowLockFloor(datum, economic); } catch (err) { throw new Error(`Advert ${advertRef} cannot be posted: its terms do not fit an escrow datum (${errorText(err)}).`); }
   return {
-    datum, lockLovelace, deliverBy,
+    datum, lockLovelace, deliverBy, validTo,
     supplierPkh: advert.supplier_pkh, endpointHost, capabilityId: advert.capability_id,
     priceLovelace: advert.price_lovelace, supplierBondLovelace: advert.supplier_bond_lovelace, buyerBondLovelace: advert.buyer_bond_lovelace,
   };
@@ -189,7 +199,7 @@ export async function buildPostEscrow(
     .pay.ToAddressWithData(ESCROW_ADDRESS, { kind: 'inline', value: escrowDatumHex }, { lovelace: plan.lockLovelace })
     .addSignerKey(buyerPkh)
     .validFrom(nowMs - 60_000)
-    .validTo(plan.deliverBy)
+    .validTo(plan.validTo)
     .setMinFee(MARKETPLACE_MIN_FEE);
   // Post pays to a script address and runs no script, so there is nothing to evaluate. Accept and Reclaim do spend a
   // script and need a pure output of at least 5 units as collateral, so first try to fund the Post without the smallest

@@ -19,7 +19,7 @@ const raised = (flag: boolean): string => (flag ? ' (raised to the 1-unit minimu
 export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit: RateGate, providerFor: () => Provider) {
   server.tool(
     "vector_build_marketplace_post_escrow",
-    "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Template-contract suppliers only in this release. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref, the same payload and your wallet address as buyerAddress. " + SIGN_COPY,
+    "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Template-contract suppliers only in this release. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref, the same payload (the JSON block echoes it verbatim) and your wallet address as buyerAddress. The transaction is valid for 180 s only, so sign and submit it at once. " + SIGN_COPY,
     {
       changeAddress: z.string().describe("Your wallet address (pays the lock and fees; receives the bond back on Accept). Get it from vector_signer_get_address."),
       advert_ref: z.string().describe("Advert '<txid>#<index>' from vector_marketplace_list_suppliers"),
@@ -45,9 +45,11 @@ export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit:
           `If the supplier submits, accept within ${ACCEPT_WINDOW_S} s: it receives price + supplier bond and your buyer bond (plus any floor excess) returns${supplierRaise}. ` +
           `Miss that window and the supplier may Release and ${RELEASE_TAKE}. ` +
           `If it never submits, Reclaim after ${deliverBy} returns everything.\n` +
-          `**Deliver by:** ${deliverBy}\n**Payload hash:** \`${r.promptHash}\`\n**Estimated fee:** ${r.feeAda}\n**Collateral kept aside:** ${r.collateralKept ? 'yes' : 'no'}${warning}\n\n` +
-          `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\nKeep the payload byte-identical for vector_marketplace_send_job. ${SIGN_COPY}`;
-        return text(withJson(md, { escrow_ref: r.escrowRef, lock_lovelace: r.lockLovelace, deliver_by: r.deliverBy, prompt_hash: r.promptHash, tx_hash: r.txHash, fee: r.fee, collateral_kept: r.collateralKept }));
+          `**Deliver by:** ${deliverBy}\n**Valid until:** ${isoOrRaw(r.validTo)} (sign and submit before then: a Post that landed later would give the supplier less than its window, so it is not valid after this time and has to be built again)\n` +
+          `**Payload hash:** \`${r.promptHash}\`\n**Estimated fee:** ${r.feeAda}\n**Collateral kept aside:** ${r.collateralKept ? 'yes' : 'no'}${warning}\n\n` +
+          `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\nKeep the payload byte-identical for vector_marketplace_send_job (the JSON block below carries it verbatim). ${SIGN_COPY}`;
+        // `payload` is echoed as given: an assistant that carries the block from here to vector_marketplace_send_job sends the committed bytes.
+        return text(withJson(md, { escrow_ref: r.escrowRef, lock_lovelace: r.lockLovelace, deliver_by: r.deliverBy, valid_to: r.validTo, prompt_hash: r.promptHash, payload, tx_hash: r.txHash, fee: r.fee, collateral_kept: r.collateralKept }));
       } catch (err) { return fail('build escrow post', err, ['The wallet needs the lock plus about 1 unit for fees, and one pure 5-unit output kept as collateral', 'Check the advert is still Active with vector_marketplace_get_supplier']); }
     },
   );
