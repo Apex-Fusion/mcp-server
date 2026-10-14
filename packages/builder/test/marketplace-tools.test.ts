@@ -282,6 +282,10 @@ const OWN_PKH = getAddressDetails(OWN_ADDRESS).paymentCredential!.hash;
 const POST_TOOL = 'vector_build_marketplace_post_escrow';
 const ACCEPT_TOOL = 'vector_build_marketplace_accept';
 const RECLAIM_TOOL = 'vector_build_marketplace_reclaim';
+// post_escrow refuses a fleet capability, and the live advert is one (ChandraOCR, ocr.page.extract.*). The Post tests hire the live
+// advert with its capability moved to the template family mcp.tool.execute.*, at the same length: the lock and the fee stay the live ones.
+const TEMPLATE_CAPABILITY = 'mcp.tool.execute.chandra-ocr-2.v1';
+const TEMPLATE_ADVERT = advertDatumWith({ capability_id: TEMPLATE_CAPABILITY });
 const cborOf = (t: string): string => {
   const m = /\*\*Unsigned TX CBOR:\*\*\n```\n([0-9a-f]+)\n```/.exec(t);
   assert.ok(m, 'the text carries the unsigned CBOR in its own fence');
@@ -306,7 +310,7 @@ const askedConfiguredKoios = (urls: string[]) => {
 const SIGN_FLOW = 'Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.';
 
 describe('vector_build_marketplace_post_escrow', () => {
-  beforeEach(() => { node = new FixtureProvider(FIXTURE_UTXOS); stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)] }); });
+  beforeEach(() => { node = new FixtureProvider(FIXTURE_UTXOS); stub({ utxos: [advertUtxo(TEMPLATE_ADVERT)] }); });
 
   test('builds the unsigned post and shows the signer who is paid, what is locked and what comes back, truthfully', async () => {
     const before = Date.now();
@@ -327,7 +331,7 @@ describe('vector_build_marketplace_post_escrow', () => {
     // the escrow, the payee, the deadline, the payload
     assert.equal(j.escrow_ref, `${j.tx_hash}#0`);
     assert.equal(lineOf(t, '**Escrow ref (after submit):**'), `**Escrow ref (after submit):** \`${j.escrow_ref}\``);
-    assert.equal(lineOf(t, '**Hiring:**'), `**Hiring:** \`${ADVERT_EXPECTED.capability_id}\` from supplier key \`${ADVERT_EXPECTED.supplier_pkh}\`, endpoint host \`mp-suppliers-chandra.hal8.ai\``);
+    assert.equal(lineOf(t, '**Hiring:**'), `**Hiring:** \`${TEMPLATE_CAPABILITY}\` from supplier key \`${ADVERT_EXPECTED.supplier_pkh}\`, endpoint host \`mp-suppliers-chandra.hal8.ai\``);
     const window = ADVERT_EXPECTED.max_processing_ms + 180_000;
     assert.ok(j.deliver_by >= before + window && j.deliver_by <= after + window, `deliver_by ${j.deliver_by} is the window plus the buffer from now`);
     assert.equal(lineOf(t, '**Deliver by:**'), `**Deliver by:** ${new Date(j.deliver_by).toISOString()}`);
@@ -349,7 +353,7 @@ describe('vector_build_marketplace_post_escrow', () => {
   test("says when the supplier payout will be raised to the 1-unit minimum out of the buyer's return, and only then", async () => {
     const NOTE = ' (the supplier payout is raised to the 1-unit minimum out of your return)';
     const lockedLineFor = async (amounts: { price_lovelace?: bigint; supplier_bond_lovelace?: bigint; buyer_bond_lovelace?: bigint }): Promise<string> => {
-      stub({ utxos: [advertUtxo(advertDatumWith(amounts))] });
+      stub({ utxos: [advertUtxo(advertDatumWith({ capability_id: TEMPLATE_CAPABILITY, ...amounts }))] });
       const t = await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
       assert.ok(t.startsWith('# Unsigned Escrow Post Built (Not Submitted)\n'), t.slice(0, 400));
       return lineOf(t, '**Locked:**');
@@ -399,16 +403,18 @@ describe('vector_build_marketplace_post_escrow', () => {
     assert.ok(t.includes('2. Check the advert is still Active with vector_marketplace_get_supplier'));
     assert.ok(!t.includes('Unsigned'));
   });
-  test('refuses, as text, an advert its supplier key did not create, a retired one, and a buyer who is the supplier', async () => {
-    stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)], authorCreds: ['bb'.repeat(28)] });
+  test('refuses, as text, a fleet advert, an advert its supplier key did not create, a retired one, and a buyer who is the supplier', async () => {
+    stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)] });
+    assert.match(await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* serves ocr\.page\.extract\.chandra-ocr-2\.v1, a fleet capability .* Pick a template-contract supplier\./);
+    stub({ utxos: [advertUtxo(TEMPLATE_ADVERT)], authorCreds: ['bb'.repeat(28)] });
     assert.match(await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* was not created by its supplier key/);
-    const retired = Data.from(ADVERT_DATUM_HEX) as Constr<Data>;
+    const retired = Data.from(TEMPLATE_ADVERT) as Constr<Data>;
     retired.fields[12] = new Constr(1, []);
     stub({ utxos: [advertUtxo(Data.to(retired))] });
     assert.match(await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* is retired; pick another supplier\./);
     // The supplier's own wallet must hold something on the node, or building stops at "no UTxOs found" before the check is reached.
     node = new FixtureProvider([{ txHash: FIXTURE_TXHASH, outputIndex: 7, address: SUPPLIER_ADDRESS, assets: { lovelace: 900_000_000n } }]);
-    stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)] });
+    stub({ utxos: [advertUtxo(TEMPLATE_ADVERT)] });
     assert.match(await call(POST_TOOL, { changeAddress: SUPPLIER_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: The buyer cannot be the supplier of the same advert\./);
   });
   test('a deliver_by past the 24 h ceiling (a unit slip) reaches the caller as text; deliver_by_ms stays optional', async () => {

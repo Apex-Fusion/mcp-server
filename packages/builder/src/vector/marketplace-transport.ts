@@ -117,7 +117,7 @@ export function routeFor(capabilityId: string, forced?: Route['kind']): Route {
  * Is this capability served by the fleet and not by a template supplier? Whatever routeFor maps to chat, ocr or tts, and llm.chat.*,
  * the multi-turn session capability, which routeFor leaves with the template route only because its supplier has no one-job route.
  */
-function isFleetCapability(capabilityId: string): boolean {
+export function isFleetCapability(capabilityId: string): boolean {
   return routeFor(capabilityId).kind !== 'template' || capabilityId.startsWith('llm.chat.');
 }
 

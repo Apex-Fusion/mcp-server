@@ -20,6 +20,8 @@ import {
 import type { AdvertDatum, EscrowDatum } from './marketplace-datum.js';
 import { readAdvert, koiosTxInputCreds } from './marketplace-indexer.js';
 import { resolveEscrowLineage, nodeFailure } from './marketplace-lineage.js';
+import { isFleetCapability } from './marketplace-transport.js';
+import { cell } from './marketplace-shared.js';
 
 // The resolver lives in marketplace-lineage.ts; callers keep importing it from here.
 export { resolveEscrowLineage };
@@ -153,10 +155,10 @@ async function assertAdvertAuthor(advertRef: string, creatingTxHash: string, sup
 
 /**
  * Builds the unsigned Post: locks price + both bonds in a new escrow (output 0) for the advert. Reads the advert through
- * readAdvert and refuses one that is spent, retired, not valid UTF-8 or not created by its supplier key, and a buyer who
- * is the supplier. Funds the Post without the wallet's smallest pure 5-unit output when it can (collateralKept), and
- * checks the built transaction really has the escrow at output 0. `fetchImpl` stands in for fetch in the two Koios calls
- * (tests). Nothing is signed or submitted.
+ * readAdvert and refuses one that is spent, retired, not valid UTF-8, of a fleet capability or not created by its
+ * supplier key, and a buyer who is the supplier. Funds the Post without the wallet's smallest pure 5-unit output when it
+ * can (collateralKept), and checks the built transaction really has the escrow at output 0. `fetchImpl` stands in for
+ * fetch in the two Koios calls (tests). Nothing is signed or submitted.
  */
 export async function buildPostEscrow(
   lucid: LucidEvolution, provider: Provider,
@@ -173,6 +175,9 @@ export async function buildPostEscrow(
   if (utxo.is_spent !== false) throw new Error(`Koios did not report whether advert ${advertRef} is unspent; refusing to hire it.`);
   const advertDatumHex = utxo.inline_datum?.bytes;
   if (!advertDatumHex || !advertTextFieldsRoundTrip(advertDatumHex)) throw new Error(`Advert ${advertRef} has text fields that are not valid UTF-8, so the escrow could not carry its capability id faithfully; refusing to hire it.`);
+  // vector_marketplace_send_job serves template-contract suppliers only, and a fleet supplier checks another hash of the request than
+  // the prompt_hash a Post commits: a fleet hire could never be sent, and its lock would wait for a Reclaim after deliver_by.
+  if (isFleetCapability(advert.capability_id)) throw new Error(`Advert ${advertRef} serves ${cell(advert.capability_id)}, a fleet capability (llm.text.generate.*, llm.chat.*, ocr.page.extract.* or audio.synthesize.*). vector_marketplace_send_job serves template-contract suppliers only in this release, so the job could never be sent and the lock would wait for a Reclaim after deliver_by. Pick a template-contract supplier.`);
   const nowMs = p.nowMs ?? Date.now();
   const plan = planPostEscrow(advert, advertRef, buyerPkh, p.payload, nowMs, p.deliverByMs);
   await assertAdvertAuthor(advertRef, utxo.tx_hash, advert.supplier_pkh, fetchImpl);
