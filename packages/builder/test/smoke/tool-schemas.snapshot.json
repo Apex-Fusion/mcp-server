@@ -953,7 +953,7 @@
     }
   },
   "vector_marketplace_send_job": {
-    "description": "Send the job payload to the supplier of a posted escrow and get back a job id. Call it once the post is confirmed (vector_await_transaction). Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). payload must be byte-identical to the one given at post time. The payload goes to the endpoint named by the escrow's advert, and the call waits up to 90 s for the supplier to answer. Then poll with vector_marketplace_get_job. This tool trusts the buyer address and escrow ref your assistant passes; keep its tool use scoped to escrows you posted. A client-side binding to your signer key is planned.",
+    "description": "Send the job payload to the supplier of a posted escrow and get back a job id. Call it once the post is confirmed (vector_await_transaction). Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). payload must be byte-identical to the one given at post time. The payload goes to the endpoint named by the escrow's advert, and the whole call, checks included, waits up to 90 s for the supplier to answer. Then poll with vector_marketplace_get_job. This tool trusts the buyer address and escrow ref your assistant passes; keep its tool use scoped to escrows you posted. A client-side binding to your signer key is planned.",
     "inputSchema": {
       "type": "object",
       "properties": {

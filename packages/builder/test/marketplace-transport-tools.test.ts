@@ -3,7 +3,7 @@
 // registerMarketplaceTools. A minimal fake server captures the handlers and the descriptions; the world is the one the module tests
 // run in (fixtures/transport-world.fixture.ts): the node the tools read is its FixtureProvider, and global fetch is its fetch, which
 // answers for Koios, for the advert and for the supplier. No network and no DNS (the supplier is an IP literal).
-import { describe, test, afterEach } from 'node:test';
+import { describe, test, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Provider } from '@lucid-evolution/lucid';
@@ -30,7 +30,7 @@ const handlers = new Map<string, Handler>();
 registerMarketplaceTools(serverOf(handlers), 'marketplace-transport-tools-test', nodeOfTheTest, new RateLimiter(100_000));
 const realFetch = globalThis.fetch;
 const run = (o: Scenario = {}) => { world = scenario(o); globalThis.fetch = world.fetchImpl; return world; };
-afterEach(() => { globalThis.fetch = realFetch; world = undefined; });
+afterEach(() => { mock.timers.reset(); mock.restoreAll(); globalThis.fetch = realFetch; world = undefined; });
 
 const callOn = (registered: Map<string, Handler>) => async (name: string, args: Record<string, unknown> = {}): Promise<string> => {
   const h = registered.get(name);
@@ -103,6 +103,31 @@ describe(SEND, () => {
     assert.equal(s.sup.calls[0].url, `${SUPPLIER}/v1/job`);
     assert.equal(JSON.parse(s.sup.calls[0].body).escrow_ref, ESCROW_REF);
     askedConfiguredKoios(s.koios.calls.map((c) => c.url));
+  });
+  // The tool starts the send's 90 s when it is entered. The clock is the mocked Date; every Koios read advances it by 6 s, and so does the
+  // node factory the tool calls after it is entered and before sendJob is, so a budget that began at sendJob would be 5 s too long.
+  test('counts everything since the tool was entered against its 90 s: the POST is given what is left of that budget', async () => {
+    mock.timers.enable({ apis: ['Date'], now: 1_700_000_000_000 });
+    run();
+    const inner = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init: RequestInit) => { if (String(url).includes('/api/v1/')) mock.timers.tick(6_000); return inner(url, init); }) as unknown as typeof fetch;
+    const own = new Map<string, Handler>();
+    registerMarketplaceTools(serverOf(own), 'marketplace-send-budget-test', () => { mock.timers.tick(5_000); return nodeOfTheTest(); }, new RateLimiter(100_000));
+    const budgets: number[] = [];
+    const real = AbortSignal.timeout.bind(AbortSignal);
+    mock.method(AbortSignal, 'timeout', (ms: number) => { budgets.push(ms); return real(ms); });
+    const t = await callOn(own)(SEND, args);
+    assert.ok(t.startsWith('# Job sent\n'), t.slice(0, 300));
+    assert.deepEqual(budgets.filter((ms) => ms !== 15_000), [67_000], '90 s less 5 s before sendJob and three reads of 6 s');
+  });
+  test('a send whose reads left the supplier less than its own 60 s claim limit is turned away as text, and nothing reaches the supplier', async () => {
+    mock.timers.enable({ apis: ['Date'], now: 1_700_000_000_000 });
+    const s = run();
+    const inner = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init: RequestInit) => { if (String(url).includes('/api/v1/')) mock.timers.tick(11_000); return inner(url, init); }) as unknown as typeof fetch;
+    const t = await call(SEND, args);
+    assert.equal(t, `Failed to send job: Cannot send a job for escrow ${ESCROW_REF}: the checks before the send took 33 s of the 90 s this call may use, which leaves less than the 60 s a supplier may need to claim the escrow and answer; send again. Nothing was sent.${SEND_TIPS}`);
+    assert.equal(s.sup.calls.length, 0);
   });
   test('claims nothing about the job beyond the job id: nothing is verified, nothing is settled', async () => {
     run();

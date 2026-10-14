@@ -197,11 +197,16 @@ export function parseJobResponse(status: number, text: string): JobView {
 // ─── Reaching a supplier ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 /**
  * What one call to a supplier may wait for and read. A supplier answers a job POST only after its own Claim has confirmed (its limit
- * for that is 60 s), so the POST is given 90 s (the hosted server sits behind Cloudflare, which drops a call near 100 s); a poll only
+ * for that is 60 s). The hosted server sits behind Cloudflare, which drops a call near 100 s, and the whole tool call has to fit under
+ * that, so a send has ONE budget of 90 s, started when the tool is entered: the reads that come before the POST (the escrow, who
+ * funded it, the advert: each a Koios call of up to 15 s) are paid from it, and the POST is given what is left (sendJob). A poll only
  * asks, and is given 20 s. A POST that outlasts its budget is reported as unanswered, with the warning that the escrow may have been
  * claimed anyway.
  */
-const SEND_CALL = { maxResponseBytes: 1_000_000, timeoutMs: 90_000 } as const;
+const SEND_BUDGET_MS = 90_000;
+/** The supplier's own limit for its Claim: a POST given less than this could be abandoned while the supplier is still within its limit. */
+const SUPPLIER_CLAIM_LIMIT_MS = 60_000;
+const SEND_RESPONSE_BYTES = 1_000_000;
 const POLL_CALL = { maxResponseBytes: 1_000_000, timeoutMs: 20_000 } as const;
 type Call = { readonly maxResponseBytes: number; readonly timeoutMs: number };
 /** The most a request to a supplier may carry: the body that goes on the wire, which for the template wraps the payload. */
@@ -228,7 +233,7 @@ function mayHaveReached(err: unknown): boolean {
 
 /** Why a call to a supplier failed, in words that carry neither its URL nor anything the network or the supplier said. */
 function callFailure(err: unknown, call: Call): string {
-  if (isTimeout(err)) return `the supplier did not answer within ${call.timeoutMs / 1000} s`;
+  if (isTimeout(err)) return `the supplier did not answer within ${Math.round(call.timeoutMs / 1000)} s`;
   const message = err instanceof Error ? err.message : '';
   if (/^safeFetch: /.test(message)) {
     if (/private or reserved address/.test(message)) return 'the supplier host resolves to a private or reserved address, which is refused';
@@ -319,6 +324,12 @@ async function readTargetAdvert(
 export interface SentJob { jobId: string; status: string; route: Route['kind']; endpoint: string; capabilityId: string; escrowRef: string }
 
 /**
+ * The clock of one send: the time (POSIX ms) the call began, which is when the tool was entered, and the time now. The send's 90 s
+ * budget runs from `startedAt` (default: now, as sendJob is entered). A test hands in clocks of its own.
+ */
+export interface SendClock { startedAt?: number; now?: () => number }
+
+/**
  * Sends the job for an Open escrow to its supplier and returns the job id the supplier answers with (202 means its Claim has
  * confirmed). Only for a template-contract supplier, and only for the escrow's own buyer: `buyerAddress` must be the wallet address
  * whose key funded the escrow's Post (see checkBuyer), and `payload` exactly the payload the escrow committed to (its prompt_hash
@@ -327,8 +338,15 @@ export interface SentJob { jobId: string; status: string; route: Route['kind']; 
  * advert's host. The request is the route's: the escrow ref is the canonical one, the headers are the route's alone. Errors name the
  * escrow and never the endpoint or the body of an answer; a failure after the request may have reached the supplier says the
  * escrow may have been claimed anyway.
+ *
+ * The call has one budget of 90 s from `clock.startedAt` (SEND_BUDGET_MS), and the checks above are paid from it: the POST is given
+ * what is left, so the whole call stays under the proxy's cut. If the checks have used so much that less than the supplier's own
+ * claim limit (60 s) is left, nothing is sent: a POST abandoned while the supplier is still within its limit may have claimed the
+ * escrow with no job id for the buyer to poll, whereas a send that was refused can simply be repeated.
  */
-export async function sendJob(provider: Provider, koiosUrl: string, p: { escrowRef: string; payload: string; buyerAddress: string; route?: Route['kind'] }, fetchImpl: typeof fetch = fetch): Promise<SentJob> {
+export async function sendJob(provider: Provider, koiosUrl: string, p: { escrowRef: string; payload: string; buyerAddress: string; route?: Route['kind'] }, fetchImpl: typeof fetch = fetch, clock: SendClock = {}): Promise<SentJob> {
+  const now = clock.now ?? Date.now;
+  const startedAt = clock.startedAt ?? now();
   const canonical = canonicalRef(p.escrowRef);
   const refuse = (why: string) => new Error(`Cannot send a job for escrow ${canonical}: ${why} Nothing was sent.`);
   if (typeof p.payload !== 'string' || p.payload.length === 0) throw refuse('the payload must be a non-empty string.');
@@ -348,11 +366,18 @@ export async function sendJob(provider: Provider, koiosUrl: string, p: { escrowR
   const size = Buffer.byteLength(body, 'utf8');
   if (size > MAX_REQUEST_BYTES) throw refuse(`the request is ${size} bytes, over the ${MAX_REQUEST_BYTES} byte limit.`);
 
+  const spent = Math.max(now() - startedAt, 0);
+  const left = SEND_BUDGET_MS - spent;
+  if (left < SUPPLIER_CLAIM_LIMIT_MS) {
+    throw refuse(`the checks before the send took ${Math.round(spent / 1000)} s of the ${SEND_BUDGET_MS / 1000} s this call may use, which leaves less than the ${SUPPLIER_CLAIM_LIMIT_MS / 1000} s a supplier may need to claim the escrow and answer; send again.`);
+  }
+  const post: Call = { maxResponseBytes: SEND_RESPONSE_BYTES, timeoutMs: left };
+
   let res: Awaited<ReturnType<typeof safeFetch>>;
   try {
-    res = await safeFetch(route.post(advert.endpoint_url), { method: 'POST', headers, body }, { ...SEND_CALL, fetchImpl });
+    res = await safeFetch(route.post(advert.endpoint_url), { method: 'POST', headers, body }, { ...post, fetchImpl });
   } catch (err) {
-    throw new Error(`Could not send the job for escrow ${canonical}: ${callFailure(err, SEND_CALL)}.${mayHaveReached(err) ? MAY_HAVE_CLAIMED : ''}`);
+    throw new Error(`Could not send the job for escrow ${canonical}: ${callFailure(err, post)}.${mayHaveReached(err) ? MAY_HAVE_CLAIMED : ''}`);
   }
   const answer = jsonObject(res.text);
   if (res.status !== 202) {

@@ -41,6 +41,7 @@ import { OWN_ADDRESS } from './fixtures/fixture-provider.ts';
 import { world, credentialRequests, txInfoRequests, ESCROW_TX, CLAIM_TX, SUBMIT_TX, SUPPLIER_ADDRESS } from './fixtures/escrow-koios.fixture.ts';
 import { KOIOS, PAYLOAD, SUPPLIER, JOB_ID, HOSTILE, reply, accepted, BUYER_PKH, MAY_HAVE_CLAIMED, scenario, DECOY_SUBMITTED_REF, SUPPLIER_KEY, OTHER_KEY, pkhOf, pubHexOf, RESULT, receiptOf, signWith, committedHash } from './fixtures/transport-world.fixture.ts';
 import type { Call, Scenario } from './fixtures/transport-world.fixture.ts';
+import type { SendClock } from '../src/vector/marketplace-transport.ts';
 import { heldOpen } from './fixtures/held-open.ts';
 
 const SUBMITTED_REF = `${'ee'.repeat(32)}#0`;
@@ -918,6 +919,97 @@ describe('a supplier that never answers', () => {
     await rejectsWith(sendJob({} as never, KOIOS, { escrowRef: ESCROW_REF, payload: 'x', buyerAddress: OWN_ADDRESS }, never), (message) => {
       assert.equal(message, `Could not read escrow ${ESCROW_REF}: Koios request failed (network error or timeout)`);
     });
+  });
+});
+
+// A send has ONE budget of 90 s, started when the tool is entered. The reads before the POST (the escrow, who funded it, the advert) are
+// paid from it, and the POST is given what is left, so the whole call stays under the ~100 s at which the proxy drops it. The clocks
+// are injected: `slowKoios` makes every Koios read take `step` ms on a clock of its own.
+describe('the send deadline', () => {
+  afterEach(() => { mock.restoreAll(); });
+  /** Every budget a call is given, in order. AbortSignal.timeout is where a budget becomes a number; all but the Koios reads' 15 s are shortened to 30 ms. */
+  function recordBudgets() {
+    const budgets: number[] = [];
+    const real = AbortSignal.timeout.bind(AbortSignal);
+    mock.method(AbortSignal, 'timeout', (ms: number) => { budgets.push(ms); return real(ms === 15_000 ? ms : 30); });
+    return budgets;
+  }
+  /** Answers when the request is abandoned and not before, as a connection to a dead supplier does. */
+  const hangs = (_call: Call, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    const signal = init.signal as AbortSignal;
+    if (signal.aborted) reject(signal.reason);
+    else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+  /** A world whose Koios reads each take `step` ms on the clock it hands out; the supplier's answer takes none. */
+  function slowKoios(s: ReturnType<typeof scenario>, step: number, start = 1_700_000_000_000) {
+    let t = start;
+    const f = (async (url: string, init: RequestInit) => { if (String(url).includes('/api/v1/')) t += step; return s.fetchImpl(url, init); }) as unknown as typeof fetch;
+    const send = (clock: SendClock) => sendJob(s.node, KOIOS, { escrowRef: ESCROW_REF, payload: PAYLOAD, buyerAddress: OWN_ADDRESS }, f, clock);
+    return { send, elapsed: () => t - start, start, now: () => t };
+  }
+  const READS = 3; // a send of an Open escrow reads its Post output, who funded it, and its advert
+
+  test('the POST is given 90 s less what the reads before it took, counted from the start of the call', async () => {
+    const budgets = recordBudgets();
+    const s = scenario();
+    const k = slowKoios(s, 5_000);
+    const sent = await k.send({ startedAt: k.start, now: k.now });
+    assert.equal(sent.jobId, JOB_ID);
+    assert.equal(k.elapsed(), READS * 5_000, 'three reads of 5 s each');
+    assert.deepEqual(budgets.filter((ms) => ms !== 15_000), [75_000], 'the POST has 90 s less the 15 s the reads took');
+    assert.equal(s.sup.calls.length, 1);
+  });
+  test('the clock starts when sendJob is entered when the caller names no start', async () => {
+    const budgets = recordBudgets();
+    const s = scenario();
+    const k = slowKoios(s, 10_000);
+    await k.send({ now: k.now });
+    assert.deepEqual(budgets.filter((ms) => ms !== 15_000), [60_000], 'three reads of 10 s from the entry of sendJob');
+  });
+  test('a fresh call has the whole 90 s, and a clock that runs backwards never gives more', async () => {
+    const budgets = recordBudgets();
+    await scenario().send({}, { startedAt: 5_000, now: () => 5_000 });
+    await scenario().send({}, { startedAt: 10_000, now: () => 0 });
+    assert.deepEqual(budgets.filter((ms) => ms !== 15_000), [90_000, 90_000]);
+  });
+  test('a POST that outlasts what was left says how long it was given, rounded to the second, and that the escrow may have been claimed', async () => {
+    recordBudgets();
+    const s = scenario({ answer: hangs });
+    const k = slowKoios(s, 4_450); // three reads: 13.35 s of the 90, so the POST has 76.65 s
+    await rejectsWith(heldOpen(k.send({ startedAt: k.start, now: k.now })), (message) => {
+      cleanOf(message);
+      assert.equal(message, `Could not send the job for escrow ${ESCROW_REF}: the supplier did not answer within 77 s.${MAY_HAVE_CLAIMED}`);
+    });
+    assert.equal(s.sup.calls.length, 1, 'and is not retried');
+  });
+  test('exactly the supplier\'s own 60 s claim limit left is enough: the POST is sent with it', async () => {
+    const budgets = recordBudgets();
+    const s = scenario();
+    const k = slowKoios(s, 10_000);
+    await k.send({ startedAt: k.start, now: k.now });
+    assert.equal(k.elapsed(), 30_000);
+    assert.deepEqual(budgets.filter((ms) => ms !== 15_000), [60_000]);
+    assert.equal(s.sup.calls.length, 1);
+  });
+  test('a millisecond less than that sends nothing: the reads used so much that the supplier could be cut off while still within its limit', async () => {
+    recordBudgets();
+    const s = scenario();
+    const k = slowKoios(s, 10_000);
+    await rejectsWith(k.send({ startedAt: k.start, now: () => k.now() + 1 }), (message) => {
+      cleanOf(message);
+      assert.equal(message, `Cannot send a job for escrow ${ESCROW_REF}: the checks before the send took 30 s of the 90 s this call may use, which leaves less than the 60 s a supplier may need to claim the escrow and answer; send again. Nothing was sent.`);
+    });
+    assert.equal(s.sup.calls.length, 0, 'the supplier was not called');
+  });
+  test('reads that outlast the whole 90 s send nothing either, and do not ask for a negative budget', async () => {
+    const budgets = recordBudgets();
+    const s = scenario();
+    const k = slowKoios(s, 100_000);
+    await rejectsWith(k.send({ startedAt: k.start, now: k.now }), (message) => {
+      assert.equal(message, `Cannot send a job for escrow ${ESCROW_REF}: the checks before the send took 300 s of the 90 s this call may use, which leaves less than the 60 s a supplier may need to claim the escrow and answer; send again. Nothing was sent.`);
+    });
+    assert.equal(s.sup.calls.length, 0);
+    assert.deepEqual(budgets.filter((ms) => ms !== 15_000), [], 'no budget was made for the supplier');
   });
 });
 

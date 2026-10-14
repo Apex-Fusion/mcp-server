@@ -97,16 +97,18 @@ function verdictAdvice(v: VerifiedJob): string {
 export function registerMarketplaceTransportTools(server: McpServer, checkRateLimit: RateGate, providerFor: () => Provider) {
   server.tool(
     "vector_marketplace_send_job",
-    "Send the job payload to the supplier of a posted escrow and get back a job id. Call it once the post is confirmed (vector_await_transaction). Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). payload must be byte-identical to the one given at post time. The payload goes to the endpoint named by the escrow's advert, and the call waits up to 90 s for the supplier to answer. Then poll with vector_marketplace_get_job. " + BUYER_NOTE,
+    "Send the job payload to the supplier of a posted escrow and get back a job id. Call it once the post is confirmed (vector_await_transaction). Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). payload must be byte-identical to the one given at post time. The payload goes to the endpoint named by the escrow's advert, and the whole call, checks included, waits up to 90 s for the supplier to answer. Then poll with vector_marketplace_get_job. " + BUYER_NOTE,
     {
       escrow_ref: z.string().describe("The escrow_ref that vector_build_marketplace_post_escrow returned, once its transaction is confirmed"),
       payload: z.string().min(1).describe("The same payload string you gave vector_build_marketplace_post_escrow, byte for byte"),
       buyerAddress: z.string().describe("The wallet address that posted AND funded the escrow (vector_signer_get_address). Escrows funded from another key are refused"),
     },
     async ({ escrow_ref, payload, buyerAddress }) => {
+      // The send's 90 s budget runs from here: the reads before the POST count against it (see sendJob), so the whole call stays under the proxy's cut.
+      const entered = Date.now();
       const limited = checkRateLimit(); if (limited) return limited;
       try {
-        const r = await sendJob(providerFor(), VECTOR_KOIOS_URL, { escrowRef: escrow_ref, payload, buyerAddress });
+        const r = await sendJob(providerFor(), VECTOR_KOIOS_URL, { escrowRef: escrow_ref, payload, buyerAddress }, fetch, { startedAt: entered });
         const ref = r.escrowRef;
         const md = `# Job sent\n\n**Job id:** \`${r.jobId}\` · **status:** ${cell(r.status, 100)}\n**Escrow:** \`${ref}\` · **capability:** \`${cell(r.capabilityId)}\`\n\n` +
           `The supplier answered with this job id. Poll with vector_marketplace_get_job { escrow_ref, job_id, buyerAddress } every few seconds until it returns a result and a receipt. ` +
