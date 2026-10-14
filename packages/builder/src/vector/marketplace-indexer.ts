@@ -25,8 +25,15 @@ interface Opts { fetchImpl?: typeof fetch; timeoutMs?: number }
 // operator configuration and a JSON parse failure quotes the start of the response body (same rule as
 // formatServiceError in shared/provider.ts).
 async function readJson<T>(res: Response, what: string): Promise<T> {
-  try { return (await res.json()) as T; } catch { throw new Error(`${what}: response was not valid JSON`); }
+  try { return (await res.json()) as T; } catch (err) {
+    // The call's time budget runs to the end of the body (AbortSignal.timeout), so an answer that stalls part-way ends in the signal's
+    // own error: said as what it is, and not as a body that is not JSON.
+    if (isAbort(err)) throw new Error(`${what}: the answer timed out before it was read in full`);
+    throw new Error(`${what}: response was not valid JSON`);
+  }
 }
+/** Did the call's time budget (or an abort) end the read? AbortSignal.timeout says TimeoutError; an abort says AbortError. */
+const isAbort = (err: unknown): boolean => err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
 
 /**
  * The body of `res` as JSON, holding no more than `max` bytes: a longer answer is refused, by its content-length before a byte is read,
@@ -50,7 +57,7 @@ async function readJsonCapped<T>(res: Response, what: string, max: number): Prom
     }
   } catch (err) {
     // The call's time budget runs to the end of the body (AbortSignal.timeout), so a list that stalls part-way says so, and how far it got.
-    if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) throw new Error(`${what}: indexer list read timed out after ${total} bytes`);
+    if (isAbort(err)) throw new Error(`${what}: indexer list read timed out after ${total} bytes`);
     throw new Error(`${what}: response was not valid JSON`);
   }
   if (over) { await reader.cancel().catch(() => {}); throw tooLong(); }

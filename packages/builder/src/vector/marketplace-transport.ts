@@ -38,7 +38,7 @@
 import type { Provider } from '@lucid-evolution/lucid';
 import { safeFetch } from './safe-fetch.js';
 import { koiosTxInputCreds } from './marketplace-indexer.js';
-import { formatOutRef, parseOutRef, promptHashForPayload, sha256BytesHex } from './marketplace-datum.js';
+import { promptHashForPayload, sha256BytesHex } from './marketplace-datum.js';
 import type { EscrowDatum } from './marketplace-datum.js';
 import { paymentKeyHashOf } from './gov-build.js';
 import { resolveEscrowLineage, readEscrowOutput, koiosFailure } from './marketplace-lineage.js';
@@ -101,7 +101,7 @@ function resultOf(body: Record<string, unknown>, text: string): string {
 }
 function submittedRefOf(value: unknown): string | null {
   if (typeof value !== 'string') return null;
-  try { const ref = parseOutRef(value); return formatOutRef(ref.txHash, ref.outputIndex); } catch { return null; }
+  try { return canonicalRef(value); } catch { return null; }
 }
 
 export function parseJobResponse(status: number, text: string): JobView {

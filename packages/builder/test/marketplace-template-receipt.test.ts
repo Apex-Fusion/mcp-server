@@ -54,10 +54,11 @@ describe('a receipt made by the template\'s own code', () => {
   });
 
   describe('with one byte flipped it fails', () => {
+    // The full row map: the rows named fail and every other row still passes, so a change that makes more rows fail than it should is seen too.
     const fails = (what: string, over: Partial<VerifyInput>, rows: Array<keyof ReceiptChecks>) => {
       const v = verifyReceipt(input(over));
       assert.equal(v.verdict, 'failed', what);
-      for (const row of rows) assert.equal(v.checks[row].state, 'fail', `${what}: ${row} must fail`);
+      assert.deepEqual(states(v.checks), { ...ALL_PASS, ...Object.fromEntries(rows.map((row) => [row, 'fail'])) }, what);
     };
 
     test('in the signature: the signature does not verify, and the hash on chain is no longer the hash of what was signed', () => {
