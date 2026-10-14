@@ -13,6 +13,9 @@ import * as CML from '@anastasia-labs/cardano-multiplatform-lib-nodejs';
 import { loadConfig } from '../../src/config.ts';
 
 const ENTRY = fileURLToPath(new URL('../../build/index.js', import.meta.url));
+// Preloads that make stdout slow to take a write, and make it refuse one (see the files).
+const SLOW_STDOUT = fileURLToPath(new URL('./slow-stdout.cjs', import.meta.url));
+const FAILING_STDOUT = fileURLToPath(new URL('./failing-stdout.cjs', import.meta.url));
 
 interface RunResult {
   code: number | null;
@@ -23,13 +26,13 @@ interface RunResult {
 // Runs `keygen` the way a first-time member would: no signer configuration of
 // any kind in the environment, stdin closed, in a directory we can inspect
 // afterwards.
-function runKeygen(cwd: string): Promise<RunResult> {
+function runKeygen(cwd: string, nodeArgs: string[] = []): Promise<RunResult> {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const name of Object.keys(env)) {
     if (name.toUpperCase().startsWith('VECTOR_SIGNER_')) delete env[name];
   }
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [ENTRY, 'keygen'], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [...nodeArgs, ENTRY, 'keygen'], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (c: Buffer) => (stdout += c.toString('utf8')));
@@ -124,6 +127,34 @@ describe('vector-mcp-signer keygen (built entry point)', () => {
     assert.equal(addr.staking_cred(), undefined);
   });
 
+  // The key is on one line, once. process.exit() straight after write() drops what a pipe has not yet delivered; the command exits from the
+  // callback of the write. With the preload, stdout takes the write 300 ms late: the whole output still arrives, and the code is 0.
+  test('exits only once stdout has taken the line: a stdout that is slow to take it still gets all of it', async () => {
+    const slow = await runKeygen(cwd, ['--require', SLOW_STDOUT]);
+    assert.equal(slow.code, 0, `stderr: ${slow.stderr}`);
+    assert.equal(slow.stderr, '');
+    const { VECTOR_SIGNER_PRIVATE_KEY: key, VECTOR_SIGNER_ADDRESS: address } = assignments(slow.stdout);
+    assert.match(key, /^ed25519_sk1[0-9a-z]+$/);
+    assert.match(address, /^addr1v[0-9a-z]+$/);
+    assert.equal(
+      slow.stdout,
+      [
+        "# Paste these two lines into the signer's env in your MCP client config. Keep the key private.",
+        `VECTOR_SIGNER_PRIVATE_KEY=${key}`,
+        `VECTOR_SIGNER_ADDRESS=${address}`,
+        '',
+        `# Send this address (only this) to whoever funds your key: ${address}`,
+        '',
+      ].join('\n')
+    );
+    assert.equal(countOf(slow.stdout, key), 1);
+  });
+  test('a stdout that refuses the write is an exit code of 1 and a line on stderr that says so without saying what was to be written', async () => {
+    const failed = await runKeygen(cwd, ['--require', FAILING_STDOUT]);
+    assert.equal(failed.code, 1);
+    assert.equal(failed.stdout, '');
+    assert.equal(failed.stderr, 'vector-mcp-signer keygen: could not write to stdout; run it again.\n');
+  });
   test('every run generates a fresh key', () => {
     assert.equal(second.code, 0, `stderr: ${second.stderr}`);
     assert.equal(second.stderr, '');
