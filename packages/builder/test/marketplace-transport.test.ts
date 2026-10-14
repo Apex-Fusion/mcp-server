@@ -997,9 +997,19 @@ describe('the send deadline', () => {
     const k = slowKoios(s, 10_000);
     await rejectsWith(k.send({ startedAt: k.start, now: () => k.now() + 1 }), (message) => {
       cleanOf(message);
-      assert.equal(message, `Cannot send a job for escrow ${ESCROW_REF}: the checks before the send took 30 s of the 90 s this call may use, which leaves less than the 60 s a supplier may need to claim the escrow and answer; send again. Nothing was sent.`);
+      assert.equal(message, `Cannot send a job for escrow ${ESCROW_REF}: the checks before the send took 31 s of the 90 s this call may use, which leaves less than the 60 s a supplier may need to claim the escrow and answer; send again. Nothing was sent.`);
     });
     assert.equal(s.sup.calls.length, 0, 'the supplier was not called');
+  });
+  test('the seconds the checks took are rounded up, so that the text never says it was enough: 30 s taken is allowed, anything more reads 31 s or more', async () => {
+    for (const [extra, said] of [[1, 31], [999, 31], [1_000, 31], [1_001, 32], [59_999, 90]] as const) {
+      const s = scenario();
+      const k = slowKoios(s, 10_000);
+      await rejectsWith(k.send({ startedAt: k.start, now: () => k.now() + extra }), (message) => {
+        assert.ok(message.includes(`the checks before the send took ${said} s of the 90 s this call may use, which leaves less than the 60 s`), `${extra}: ${message}`);
+      });
+      assert.equal(s.sup.calls.length, 0, String(extra));
+    }
   });
   test('reads that outlast the whole 90 s send nothing either, and do not ask for a negative budget', async () => {
     const budgets = recordBudgets();

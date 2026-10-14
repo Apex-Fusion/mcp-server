@@ -239,7 +239,7 @@ export async function sendJob(provider: Provider, koiosUrl: string, p: { escrowR
   const spent = Math.max(now() - startedAt, 0);
   const left = SEND_BUDGET_MS - spent;
   if (left < SUPPLIER_CLAIM_LIMIT_MS) {
-    throw refuse(`the checks before the send took ${Math.round(spent / 1000)} s of the ${SEND_BUDGET_MS / 1000} s this call may use, which leaves less than the ${SUPPLIER_CLAIM_LIMIT_MS / 1000} s a supplier may need to claim the escrow and answer; send again.`);
+    throw refuse(`the checks before the send took ${Math.ceil(spent / 1000)} s of the ${SEND_BUDGET_MS / 1000} s this call may use, which leaves less than the ${SUPPLIER_CLAIM_LIMIT_MS / 1000} s a supplier may need to claim the escrow and answer; send again.`);
   }
   const post: Call = { maxResponseBytes: SEND_RESPONSE_BYTES, timeoutMs: left };
 

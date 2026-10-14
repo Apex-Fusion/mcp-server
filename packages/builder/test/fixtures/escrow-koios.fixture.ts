@@ -95,12 +95,12 @@ export const credentialRequests = (k: KoiosFake) => k.calls.filter((c) => c.path
 /**
  * What the resolver says when a flood of decoys at the escrow credential makes the candidate read refuse (5,000 or more outputs carry
  * the escrow's prompt hash), word for word as the buyer reads it (marketplace-lineage.ts). It is under the 800 characters an error is
- * shown in, so the end of it, the accept clock, is never cut off.
+ * shown in, so the end of it, the way to build the Accept in time, is never cut off.
  */
 export const floodRefusal = (escrowRef: string): string =>
   `Could not read escrow ${escrowRef}: Koios credential_utxos: 5000 or more outputs matched; refusing to read them all. ` +
   "Only a flood of decoys leaves that many (anyone can lock an output at the escrow address that copies this escrow's public prompt hash), and these tools cannot tell the escrow's own output from them: they cannot build its Accept or its Reclaim while it lasts. " +
-  "If the supplier has submitted, the accept clock is running: Accept must land within 600 s of the supplier's Submit; after that the supplier may Release and keep everything locked (price + both bonds + any floor excess). Build the Accept by other means in that time.";
+  "If the supplier has submitted, the accept clock is running: Accept must land within 600 s of the supplier's Submit; after that the supplier may Release and keep everything locked (price + both bonds + any floor excess). These tools cannot help within that window; the marketplace buyer SDK (agents-marketplace, acceptResult) can build the Accept.";
 
 // The spend chain of the live fixture escrow, as Koios tx_info tells it. The Claim spent the Post output (and a fee input of the
 // supplier's). The Submit spent the Claimed output the Claim made and, as a fee input, the supplier's change the Claim made too.

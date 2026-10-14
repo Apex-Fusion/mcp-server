@@ -53,9 +53,10 @@ export interface PostEscrowTerms {
   /** POSIX ms. */
   deliverBy: number;
   /**
-   * POSIX ms: the Post is invalid after this. deliver_by is posted_at + the supplier's window + the buffer, so a Post that lands
-   * by posted_at + the buffer leaves the supplier at least its full window; one that lands later would not. (A deliver_by the
-   * caller chose that is nearer than that ends the validity there, as before.)
+   * POSIX ms: the Post is invalid after this. It is the earlier of posted_at + the buffer and deliver_by - the supplier's window, so a
+   * Post that lands in time leaves the supplier at least its full window, and one that lands later would not. The default deliver_by
+   * is posted_at + the window + the buffer, and then the two are the same: at most 180 s after posted_at. A deliver_by the caller
+   * chose that is nearer ends the validity sooner.
    */
   validTo: number;
 }
@@ -83,8 +84,8 @@ function endpointHostOf(endpointUrl: string, advertRef: string): string {
  * Pure. The escrow datum a Post would write and the terms the signer is shown. Throws a readable Error for an advert it
  * must not post against: retired, the buyer's own, a window or endpoint that cannot work, numbers the datum cannot hold.
  * A buyer cannot Reclaim before deliver_by, so the supplier-chosen window is capped (MAX_PROCESSING_MS_CEILING) and so is a
- * caller-chosen deliver_by, which also catches a value given in microseconds. The Post is valid until `validTo` (posted_at + the
- * buffer), so that it cannot land late enough to give the supplier less than its window.
+ * caller-chosen deliver_by, which also catches a value given in microseconds. The Post is valid until `validTo` (at most posted_at
+ * + the buffer), so that it cannot land late enough to give the supplier less than its window.
  */
 export function planPostEscrow(advert: AdvertDatum, advertRef: string, buyerPkh: string, payload: string, nowMs: number, deliverByMs?: number): PostEscrowPlan {
   if (advert.status !== 'Active') throw new Error(`Advert ${advertRef} is retired; pick another supplier.`);
@@ -101,9 +102,10 @@ export function planPostEscrow(advert: AdvertDatum, advertRef: string, buyerPkh:
   if (deliverByMs !== undefined && deliverByMs - nowMs > furthest) throw new Error(`deliver_by is ${deliverByMs - nowMs} ms from now, more than the ${furthest} ms (24 h plus the buffer) a Post will lock funds for; deliver_by is POSIX milliseconds, check the unit.`);
   const deliverBy = deliverByMs ?? nowMs + window + DELIVER_BY_BUFFER_MS;
   if (!Number.isSafeInteger(deliverBy) || deliverBy <= nowMs + window) throw new Error(`deliver_by must leave the supplier its full window of ${window} ms`);
-  // The Post is valid for the buffer after posted_at, not until deliver_by: one that lands later would leave the supplier less than its
-  // window. A deliver_by the caller chose can be nearer than that, and the validity never outlasts it.
-  const validTo = Math.min(nowMs + DELIVER_BY_BUFFER_MS, deliverBy);
+  // The Post is valid until the earlier of the buffer after posted_at and the last moment that leaves the supplier its full window before
+  // deliver_by, not until deliver_by itself: one that lands later would hand the supplier less than its window. For the default deliver_by
+  // the two are the same; a deliver_by the caller chose can be nearer, and then the validity ends sooner (deliverBy - window > nowMs holds).
+  const validTo = Math.min(nowMs + DELIVER_BY_BUFFER_MS, deliverBy - window);
   const datum: EscrowDatum = {
     buyer_pkh: buyerPkh, supplier_pkh: advert.supplier_pkh,
     advert_ref: { txHash: ref.txHash, index: ref.outputIndex }, capability_id: advert.capability_id,

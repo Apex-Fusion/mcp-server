@@ -465,8 +465,9 @@ describe('resolveEscrowLineage', () => {
     const lots = Array.from({ length: 5_050 }, (_, i) => at(i.toString(16).padStart(64, '0'), claimedDatum));
     await assert.rejects(() => lineage([...lots, claimed]), refusal(/: Koios credential_utxos: 5000 or more outputs matched; refusing to read them all\. /));
   });
-  // The residual: a flood of decoys makes the read refuse, and the refusal says what that costs the buyer. The text is word for word what the
-  // buyer reads (floodRefusal), and it fits the 800 characters an error text is shown in, so the end of it (the accept clock) is never cut off.
+  // The residual: a flood of decoys makes the read refuse, and the refusal says what that costs the buyer and that the marketplace buyer SDK can
+  // build the Accept. The text is word for word what the buyer reads (floodRefusal), and it fits the 800 characters an error text is shown in,
+  // so the end of it is never cut off.
   test('the refusal says a flood of decoys can make Accept unbuildable through these tools, and names the accept clock', async () => {
     const lots = Array.from({ length: 5_050 }, (_, i) => at(i.toString(16).padStart(64, '0'), claimedDatum));
     await assert.rejects(() => lineage([...lots, claimed]), (err: unknown) => {

@@ -35,7 +35,7 @@ type Candidate = { txHash: string; outputIndex: number; datum: EscrowDatum };
  */
 const FLOOD_RESIDUAL = "Only a flood of decoys leaves that many (anyone can lock an output at the escrow address that copies this escrow's public prompt hash), " +
   "and these tools cannot tell the escrow's own output from them: they cannot build its Accept or its Reclaim while it lasts. " +
-  `If the supplier has submitted, the accept clock is running: ${ACCEPT_CLOCK} Build the Accept by other means in that time.`;
+  `If the supplier has submitted, the accept clock is running: ${ACCEPT_CLOCK} These tools cannot help within that window; the marketplace buyer SDK (agents-marketplace, acceptResult) can build the Accept.`;
 
 /**
  * What a failed Koios call may tell a caller. The messages of koiosUtxoInfo, koiosCredentialUtxos and koiosTxInputRefs name only
@@ -278,8 +278,9 @@ export async function readSubmittedOutput(
  *
  * Residual: the candidate read holds at most CREDENTIAL_UTXOS_MAX_ROWS (5,000) outputs, and anyone can lock decoys that copy the
  * escrow's public prompt hash, so a flood of them makes a spent Post output unresolvable here, and with it every Accept and Reclaim
- * that goes through these tools. The refusal says so and names the accept clock (FLOOD_RESIDUAL). It cannot be closed on this side:
- * a bigger cap only raises the price of the flood, and the indexer's list is a third party's word.
+ * that goes through these tools. The refusal says so, names the accept clock and the way out (the buyer SDK of agents-marketplace builds
+ * the Accept; FLOOD_RESIDUAL). It cannot be closed on this side: a bigger cap only raises the price of the flood, and the indexer's list
+ * is a third party's word.
  * `fetchImpl` stands in for fetch in the Koios calls (tests).
  */
 export async function resolveEscrowLineage(provider: Provider, koiosUrl: string, escrowRef: string, fetchImpl: typeof fetch = fetch): Promise<EscrowLineage> {

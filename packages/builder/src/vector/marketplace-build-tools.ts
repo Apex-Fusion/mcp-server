@@ -19,7 +19,7 @@ const raised = (flag: boolean): string => (flag ? ' (raised to the 1-unit minimu
 export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit: RateGate, providerFor: () => Provider) {
   server.tool(
     "vector_build_marketplace_post_escrow",
-    "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Template-contract suppliers only in this release. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref, the same payload (the JSON block echoes it verbatim) and your wallet address as buyerAddress. The transaction is valid for 180 s only, so sign and submit it at once. " + SIGN_COPY,
+    "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Template-contract suppliers only in this release. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref, the same payload (the JSON block echoes it verbatim) and your wallet address as buyerAddress. The transaction is valid for at most 180 s, so sign and submit it at once. " + SIGN_COPY,
     {
       changeAddress: z.string().describe("Your wallet address (pays the lock and fees; receives the bond back on Accept). Get it from vector_signer_get_address."),
       advert_ref: z.string().describe("Advert '<txid>#<index>' from vector_marketplace_list_suppliers"),
