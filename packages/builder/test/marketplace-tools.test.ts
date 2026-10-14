@@ -46,8 +46,12 @@ const markdownOf = (t: string) => t.slice(0, t.lastIndexOf('\n\n' + JSON_FENCE.s
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 const supplierRow = (over: Record<string, unknown> = {}) => ({ utxo_ref: ADVERT_REF, supplier_pkh: ADVERT_EXPECTED.supplier_pkh, capability_id: ADVERT_EXPECTED.capability_id, model: 'm', max_output_tokens: 1, max_processing_ms: 300000, price_lovelace: '200000', supplier_bond_lovelace: '1000000', buyer_bond_lovelace: '1000000', endpoint_url: 'https://s.example', detail_uri: '', detail_hash: '', advertised_at: 1, status: 'free', advert_status: 'Active', current_escrow_ref: null, last_seen_iso: '2026-10-13T09:00:00.000Z', created_slot: 1, ...over });
 const advertUtxo = (datumHex: string, over: Record<string, unknown> = {}) => ({ tx_hash: ADVERT_REF.slice(0, 64), tx_index: 0, address: ADVERT_ADDRESS, value: '2000000', is_spent: false, inline_datum: { bytes: datumHex }, ...over });
+/** An IP literal in a public (documentation) range: safeFetch checks it directly, so no DNS is touched. */
+const MANIFEST_URI = 'https://203.0.113.9/agents/manifest.json';
 interface Net {
   utxos?: unknown[]; capabilities?: unknown[]; suppliers?: unknown[]; supplier?: { status: number; body?: unknown }; koiosStatus?: number;
+  /** What the supplier's host answers at MANIFEST_URI: a status and a body (JSON, or text when `raw`), or a failure to connect. */
+  manifest?: { status?: number; body?: unknown; raw?: string; fails?: Error };
   /** Payment credentials of the inputs of the transaction that created the advert (default: the supplier's own key). */
   authorCreds?: string[];
 }
@@ -65,6 +69,10 @@ const stub = (net: Net) => {
     if (url === `${INDEXER_URL}/capabilities`) return reply(net.capabilities ?? []);
     if (url === `${INDEXER_URL}/suppliers`) return reply(net.suppliers ?? []);
     if (url.startsWith(`${INDEXER_URL}/suppliers/`)) return net.supplier ? reply(net.supplier.body ?? {}, net.supplier.status) : reply({}, 404);
+    if (url === MANIFEST_URI) {
+      if (net.manifest?.fails) throw net.manifest.fails;
+      return net.manifest?.raw !== undefined ? new Response(net.manifest.raw, { status: net.manifest.status ?? 200 }) : reply(net.manifest?.body ?? {}, net.manifest?.status ?? 200);
+    }
     return reply({ unexpected: url }, 500);
   }) as typeof fetch;
 };
@@ -73,7 +81,7 @@ afterEach(() => { globalThis.fetch = realFetch; node = undefined; });
 
 // A real advert datum with chosen supplier-controlled fields (indexes follow AdvertDatum's on-chain field order).
 const advertDatumWith = (fields: {
-  capability_id?: string; model?: string; endpoint_url?: string; advertised_at?: bigint;
+  capability_id?: string; model?: string; endpoint_url?: string; detail_uri?: string; advertised_at?: bigint;
   price_lovelace?: bigint; supplier_bond_lovelace?: bigint; buyer_bond_lovelace?: bigint;
 }): string => {
   const c = Data.from(ADVERT_DATUM_HEX) as Constr<Data>;
@@ -83,6 +91,7 @@ const advertDatumWith = (fields: {
   if (fields.supplier_bond_lovelace !== undefined) c.fields[6] = fields.supplier_bond_lovelace;
   if (fields.buyer_bond_lovelace !== undefined) c.fields[7] = fields.buyer_bond_lovelace;
   if (fields.endpoint_url !== undefined) c.fields[8] = fromText(fields.endpoint_url);
+  if (fields.detail_uri !== undefined) c.fields[9] = fromText(fields.detail_uri);
   if (fields.advertised_at !== undefined) c.fields[11] = fields.advertised_at;
   return Data.to(c);
 };
@@ -141,7 +150,7 @@ describe('vector_marketplace_get_supplier', () => {
     const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
     const md = markdownOf(t);
     assert.ok(md.includes("- **Model:** evil ¦ model ## injected 'x' - **Fake:** line\n"), md);
-    assert.equal(md.split('\n').filter((l) => l.startsWith('- **')).length, 9, 'exactly the nine advert bullets, nothing smuggled in');
+    assert.equal(md.split('\n').filter((l) => l.startsWith('- **')).length, 10, 'exactly the nine advert bullets and the manifest line, nothing smuggled in');
     const endpointLine = md.split('\n').find((l) => l.startsWith('- **Endpoint:**'))!;
     assert.ok(endpointLine.endsWith('…') && endpointLine.length < 120, endpointLine);
     const j = jsonOf(t);
@@ -153,6 +162,54 @@ describe('vector_marketplace_get_supplier', () => {
     const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
     assert.match(t, /^Failed to read advert: Koios utxo_info answered 502\n/);
     assert.ok(!/https?:/.test(t));
+  });
+
+  // The advert's detail_uri is a URL its author chose. The tool fetches it through safeFetch and shows it as the supplier's own JSON.
+  describe('the manifest at the Detail URI', () => {
+    const withUri = (net: Net = {}) => stub({ utxos: [advertUtxo(advertDatumWith({ detail_uri: MANIFEST_URI }))], ...net });
+    test('an advert with no Detail URI has no manifest, and nothing is fetched from a supplier', async () => {
+      stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)] });
+      const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
+      assert.equal(lineOf(markdownOf(t), '- **Manifest:**'), '- **Manifest:** none (the advert has no Detail URI)');
+      assert.equal(jsonOf(t).manifest, null);
+      assert.equal(jsonOf(t).manifest_error, null);
+      assert.ok(requested.every((u) => u.includes('/api/v1/') || u.startsWith(INDEXER_URL)), `a supplier was called: ${requested.join(' ')}`);
+    });
+    test('fetches the manifest the URI points to, carries it verbatim in the JSON, and says it is the supplier\'s own', async () => {
+      const manifest = { name: 'Chandra OCR', note: 'evil | `x`\n## injected', nested: { a: [1, null, { b: 'c' }] } };
+      withUri({ manifest: { body: manifest } });
+      const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
+      assert.ok(requested.includes(MANIFEST_URI));
+      assert.equal(lineOf(markdownOf(t), '- **Manifest:**'), "- **Manifest:** fetched from the Detail URI: the supplier's own JSON, not checked against the detail hash (the full text is in the JSON block)");
+      assert.deepEqual(jsonOf(t).manifest, manifest);
+      assert.equal(jsonOf(t).manifest_error, null);
+      assert.ok(!markdownOf(t).includes('injected'), 'nothing of the manifest is in the markdown');
+    });
+    test('a manifest that cannot be fetched is said so in a fixed phrase, without the URL or what the host said', async () => {
+      const failures: Array<[Net['manifest'], string]> = [
+        [{ status: 404, body: { error: 'db password=hunter2' } }, 'the supplier answered 404'],
+        [{ raw: '<html>Bad gateway password=hunter2</html>' }, 'its answer is not JSON'],
+        [{ fails: new TypeError('fetch failed: connect ECONNRESET 203.0.113.9:443 (evil.example)') }, 'the request to the supplier failed (network error)'],
+        [{ raw: '{"pad":"' + 'x'.repeat(262_144) + '"}' }, "the supplier's answer is over the 262144 byte limit"],
+      ];
+      for (const [manifest, why] of failures) {
+        withUri({ manifest });
+        const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
+        assert.ok(t.startsWith('# Advert '), t.slice(0, 200));
+        assert.equal(lineOf(markdownOf(t), '- **Manifest:**'), `- **Manifest:** could not be fetched (${why})`);
+        assert.equal(jsonOf(t).manifest, null);
+        assert.equal(jsonOf(t).manifest_error, why);
+        for (const secret of ['hunter2', 'evil.example', 'Bad gateway', '203.0.113.9:443']) assert.ok(!t.includes(secret), `${secret} leaked into: ${t}`);
+      }
+    });
+    test('a Detail URI that is not https, or is on a private address, is refused by the rule and never fetched', async () => {
+      for (const [uri, why] of [['http://203.0.113.9/manifest.json', 'the supplier URL was refused by the outbound-call policy'], ['ipfs://bafybeigdyrzt/m.json', 'the supplier URL was refused by the outbound-call policy'], ['https://169.254.169.254/latest', 'the supplier host resolves to a private or reserved address, which is refused']] as const) {
+        stub({ utxos: [advertUtxo(advertDatumWith({ detail_uri: uri }))] });
+        const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
+        assert.equal(jsonOf(t).manifest_error, why, uri);
+        assert.ok(!requested.includes(uri), `${uri} was fetched`);
+      }
+    });
   });
 });
 
@@ -225,6 +282,10 @@ const OWN_PKH = getAddressDetails(OWN_ADDRESS).paymentCredential!.hash;
 const POST_TOOL = 'vector_build_marketplace_post_escrow';
 const ACCEPT_TOOL = 'vector_build_marketplace_accept';
 const RECLAIM_TOOL = 'vector_build_marketplace_reclaim';
+// post_escrow refuses a fleet capability, and the live advert is one (ChandraOCR, ocr.page.extract.*). The Post tests hire the live
+// advert with its capability moved to the template family mcp.tool.execute.*, at the same length: the lock and the fee stay the live ones.
+const TEMPLATE_CAPABILITY = 'mcp.tool.execute.chandra-ocr-2.v1';
+const TEMPLATE_ADVERT = advertDatumWith({ capability_id: TEMPLATE_CAPABILITY });
 const cborOf = (t: string): string => {
   const m = /\*\*Unsigned TX CBOR:\*\*\n```\n([0-9a-f]+)\n```/.exec(t);
   assert.ok(m, 'the text carries the unsigned CBOR in its own fence');
@@ -249,7 +310,7 @@ const askedConfiguredKoios = (urls: string[]) => {
 const SIGN_FLOW = 'Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.';
 
 describe('vector_build_marketplace_post_escrow', () => {
-  beforeEach(() => { node = new FixtureProvider(FIXTURE_UTXOS); stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)] }); });
+  beforeEach(() => { node = new FixtureProvider(FIXTURE_UTXOS); stub({ utxos: [advertUtxo(TEMPLATE_ADVERT)] }); });
 
   test('builds the unsigned post and shows the signer who is paid, what is locked and what comes back, truthfully', async () => {
     const before = Date.now();
@@ -270,7 +331,7 @@ describe('vector_build_marketplace_post_escrow', () => {
     // the escrow, the payee, the deadline, the payload
     assert.equal(j.escrow_ref, `${j.tx_hash}#0`);
     assert.equal(lineOf(t, '**Escrow ref (after submit):**'), `**Escrow ref (after submit):** \`${j.escrow_ref}\``);
-    assert.equal(lineOf(t, '**Hiring:**'), `**Hiring:** \`${ADVERT_EXPECTED.capability_id}\` from supplier key \`${ADVERT_EXPECTED.supplier_pkh}\`, endpoint host \`mp-suppliers-chandra.hal8.ai\``);
+    assert.equal(lineOf(t, '**Hiring:**'), `**Hiring:** \`${TEMPLATE_CAPABILITY}\` from supplier key \`${ADVERT_EXPECTED.supplier_pkh}\`, endpoint host \`mp-suppliers-chandra.hal8.ai\``);
     const window = ADVERT_EXPECTED.max_processing_ms + 180_000;
     assert.ok(j.deliver_by >= before + window && j.deliver_by <= after + window, `deliver_by ${j.deliver_by} is the window plus the buffer from now`);
     assert.equal(lineOf(t, '**Deliver by:**'), `**Deliver by:** ${new Date(j.deliver_by).toISOString()}`);
@@ -282,7 +343,7 @@ describe('vector_build_marketplace_post_escrow', () => {
     // the CBOR in the fence is the escrow post: the escrow is output 0
     assert.deepEqual(outputsOf(cborOf(t))[0], { address: ESCROW_ADDRESS, lovelace: ESCROW_LOCKED_LOVELACE });
     askedConfiguredKoios(requested);
-    assert.ok(markdownOf(t).endsWith(`Keep the payload byte-identical when you send the job through the marketplace transport tool (PR 3). ${SIGN_FLOW}`));
+    assert.ok(markdownOf(t).endsWith(`Keep the payload byte-identical for vector_marketplace_send_job. ${SIGN_FLOW}`));
     // the wallet kept an output aside for the script spends, so there is nothing to warn about
     assert.equal(j.collateral_kept, true);
     assert.equal(lineOf(t, '**Collateral kept aside:**'), '**Collateral kept aside:** yes');
@@ -292,7 +353,7 @@ describe('vector_build_marketplace_post_escrow', () => {
   test("says when the supplier payout will be raised to the 1-unit minimum out of the buyer's return, and only then", async () => {
     const NOTE = ' (the supplier payout is raised to the 1-unit minimum out of your return)';
     const lockedLineFor = async (amounts: { price_lovelace?: bigint; supplier_bond_lovelace?: bigint; buyer_bond_lovelace?: bigint }): Promise<string> => {
-      stub({ utxos: [advertUtxo(advertDatumWith(amounts))] });
+      stub({ utxos: [advertUtxo(advertDatumWith({ capability_id: TEMPLATE_CAPABILITY, ...amounts }))] });
       const t = await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
       assert.ok(t.startsWith('# Unsigned Escrow Post Built (Not Submitted)\n'), t.slice(0, 400));
       return lineOf(t, '**Locked:**');
@@ -308,8 +369,11 @@ describe('vector_build_marketplace_post_escrow', () => {
     const exact = await lockedLineFor({ price_lovelace: 300_000n, supplier_bond_lovelace: 700_000n });
     assert.ok(exact.includes('(plus any floor excess) returns. Miss that window'), exact);
     assert.ok(!exact.includes('raised'), exact);
-    // the rule is on price + supplier bond: a small buyer bond is the buyer's own return, not a supplier payout
-    assert.ok(!(await lockedLineFor({ buyer_bond_lovelace: 100_000n })).includes('raised'));
+    // the rule is on price + supplier bond: a small buyer bond is the buyer's own return, not a supplier payout. The Locked line also
+    // carries the bond the advert declared, which proves the knob reached the datum (a test that left the bond at 1 unit would pass anyway).
+    const smallBuyerBond = await lockedLineFor({ buyer_bond_lovelace: 100_000n });
+    assert.ok(smallBuyerBond.includes('buyer bond 0.100000'), smallBuyerBond);
+    assert.ok(!smallBuyerBond.includes('raised'), smallBuyerBond);
   });
   test('warns, in one line, when no pure 5-unit output could be kept aside for Accept and Reclaim', async () => {
     node = new FixtureProvider([{ txHash: FIXTURE_TXHASH, outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 900_000_000n } }]); // the only output is the only collateral candidate
@@ -339,16 +403,18 @@ describe('vector_build_marketplace_post_escrow', () => {
     assert.ok(t.includes('2. Check the advert is still Active with vector_marketplace_get_supplier'));
     assert.ok(!t.includes('Unsigned'));
   });
-  test('refuses, as text, an advert its supplier key did not create, a retired one, and a buyer who is the supplier', async () => {
-    stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)], authorCreds: ['bb'.repeat(28)] });
+  test('refuses, as text, a fleet advert, an advert its supplier key did not create, a retired one, and a buyer who is the supplier', async () => {
+    stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)] });
+    assert.match(await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* serves ocr\.page\.extract\.chandra-ocr-2\.v1, a fleet capability .* Pick a template-contract supplier\./);
+    stub({ utxos: [advertUtxo(TEMPLATE_ADVERT)], authorCreds: ['bb'.repeat(28)] });
     assert.match(await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* was not created by its supplier key/);
-    const retired = Data.from(ADVERT_DATUM_HEX) as Constr<Data>;
+    const retired = Data.from(TEMPLATE_ADVERT) as Constr<Data>;
     retired.fields[12] = new Constr(1, []);
     stub({ utxos: [advertUtxo(Data.to(retired))] });
     assert.match(await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: Advert .* is retired; pick another supplier\./);
     // The supplier's own wallet must hold something on the node, or building stops at "no UTxOs found" before the check is reached.
     node = new FixtureProvider([{ txHash: FIXTURE_TXHASH, outputIndex: 7, address: SUPPLIER_ADDRESS, assets: { lovelace: 900_000_000n } }]);
-    stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)] });
+    stub({ utxos: [advertUtxo(TEMPLATE_ADVERT)] });
     assert.match(await call(POST_TOOL, { changeAddress: SUPPLIER_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' }), /^Failed to build escrow post: The buyer cannot be the supplier of the same advert\./);
   });
   test('a deliver_by past the 24 h ceiling (a unit slip) reaches the caller as text; deliver_by_ms stays optional', async () => {
@@ -382,9 +448,8 @@ function escrowWorld(chain: UTxO[], posted: EscrowDatum, spent: boolean, koios: 
 }
 
 // The troubleshooting tips, whole: they name what a missed accept window costs (escrow.ak handle_release only bounds the supplier's
-// take from below, at price + supplier bond + buyer bond, so it may keep everything locked), and the transport tool by what it will be
-// called in PR 3.
-const ACCEPT_TIPS = '\n\n**Troubleshooting Tips:**\n1. The job must be in Submitted state: check its progress through the marketplace transport tool (PR 3) first\n' +
+// take from below, at price + supplier bond + buyer bond, so it may keep everything locked), and the transport tool by name.
+const ACCEPT_TIPS = '\n\n**Troubleshooting Tips:**\n1. The job must be in Submitted state: poll vector_marketplace_get_job first\n' +
   '2. Accept must land within 600 s of Submit; after that the supplier may Release and keep everything locked (price + both bonds + any floor excess)\n3. The wallet needs one pure 5-unit output as collateral';
 const RECLAIM_TIPS = '\n\n**Troubleshooting Tips:**\n1. Reclaim opens only after deliver_by\n' +
   '2. A Submitted escrow cannot be reclaimed: accept within 600 s of Submit; after that the supplier may Release and keep everything locked (price + both bonds + any floor excess)';
@@ -538,6 +603,9 @@ describe('the build tools\' error text and rate limit', () => {
       [POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'x' }],
       [ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF }],
       [RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF }],
+      ['vector_marketplace_send_job', { escrow_ref: ESCROW_REF, payload: 'x', buyerAddress: OWN_ADDRESS }],
+      ['vector_marketplace_get_job', { escrow_ref: ESCROW_REF, job_id: 'j1', buyerAddress: OWN_ADDRESS }],
+      ['vector_marketplace_verify_receipt', { escrow_ref: ESCROW_REF, receipt: {}, receipt_signature: 'ab' }],
     ] as const) {
       assert.match(await callOn(over)(tool, args), /^Rate limit exceeded\. Retry after \d+ms\.$/, tool);
     }
@@ -546,8 +614,12 @@ describe('the build tools\' error text and rate limit', () => {
 });
 
 describe('registration', () => {
-  test('registers exactly the three read tools and the three build tools', () => {
-    const six = ['vector_build_marketplace_accept', 'vector_build_marketplace_post_escrow', 'vector_build_marketplace_reclaim', 'vector_marketplace_get_supplier', 'vector_marketplace_list_capabilities', 'vector_marketplace_list_suppliers'];
-    assert.deepEqual([...handlers.keys()].sort(), six);
+  test('registers exactly the three read tools, the three build tools and the three transport tools', () => {
+    const nine = [
+      'vector_build_marketplace_accept', 'vector_build_marketplace_post_escrow', 'vector_build_marketplace_reclaim',
+      'vector_marketplace_get_job', 'vector_marketplace_get_supplier', 'vector_marketplace_list_capabilities', 'vector_marketplace_list_suppliers',
+      'vector_marketplace_send_job', 'vector_marketplace_verify_receipt',
+    ];
+    assert.deepEqual([...handlers.keys()].sort(), nine);
   });
 });

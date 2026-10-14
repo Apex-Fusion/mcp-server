@@ -2,9 +2,11 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Constr, Data, credentialToAddress } from '@lucid-evolution/lucid';
-import { fetchSuppliers, fetchCapabilities, fetchSupplier, koiosUtxoInfo, koiosTxInputCreds, koiosTxInputRefs, koiosCredentialUtxos, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
+import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
+import { fetchSuppliers, fetchCapabilities, fetchSupplier, fetchEscrows, ESCROWS_MAX_BYTES, koiosUtxoInfo, koiosTxInputCreds, koiosTxInputRefs, koiosCredentialUtxos, readAdvert, withJson } from '../src/vector/marketplace-indexer.ts';
 import { ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_SCRIPT_HASH, INDEXER_URL, indexerUrlFrom } from '../src/vector/marketplace-constants.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
+import { heldOpen } from './fixtures/held-open.ts';
 
 const fakeFetch = (body: unknown, status = 200) => (async () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
 
@@ -148,6 +150,12 @@ const errorOf = (r: Awaited<ReturnType<typeof readAdvert>>): string => {
 };
 
 describe('readAdvert', () => {
+  test('asks the Koios it is given, and the configured one when it is given none', async () => {
+    const { f, calls } = koiosReturning([utxoAt(ADVERT_REF, ADVERT_ADDRESS, ADVERT_DATUM_HEX)]);
+    await readAdvert(ADVERT_REF, f, 'https://other-koios.example//');
+    await readAdvert(ADVERT_REF, f);
+    assert.deepEqual(calls.map((c) => c.url), ['https://other-koios.example/api/v1/utxo_info', `${VECTOR_KOIOS_URL.replace(/\/+$/, '')}/api/v1/utxo_info`]);
+  });
   test('returns the decoded advert, the UTxO and the spent flag for an advert at the advert script address', async () => {
     const { f, calls } = koiosReturning([utxoAt(ADVERT_REF, ADVERT_ADDRESS, ADVERT_DATUM_HEX)]);
     const r = await readAdvert(ADVERT_REF, f);
@@ -473,5 +481,133 @@ describe('koiosCredentialUtxos', () => {
     await assert.rejects(() => run(fakeFetch({}, 500)), safeMessage(/^Koios credential_utxos answered 500$/));
     await assert.rejects(() => run(htmlFetch), safeMessage(/^Koios credential_utxos: .*not valid JSON/));
     for (const body of [{}, { error: 'x' }, null, 'oops', 7]) await assert.rejects(() => run(fakeFetch(body)), safeMessage(/^Koios credential_utxos: Koios returned a non-list response$/));
+  });
+});
+
+// The escrow rows of the marketplace indexer: the one place that says where a settled escrow's Submitted output was. They are untrusted
+// rows, handed back as they came.
+describe('fetchEscrows', () => {
+  const recording = (body: unknown = []) => {
+    const urls: string[] = [];
+    const f = (async (url: string) => { urls.push(String(url)); return new Response(JSON.stringify(body), { status: 200 }); }) as unknown as typeof fetch;
+    return { f, urls };
+  };
+  test('asks for the escrows of a buyer and returns the list as it came, junk and all', async () => {
+    const body = [{ utxo_ref: 'a'.repeat(64) + '#0', state: 'Submitted' }, 'junk', null, 7];
+    const { f, urls } = recording(body);
+    assert.deepEqual(await fetchEscrows('ab'.repeat(28), { fetchImpl: f }), body);
+    assert.deepEqual(urls, [`${INDEXER_URL}/escrows?buyer=${'ab'.repeat(28)}`]);
+  });
+  test('escapes what it is given: nothing a caller passes becomes another parameter or another path', async () => {
+    const { f, urls } = recording();
+    await fetchEscrows('x&supplier=y#z /../w', { fetchImpl: f });
+    assert.deepEqual(urls, [`${INDEXER_URL}/escrows?buyer=x%26supplier%3Dy%23z%20%2F..%2Fw`]);
+  });
+  test('failures name the operation and the status, and carry neither the endpoint nor a snippet of the body', async () => {
+    const buyer = 'ab'.repeat(28);
+    await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: fakeFetch({}, 502) }), safeMessage(/^list escrows: indexer answered 502$/));
+    await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: htmlFetch }), safeMessage(/^list escrows: .*not valid JSON/));
+    for (const body of [{}, { rows: [] }, null, 'oops', 7]) await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: fakeFetch(body) }), safeMessage(/^list escrows: indexer returned a non-list response$/));
+  });
+
+  // Anyone can post escrows under a key of their own, so the list of one key's escrows has no natural end, and every verify of a settled
+  // escrow of that buyer would read it whole. It is read to ESCROWS_MAX_BYTES and no further: by its content-length before a byte is read, and by
+  // a running count while it streams (a content-length can be absent or can lie).
+  describe('the cap on the list', () => {
+    const buyer = 'ab'.repeat(28);
+    const enc = new TextEncoder();
+    const eAcute = String.fromCharCode(0xe9); // two bytes in UTF-8
+    const overCap = new RegExp(`^list escrows: the answer is over the ${ESCROWS_MAX_BYTES} byte limit$`);
+    const bodyFetch = (text: string) => (async () => new Response(text, { status: 200 })) as unknown as typeof fetch;
+    /** A JSON list of one string, `bytes` bytes long in all ('[' + '"' + text + '"' + ']'). */
+    const listOfSize = (bytes: number, char = 'x') => '[' + JSON.stringify(char.repeat((bytes - 4) / enc.encode(char).byteLength)) + ']';
+    /**
+     * A stream that records how often it was pulled (highWaterMark 0: only when something reads) and whether it was cancelled. With `loop` it
+     * gives its chunks over and over, 64 of them in all, which is far more than the cap: a reader without the cap reads to the end and fails on
+     * what it read, where an endless stream would hang it.
+     */
+    const watched = (chunks: Uint8Array[], loop = false) => {
+      const seen = { pulls: 0, cancelled: false };
+      let next = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(c) { seen.pulls++; if (next >= (loop ? 64 : chunks.length)) c.close(); else c.enqueue(chunks[next++ % chunks.length]); },
+        cancel() { seen.cancelled = true; },
+      }, { highWaterMark: 0 });
+      return { seen, stream };
+    };
+    const streamed = (stream: ReadableStream<Uint8Array>, headers: Record<string, string> = {}) => (async () => new Response(stream, { status: 200, headers })) as unknown as typeof fetch;
+
+    test('a list of exactly the cap is read, and one byte more is refused', async () => {
+      assert.equal(ESCROWS_MAX_BYTES, 8 * 1024 * 1024, 'the cap is 8 MiB: about 10,000 rows of the indexer');
+      const atCap = listOfSize(ESCROWS_MAX_BYTES);
+      assert.equal(enc.encode(atCap).byteLength, ESCROWS_MAX_BYTES);
+      assert.deepEqual(await fetchEscrows(buyer, { fetchImpl: bodyFetch(atCap) }), ['x'.repeat(ESCROWS_MAX_BYTES - 4)]);
+      const over = listOfSize(ESCROWS_MAX_BYTES + 1);
+      assert.equal(enc.encode(over).byteLength, ESCROWS_MAX_BYTES + 1);
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: bodyFetch(over) }), safeMessage(overCap));
+    });
+    test('the cap counts bytes, not characters', async () => {
+      const wide = listOfSize(ESCROWS_MAX_BYTES + 2, eAcute); // 2 bytes a character: about 4.2 million characters, 8 MiB + 2 bytes
+      assert.ok(wide.length < ESCROWS_MAX_BYTES, 'fewer characters than the cap');
+      assert.equal(enc.encode(wide).byteLength, ESCROWS_MAX_BYTES + 2);
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: bodyFetch(wide) }), safeMessage(overCap));
+    });
+    test('an answer that announces more than the cap is refused before a byte is read, and its stream is cancelled', async () => {
+      const { seen, stream } = watched([enc.encode('[]')]);
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: streamed(stream, { 'content-length': String(ESCROWS_MAX_BYTES + 1) }) }), safeMessage(overCap));
+      assert.equal(seen.pulls, 0, 'nothing was read');
+      assert.equal(seen.cancelled, true);
+    });
+    test('an answer that announces exactly the cap is read', async () => {
+      const { stream } = watched([enc.encode('[{"a":1}]')]);
+      assert.deepEqual(await fetchEscrows(buyer, { fetchImpl: streamed(stream, { 'content-length': String(ESCROWS_MAX_BYTES) }) }), [{ a: 1 }]);
+    });
+    test('a long answer that announces nothing is cut off after the cap, and its stream is cancelled', async () => {
+      const { seen, stream } = watched([new Uint8Array(1024 * 1024).fill(0x20)], true); // one MiB of spaces for every read, and no content-length
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: streamed(stream) }), safeMessage(overCap));
+      assert.ok(seen.pulls <= ESCROWS_MAX_BYTES / (1024 * 1024) + 2, `read ${seen.pulls} MiB before it stopped`);
+      assert.equal(seen.cancelled, true);
+    });
+    test('an answer that announces less than it sends is cut off just the same', async () => {
+      const { seen, stream } = watched([new Uint8Array(1024 * 1024).fill(0x20)], true);
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: streamed(stream, { 'content-length': '12' }) }), safeMessage(overCap));
+      assert.equal(seen.cancelled, true);
+    });
+    test('a list that arrives in pieces is joined before it is decoded: a character split between two pieces is whole', async () => {
+      const bytes = enc.encode('[{"state":"Submitted","note":"caf' + eAcute + '"}]');
+      const at = bytes.indexOf(0xc3) + 1; // between the two bytes of the e-acute
+      const { stream } = watched([bytes.slice(0, at), bytes.slice(at)]);
+      assert.deepEqual(await fetchEscrows(buyer, { fetchImpl: streamed(stream) }), [{ state: 'Submitted', note: 'caf' + eAcute }]);
+    });
+    test('a byte order mark is let through as a plain res.json() lets it through', async () => {
+      assert.deepEqual(await fetchEscrows(buyer, { fetchImpl: bodyFetch(String.fromCharCode(0xfeff) + '[1]') }), [1]);
+    });
+    test('a stream that breaks in the middle fails like any unreadable body, without what the break said', async () => {
+      const stream = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(enc.encode('[{"a"')); c.error(new Error('socket hang up talking to http://internal-proxy.example')); } });
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: streamed(stream) }), safeMessage(/^list escrows: response was not valid JSON$/));
+    });
+    test('a body that stalls past the time budget says so and how far it got, not "not valid JSON"', async () => {
+      for (const name of ['TimeoutError', 'AbortError']) {
+        const stalls = (async () => new Response(new ReadableStream<Uint8Array>({
+          start(c) { c.enqueue(enc.encode('[{"a"')); setTimeout(() => c.error(new DOMException('The operation was aborted due to timeout', name)), 5); },
+        }), { status: 200 })) as unknown as typeof fetch;
+        await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: stalls }), safeMessage(/^list escrows: indexer list read timed out after 5 bytes$/), name);
+      }
+    });
+    test('the time budget of the call runs to the end of the body: a list that never finishes is cut off and counted', async () => {
+      const slow = (async (_url: string, init: { signal: AbortSignal }) => new Response(new ReadableStream<Uint8Array>({
+        start(c) { c.enqueue(enc.encode('[{"utxo_ref":"')); init.signal.addEventListener('abort', () => c.error(init.signal.reason)); },
+      }), { status: 200 })) as unknown as typeof fetch;
+      await assert.rejects(() => heldOpen(fetchEscrows(buyer, { fetchImpl: slow, timeoutMs: 30 })), safeMessage(/^list escrows: indexer list read timed out after 14 bytes$/));
+    });
+    test('an answer with no body is no list', async () => {
+      await assert.rejects(() => fetchEscrows(buyer, { fetchImpl: (async () => new Response(null, { status: 200 })) as unknown as typeof fetch }), safeMessage(/^list escrows: response was not valid JSON$/));
+    });
+    test('only the list of escrows has the cap: the others are read whole', async () => {
+      const big = Array.from({ length: Math.ceil(ESCROWS_MAX_BYTES / 40) }, (_, n) => ({ capability_id: `c${n}`, supplier_count: n }));
+      const text = JSON.stringify(big);
+      assert.ok(enc.encode(text).byteLength > ESCROWS_MAX_BYTES);
+      assert.equal((await fetchCapabilities({ fetchImpl: bodyFetch(text) })).length, big.length);
+    });
   });
 });

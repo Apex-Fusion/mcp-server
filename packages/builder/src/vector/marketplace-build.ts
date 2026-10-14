@@ -20,6 +20,8 @@ import {
 import type { AdvertDatum, EscrowDatum } from './marketplace-datum.js';
 import { readAdvert, koiosTxInputCreds } from './marketplace-indexer.js';
 import { resolveEscrowLineage, nodeFailure } from './marketplace-lineage.js';
+import { isFleetCapability } from './marketplace-transport.js';
+import { cell } from './marketplace-shared.js';
 
 // The resolver lives in marketplace-lineage.ts; callers keep importing it from here.
 export { resolveEscrowLineage };
@@ -153,10 +155,10 @@ async function assertAdvertAuthor(advertRef: string, creatingTxHash: string, sup
 
 /**
  * Builds the unsigned Post: locks price + both bonds in a new escrow (output 0) for the advert. Reads the advert through
- * readAdvert and refuses one that is spent, retired, not valid UTF-8 or not created by its supplier key, and a buyer who
- * is the supplier. Funds the Post without the wallet's smallest pure 5-unit output when it can (collateralKept), and
- * checks the built transaction really has the escrow at output 0. `fetchImpl` stands in for fetch in the two Koios calls
- * (tests). Nothing is signed or submitted.
+ * readAdvert and refuses one that is spent, retired, not valid UTF-8, of a fleet capability or not created by its
+ * supplier key, and a buyer who is the supplier. Funds the Post without the wallet's smallest pure 5-unit output when it
+ * can (collateralKept), and checks the built transaction really has the escrow at output 0. `fetchImpl` stands in for
+ * fetch in the two Koios calls (tests). Nothing is signed or submitted.
  */
 export async function buildPostEscrow(
   lucid: LucidEvolution, provider: Provider,
@@ -173,6 +175,9 @@ export async function buildPostEscrow(
   if (utxo.is_spent !== false) throw new Error(`Koios did not report whether advert ${advertRef} is unspent; refusing to hire it.`);
   const advertDatumHex = utxo.inline_datum?.bytes;
   if (!advertDatumHex || !advertTextFieldsRoundTrip(advertDatumHex)) throw new Error(`Advert ${advertRef} has text fields that are not valid UTF-8, so the escrow could not carry its capability id faithfully; refusing to hire it.`);
+  // vector_marketplace_send_job serves template-contract suppliers only, and a fleet supplier checks another hash of the request than
+  // the prompt_hash a Post commits: a fleet hire could never be sent, and its lock would wait for a Reclaim after deliver_by.
+  if (isFleetCapability(advert.capability_id)) throw new Error(`Advert ${advertRef} serves ${cell(advert.capability_id)}, a fleet capability (llm.text.generate.*, llm.chat.*, ocr.page.extract.* or audio.synthesize.*). vector_marketplace_send_job serves template-contract suppliers only in this release, so the job could never be sent and the lock would wait for a Reclaim after deliver_by. Pick a template-contract supplier.`);
   const nowMs = p.nowMs ?? Date.now();
   const plan = planPostEscrow(advert, advertRef, buyerPkh, p.payload, nowMs, p.deliverByMs);
   await assertAdvertAuthor(advertRef, utxo.tx_hash, advert.supplier_pkh, fetchImpl);
@@ -212,6 +217,16 @@ export async function buildPostEscrow(
 }
 
 // ─── Accept / Reclaim plans (pure) ──────────────────────────────────────────
+
+/**
+ * Does Accept raise the supplier's payout to the minimum output? Accept owes the supplier the price and its bond; when that is
+ * less than MIN_UTXO_LOVELACE the output is raised to it, out of the buyer's return. One rule for planAccept and for the Post text
+ * that warns the buyer before it signs.
+ */
+export function supplierPayoutRaised(priceLovelace: bigint, supplierBondLovelace: bigint): boolean {
+  return priceLovelace + supplierBondLovelace < MIN_UTXO_LOVELACE;
+}
+
 // A payout below the minimum output cannot exist, so it is raised to MIN_UTXO_LOVELACE and the plan says so (`...Raised`): the
 // signer is shown more than the datum owes, and the difference is not free. `supplierPkh` is the key the datum names.
 export function planAccept(datum: EscrowDatum, callerPkh: string, nowMs: number) {
@@ -220,7 +235,7 @@ export function planAccept(datum: EscrowDatum, callerPkh: string, nowMs: number)
   const validTo = datum.submitted_at + ACCEPT_WINDOW_MS;
   if (nowMs > validTo) throw new Error(`Accept window closed at ${iso(validTo)}; the supplier may now Release.`);
   const supplierDue = datum.payment_lovelace + datum.supplier_bond_lovelace;
-  const supplierRaised = supplierDue < MIN_UTXO_LOVELACE;
+  const supplierRaised = supplierPayoutRaised(datum.payment_lovelace, datum.supplier_bond_lovelace);
   const buyerRaised = datum.buyer_bond_lovelace < MIN_UTXO_LOVELACE;
   return {
     supplierPkh: datum.supplier_pkh,

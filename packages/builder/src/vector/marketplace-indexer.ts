@@ -1,6 +1,6 @@
 // packages/builder/src/vector/marketplace-indexer.ts
 // Read-only clients for the public marketplace indexer and Koios utxo_info.
-// No supplier URLs are contacted here (that is PR 3's safeFetch).
+// No supplier URLs are contacted here (marketplace-transport.ts does that, through safeFetch).
 import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { ADVERT_ADDRESS, INDEXER_URL } from './marketplace-constants.js';
 import { decodeAdvertDatum, formatOutRef, parseOutRef } from './marketplace-datum.js';
@@ -28,15 +28,44 @@ async function readJson<T>(res: Response, what: string): Promise<T> {
   try { return (await res.json()) as T; } catch { throw new Error(`${what}: response was not valid JSON`); }
 }
 
-async function getJson<T>(url: string, opts: Opts, what: string): Promise<T> {
+/**
+ * The body of `res` as JSON, holding no more than `max` bytes: a longer answer is refused, by its content-length before a byte is read,
+ * or as soon as the stream passes the cap. For a list whose length anyone can grow (the escrows of a buyer key).
+ */
+async function readJsonCapped<T>(res: Response, what: string, max: number): Promise<T> {
+  const tooLong = () => new Error(`${what}: the answer is over the ${max} byte limit`);
+  if (Number(res.headers.get('content-length')) > max) { await res.body?.cancel().catch(() => {}); throw tooLong(); }
+  if (!res.body) return readJson<T>(res, what);
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let over = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > max) { over = true; break; }
+      chunks.push(value);
+    }
+  } catch (err) {
+    // The call's time budget runs to the end of the body (AbortSignal.timeout), so a list that stalls part-way says so, and how far it got.
+    if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) throw new Error(`${what}: indexer list read timed out after ${total} bytes`);
+    throw new Error(`${what}: response was not valid JSON`);
+  }
+  if (over) { await reader.cancel().catch(() => {}); throw tooLong(); }
+  try { return JSON.parse(new TextDecoder().decode(Buffer.concat(chunks, total))) as T; } catch { throw new Error(`${what}: response was not valid JSON`); }
+}
+
+async function getJson<T>(url: string, opts: Opts, what: string, maxBytes?: number): Promise<T> {
   const f = opts.fetchImpl ?? fetch;
   const res = await f(url, { headers: { accept: 'application/json', 'user-agent': 'vector-mcp-builder' }, signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000) });
   if (!res.ok) throw new Error(`${what}: indexer answered ${res.status}`);
-  return readJson<T>(res, what);
+  return maxBytes === undefined ? readJson<T>(res, what) : readJsonCapped<T>(res, what, maxBytes);
 }
 
-async function getList<T>(url: string, opts: Opts, what: string): Promise<T[]> {
-  const body = await getJson<unknown>(url, opts, what);
+async function getList<T>(url: string, opts: Opts, what: string, maxBytes?: number): Promise<T[]> {
+  const body = await getJson<unknown>(url, opts, what, maxBytes);
   if (!Array.isArray(body)) throw new Error(`${what}: indexer returned a non-list response`);
   return body as T[];
 }
@@ -70,6 +99,24 @@ export async function fetchSupplier(pkh: string, opts: Opts = {}): Promise<Suppl
   const body = await readJson<unknown>(res, 'get supplier');
   if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new Error('get supplier: indexer returned a non-object response');
   return normaliseSupplier(body as Record<string, unknown>);
+}
+
+/**
+ * The most the list of one key's escrows may be: 8 MiB, about 10,000 rows of some 770 bytes. The indexer lists every escrow of a key,
+ * newest first and with no limit of its own, and anyone can post escrows under a key of their own, or name another key in the datum of
+ * one, so the list has no natural end.
+ */
+export const ESCROWS_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The indexer's rows for the escrows of one buyer (`?buyer=`): one row for each state an escrow reached (Open, Claimed, Submitted),
+ * keyed by the UTxO that state was made in, and kept after that UTxO is spent. They are the indexer's word and nothing more: they say
+ * where to look, and what they name is read from Koios before it is used. The list is returned as it came, each entry untrusted (see
+ * submittedRefsOf in marketplace-lineage.ts), and is read to ESCROWS_MAX_BYTES at most. A read that outlasts the call's time budget
+ * fails saying so and how many bytes it had.
+ */
+export async function fetchEscrows(buyerPkh: string, opts: Opts = {}): Promise<unknown[]> {
+  return getList<unknown>(`${INDEXER_URL}/escrows?buyer=${encodeURIComponent(buyerPkh)}`, opts, 'list escrows', ESCROWS_MAX_BYTES);
 }
 
 /**
@@ -209,12 +256,14 @@ export type AdvertRead = { error: string } | { utxo: KoiosUtxo; advert: AdvertDa
  * Reads one advert from the ledger. It refuses UTxOs that are not at the advert script address or hold no advert datum. That does
  * not make an advert genuine (the advert validator does not check who creates one, so buildPostEscrow also proves authorship) or
  * live: a spent or retired advert is returned too, flagged by `spent` and `advert.status`, and buildPostEscrow requires it unspent.
+ * `koiosUrl` is the Koios it asks (the configured one unless a caller that has read other things from a Koios of its own passes that
+ * one, so that one decision draws on one source).
  */
-export async function readAdvert(ref: string, fetchImpl: typeof fetch = fetch): Promise<AdvertRead> {
+export async function readAdvert(ref: string, fetchImpl: typeof fetch = fetch, koiosUrl: string = VECTOR_KOIOS_URL): Promise<AdvertRead> {
   let parsed: { txHash: string; outputIndex: number };
   try { parsed = parseOutRef(ref); } catch (err) { return { error: err instanceof Error ? err.message : String(err) }; }
   const canonical = formatOutRef(parsed.txHash, parsed.outputIndex);
-  const utxos = await koiosUtxoInfo(VECTOR_KOIOS_URL, [canonical], fetchImpl);
+  const utxos = await koiosUtxoInfo(koiosUrl, [canonical], fetchImpl);
   const utxo = utxos.find((u) => String(u?.tx_hash).toLowerCase() === parsed.txHash && u?.tx_index === parsed.outputIndex);
   if (!utxo) return { error: `No UTxO at ${canonical}.` };
   if (utxo.address?.toLowerCase() !== ADVERT_ADDRESS) return { error: `UTxO ${canonical} is not at the advert script address.` };

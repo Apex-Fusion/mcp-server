@@ -1,7 +1,7 @@
 // packages/builder/test/marketplace-build.test.ts
 import { describe, test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { CML, Constr, Data, getAddressDetails, credentialToAddress, unixTimeToSlot, slotToUnixTime, validatorToScriptHash } from '@lucid-evolution/lucid';
+import { CML, Constr, Data, fromText, getAddressDetails, credentialToAddress, unixTimeToSlot, slotToUnixTime, validatorToScriptHash } from '@lucid-evolution/lucid';
 import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
 import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS, FIXTURE_TXHASH, FIXTURE_TOKEN_UNIT } from './fixtures/fixture-provider.ts';
 import { lucidForAddress } from '../src/vector/build.ts';
@@ -23,7 +23,7 @@ import { decodeAdvertDatum, decodeEscrowDatum, encodeEscrowDatum, formatOutRef, 
 import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
 import {
   planPostEscrow, buildPostEscrow, reserveCollateralInputs, planAccept, planReclaim, paymentKeyHashOf, enterpriseAddressOf,
-  assertEscrowIsOutputZero, buildAccept, buildReclaim,
+  assertEscrowIsOutputZero, buildAccept, buildReclaim, supplierPayoutRaised,
 } from '../src/vector/marketplace-build.ts';
 
 const OWN_PKH = getAddressDetails(OWN_ADDRESS).paymentCredential!.hash;
@@ -206,6 +206,11 @@ describe('reserveCollateralInputs', () => {
 });
 
 // ─── The offline Post build ──────────────────────────────────────────────────
+// buildPostEscrow refuses a fleet capability, and the live advert is one (ChandraOCR, ocr.page.extract.*). So the Post is built
+// from the live advert with its capability moved to the template family mcp.tool.execute.*, at the same length: the datum, the
+// lock floor and the fee stay those of the live advert. Re-encoded in Lucid-compact framing, which readAdvert decodes too.
+const TEMPLATE_CAPABILITY = 'mcp.tool.execute.chandra-ocr-2.v1';
+const TEMPLATE_ADVERT_HEX = (() => { const c = Data.from(ADVERT_DATUM_HEX) as Constr<Data>; c.fields[1] = fromText(TEMPLATE_CAPABILITY); return Data.to(c); })();
 // The advert comes from Koios utxo_info (readAdvert) and its author from Koios tx_info; both are answered by this fake.
 function koiosFake(opts: { advertDatum?: string; address?: string; spent?: boolean | undefined; inputCreds?: unknown[]; utxoInfoStatus?: number; txInfoStatus?: number } = {}): KoiosFake {
   const calls: KoiosFake['calls'] = [];
@@ -218,7 +223,7 @@ function koiosFake(opts: { advertDatum?: string; address?: string; spent?: boole
       return new Response(JSON.stringify([{
         tx_hash: ADVERT_TX, tx_index: 0, address: opts.address ?? ADVERT_ADDRESS, value: '2000000',
         ...('spent' in opts ? { is_spent: opts.spent } : { is_spent: false }),
-        inline_datum: { bytes: opts.advertDatum ?? ADVERT_DATUM_HEX },
+        inline_datum: { bytes: opts.advertDatum ?? TEMPLATE_ADVERT_HEX },
       }]), { status: 200 });
     }
     if (path === '/api/v1/tx_info') {
@@ -230,9 +235,9 @@ function koiosFake(opts: { advertDatum?: string; address?: string; spent?: boole
   }) as unknown as typeof fetch;
   return { f, calls };
 }
-/** The live advert with one thing changed, re-encoded (Lucid-compact framing, which readAdvert decodes too). */
+/** The template advert with one thing changed, re-encoded (Lucid-compact framing, which readAdvert decodes too). */
 function advertWith(change: (c: Constr<Data>) => void): string {
-  const c = Data.from(ADVERT_DATUM_HEX) as Constr<Data>;
+  const c = Data.from(TEMPLATE_ADVERT_HEX) as Constr<Data>;
   change(c);
   return Data.to(c);
 }
@@ -260,7 +265,7 @@ describe('buildPostEscrow (offline)', () => {
   });
   test('the datum in the transaction is the marketplace-identical encoding of the plan, byte for byte', async () => {
     const r = await post(koiosFake());
-    const plan = planPostEscrow(decodeAdvertDatum(ADVERT_DATUM_HEX), ADVERT_REF, OWN_PKH, 'hello', NOW);
+    const plan = planPostEscrow(decodeAdvertDatum(TEMPLATE_ADVERT_HEX), ADVERT_REF, OWN_PKH, 'hello', NOW);
     assert.equal(outputs(r.txCbor)[0].datum, encodeEscrowDatum(plan.datum));
     assert.equal(r.lockLovelace, plan.lockLovelace);
     assert.equal(r.deliverBy, plan.deliverBy);
@@ -269,7 +274,7 @@ describe('buildPostEscrow (offline)', () => {
     const r = await post(koiosFake());
     assert.equal(r.supplierPkh, ADVERT_EXPECTED.supplier_pkh);
     assert.equal(r.endpointHost, 'mp-suppliers-chandra.hal8.ai');
-    assert.equal(r.capabilityId, ADVERT_EXPECTED.capability_id);
+    assert.equal(r.capabilityId, TEMPLATE_CAPABILITY);
     assert.deepEqual([r.priceLovelace, r.supplierBondLovelace, r.buyerBondLovelace], [200_000n, 1_000_000n, 1_000_000n]);
     assert.equal(r.deliverBy, NOW + ADVERT_EXPECTED.max_processing_ms + DELIVER_BY_BUFFER_MS);
     assert.equal(r.lockLovelace, ESCROW_LOCKED_LOVELACE);
@@ -328,7 +333,7 @@ describe('buildPostEscrow (offline)', () => {
     assert.equal(decodeEscrowDatum(outputs(r.txCbor)[0].datum!).deliver_by, deliverByMs);
   });
 
-  // The advert is checked in this order: Koios read (existence, address, datum) → spent → text → plan → author.
+  // The advert is checked in this order: Koios read (existence, address, datum) → spent → text → scope → plan → author.
   // Each refusal below also pins that nothing later was asked of Koios.
   test('refuses an advert Koios reports as spent (retired or replaced), without asking who made it', async () => {
     const k = koiosFake({ spent: true });
@@ -350,6 +355,19 @@ describe('buildPostEscrow (offline)', () => {
       const k = koiosFake({ advertDatum: advertWith((c) => { c.fields[index] = '6161ff'; }) });
       await assert.rejects(() => post(k), /UTF-8/, name);
       assert.equal(txInfoCalls(k), 0, name);
+    }
+  });
+  test('refuses a fleet advert, the live ChandraOCR one included, without asking who made it: send_job could never deliver its job', async () => {
+    const fleet = ['llm.text.generate.v1', 'llm.chat.v1', 'audio.synthesize.piper.v1'].map((cap) => [cap, advertWith((c) => { c.fields[1] = fromText(cap); })] as const);
+    for (const [cap, advertDatum] of [[ADVERT_EXPECTED.capability_id, ADVERT_DATUM_HEX] as const, ...fleet]) {
+      const k = koiosFake({ advertDatum });
+      await assert.rejects(() => post(k), (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.ok(err.message.startsWith(`Advert ${ADVERT_REF} serves ${cap}, a fleet capability `), err.message);
+        assert.match(err.message, /vector_marketplace_send_job serves template-contract suppliers only in this release/);
+        return true;
+      }, cap);
+      assert.equal(txInfoCalls(k), 0, cap);
     }
   });
   test('refuses what readAdvert refuses: a UTxO at the wrong address', async () => {
@@ -536,6 +554,9 @@ describe('planAccept / planReclaim', () => {
     assert.deepEqual([at(600_000n, 399_999n, 999_999n).supplierRaised, at(600_000n, 399_999n, 999_999n).buyerRaised], [true, true]);
     assert.deepEqual([at(5_000_000n, 1n, 999_999n).supplierRaised, at(5_000_000n, 1n, 999_999n).buyerRaised], [false, true]);
     assert.deepEqual([at(1n, 1n, 5_000_000n).supplierRaised, at(1n, 1n, 5_000_000n).buyerRaised], [true, false]);
+    // the rule is one exported predicate on price + supplier bond, which the Post text asks as well: the two cannot drift apart
+    assert.deepEqual([supplierPayoutRaised(600_000n, 400_000n), supplierPayoutRaised(600_000n, 399_999n), supplierPayoutRaised(0n, 0n)], [false, true, true]);
+    assert.equal(supplierPayoutRaised(1n, 999_999n), at(1n, 999_999n, 1_000_000n).supplierRaised);
   });
   test('accept refuses the wrong buyer, the wrong state and a closed window', () => {
     assert.throws(() => planAccept(base, 'cc'.repeat(28), 1_786_530_200_000), /not the buyer/);

@@ -1,11 +1,12 @@
 // packages/builder/src/vector/marketplace-read-tools.ts
 // The marketplace read tools: capabilities and suppliers from the public indexer, one advert from the ledger through Koios. They
-// need no wallet and no node, and they never call a supplier's URL.
+// need no wallet and no node. The one URL they call that a supplier chose is an advert's detail_uri, through safeFetch (fetchManifest).
 import { z } from "zod/v4";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
 import { fetchCapabilities, fetchSuppliers, fetchSupplier, readAdvert, withJson } from './marketplace-indexer.js';
 import { formatOutRef } from './marketplace-datum.js';
+import { fetchManifest } from './marketplace-transport.js';
 import { text, fail, cell, host, isoOrRaw } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
 
@@ -48,7 +49,7 @@ export function registerMarketplaceReadTools(server: McpServer, checkRateLimit: 
 
   server.tool(
     "vector_marketplace_get_supplier",
-    "Read one supplier advert from the Vector ledger by advert_ref (all 13 advert fields) plus the indexer's live status. Read-only.",
+    "Read one supplier advert from the Vector ledger by advert_ref (all 13 advert fields) plus the indexer's live status, and the manifest its detail_uri points to when it has one (fetched from the supplier's host; the supplier's own JSON, shown as such). Read-only.",
     { advert_ref: z.string().describe("Advert UTxO reference '<txid>#<index>' from vector_marketplace_list_suppliers") },
     async ({ advert_ref }) => {
       const limited = checkRateLimit(); if (limited) return limited;
@@ -61,14 +62,19 @@ export function registerMarketplaceReadTools(server: McpServer, checkRateLimit: 
         // a spent, replaced or copied advert carrying the same supplier_pkh must not inherit the genuine one's status.
         const row = await fetchSupplier(advert.supplier_pkh).catch(() => null);
         const live = row && String(row.utxo_ref).toLowerCase() === ref ? row : null;
+        // The manifest is the supplier's own file at a URL its author chose: fetched through safeFetch, and said to be just that.
+        const detail = advert.detail_uri ? await fetchManifest(advert.detail_uri) : null;
+        const manifestLine = detail === null ? 'none (the advert has no Detail URI)'
+          : 'manifest' in detail ? "fetched from the Detail URI: the supplier's own JSON, not checked against the detail hash (the full text is in the JSON block)"
+          : `could not be fetched (${detail.error})`;
         const md = `# Advert ${ref}\n\n` +
           `- **Capability:** \`${cell(advert.capability_id)}\`\n- **Model:** ${cell(advert.model)}\n- **Supplier key hash:** \`${advert.supplier_pkh}\`\n` +
           `- **Price:** ${lovelaceToAda(advert.price_lovelace)} · **Bonds:** supplier ${lovelaceToAda(advert.supplier_bond_lovelace)}, buyer ${lovelaceToAda(advert.buyer_bond_lovelace)}\n` +
           `- **Processing window:** ${advert.max_processing_ms} ms · **Max output tokens:** ${advert.max_output_tokens}\n` +
-          `- **Endpoint:** ${cell(advert.endpoint_url)}\n- **Detail URI:** ${cell(advert.detail_uri) || '(none)'} · **Detail hash:** \`${advert.detail_hash}\`\n` +
+          `- **Endpoint:** ${cell(advert.endpoint_url)}\n- **Detail URI:** ${cell(advert.detail_uri) || '(none)'} · **Detail hash:** \`${advert.detail_hash}\`\n- **Manifest:** ${manifestLine}\n` +
           `- **Advertised at:** ${isoOrRaw(advert.advertised_at)} · **Status on chain:** ${advert.status}${spent ? ' (UTxO spent: retired or updated)' : ''}\n` +
           `- **Indexer status:** ${live ? `${cell(live.status)}, last seen ${cell(live.last_seen_iso ?? '-')}` : 'not confirmed by the indexer for this advert'}`;
-        return text(withJson(md, { advert_ref: ref, ...advert, is_spent: utxo.is_spent ?? null, indexer_status: live?.status ?? null, last_seen_iso: live?.last_seen_iso ?? null }));
+        return text(withJson(md, { advert_ref: ref, ...advert, is_spent: utxo.is_spent ?? null, indexer_status: live?.status ?? null, last_seen_iso: live?.last_seen_iso ?? null, manifest: detail && 'manifest' in detail ? detail.manifest : null, manifest_error: detail && 'error' in detail ? detail.error : null }));
       } catch (err) { return fail('read advert', err, ['Koios may be unreachable; retry in a minute']); }
     },
   );
