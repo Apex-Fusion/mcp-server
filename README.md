@@ -156,7 +156,7 @@ limitations.
 | Tool | Description |
 |------|-------------|
 | `vector_marketplace_list_capabilities` | List the capability ids advertised on the agents marketplace, with supplier counts (read-only, no wallet needed) |
-| `vector_marketplace_list_suppliers` | List supplier adverts: advert ref, model, price, bonds, processing window, status. Filter by capability; free suppliers by default (read-only, no wallet needed) |
+| `vector_marketplace_list_suppliers` | List supplier adverts: advert ref, model, price, bonds, processing window, status. Filter by capability; free suppliers by default; fleet adverts are marked "not hireable through these tools (fleet route)", since `vector_build_marketplace_post_escrow` refuses them (read-only, no wallet needed) |
 | `vector_marketplace_get_supplier` | Read one advert from the ledger by advert ref (all 13 fields) plus the indexer's live status, and the manifest its Detail URI points to (fetched from the supplier's host and shown as the supplier's own JSON, with the sha256 of its bytes held against the advert's detail hash and reported as a match or a mismatch); refuses UTxOs that are not at the advert script address or hold no advert datum (read-only, no wallet needed) |
 | `vector_build_marketplace_post_escrow` | Build an unsigned escrow post that hires a supplier: locks price + supplier bond + buyer bond for an advert and commits a hash of your payload (its JSON block echoes the payload verbatim; the transaction is valid for 180 s only). Template-contract suppliers only: a fleet advert is refused, since `vector_marketplace_send_job` could not deliver its job (keyless - sign with the local signer) |
 | `vector_build_marketplace_accept` | Build an unsigned accept of a Submitted job, within 600 s of the supplier's Submit: pays the supplier price + supplier bond and returns your buyer bond (keyless) |
@@ -266,7 +266,7 @@ If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` firs
 | `VECTOR_KOIOS_URL` | Koios REST API endpoint | `https://v2.koios.vector.testnet.apexfusion.org/` |
 | `VECTOR_SUBMIT_URL` | Transaction submit API | `https://submit.vector.testnet.apexfusion.org/api/submit/tx` |
 | `VECTOR_EXPLORER_URL` | Block explorer base URL | `https://vector.testnet.apexscan.org` |
-| `VECTOR_MARKETPLACE_INDEXER_URL` | Marketplace indexer behind the `vector_marketplace_*` tools. Read at startup, before any `.env` file is loaded, so it must be set as a real environment variable. Trailing slashes are ignored | `https://mp-indexer.vector.apexfusion.org` |
+| `VECTOR_MARKETPLACE_INDEXER_URL` | Marketplace indexer behind the `vector_marketplace_*` tools. Read at startup, before any `.env` file is loaded, so it must be set as a real environment variable. Trailing slashes are ignored. A testnet-configured instance reads the mainnet indexer with testnet Koios, so either set this variable there or treat the marketplace tools as mainnet-only | `https://mp-indexer.vector.apexfusion.org` |
 | `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute, per identity (min `1`) | `60` |
 | `VECTOR_MCP_SESSION_IDLE_MS` | `/mcp` session idle timeout before the reaper closes it, in ms (min `100`) | `600000` (10 min) |
 | `VECTOR_MCP_SESSION_SWEEP_MS` | How often the `/mcp` idle reaper sweeps, in ms (min `100`) | `60000` (1 min) |

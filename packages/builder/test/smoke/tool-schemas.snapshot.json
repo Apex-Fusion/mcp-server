@@ -928,7 +928,7 @@
     }
   },
   "vector_marketplace_list_suppliers": {
-    "description": "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only. Pick an advert_ref here, then hire it with vector_build_marketplace_post_escrow.",
+    "description": "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only. Pick an advert_ref here, then hire it with vector_build_marketplace_post_escrow. Fleet adverts (llm.text.generate.*, llm.chat.*, ocr.page.extract.*, audio.synthesize.*) are marked 'not hireable through these tools (fleet route)': post_escrow refuses them.",
     "inputSchema": {
       "type": "object",
       "properties": {

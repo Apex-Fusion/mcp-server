@@ -131,8 +131,24 @@ describe('vector_marketplace_get_supplier', () => {
   test('refuses a forged advert before consulting the indexer', async () => {
     stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX, { address: 'addr1' + 'q'.repeat(54) })], supplier: { status: 200, body: supplierRow() } });
     const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
-    assert.equal(t, `UTxO ${ADVERT_REF} is not at the advert script address.`);
+    assert.equal(markdownOf(t), `UTxO ${ADVERT_REF} is not at the advert script address.`);
     assert.ok(!requested.some((u) => u.startsWith(`${INDEXER_URL}/suppliers`)), 'the genuine supplier\'s status must not be looked up for a forgery');
+  });
+  // Every output ends with a fenced JSON block (spec 5.1), a refusal included, so that the assistant reads a refusal the way it reads an answer.
+  test('every refusal of an advert ends with a JSON block holding the same words', async () => {
+    const cases: Array<[string, Net, string]> = [
+      ['a ref that is no ref', { utxos: [] }, 'Invalid out ref "nope#1": expected <64-hex txid>#<index>'],
+      ['an output that does not exist', { utxos: [] }, `No UTxO at ${ADVERT_REF}.`],
+      ['an output at another address', { utxos: [advertUtxo(ADVERT_DATUM_HEX, { address: 'addr1' + 'q'.repeat(54) })] }, `UTxO ${ADVERT_REF} is not at the advert script address.`],
+      ['an output with no advert datum', { utxos: [advertUtxo('')] }, `UTxO ${ADVERT_REF} does not hold an advert datum.`],
+    ];
+    for (const [name, net, refusal] of cases) {
+      stub(net);
+      const t = await call('vector_marketplace_get_supplier', { advert_ref: name === 'a ref that is no ref' ? 'nope#1' : ADVERT_REF });
+      assert.equal(markdownOf(t), refusal, name);
+      assert.deepEqual(jsonOf(t), { error: refusal }, name);
+      assert.ok(t.endsWith('\n```'), name);
+    }
   });
   test('says so when the advert UTxO has been spent', async () => {
     stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX, { is_spent: true })] });
@@ -296,12 +312,37 @@ describe('vector_marketplace_list_suppliers', () => {
     assert.deepEqual(jsonOf(await call('vector_marketplace_list_suppliers', {})).map((s: { status: string }) => s.status), ['free']);
     assert.equal(jsonOf(await call('vector_marketplace_list_suppliers', { only_free: false })).length, 3);
     stub({ suppliers: [row('busy', 2)] });
-    assert.equal(await call('vector_marketplace_list_suppliers', {}), 'No suppliers found with status free.', 'the empty answer says which default it applied');
+    const none = await call('vector_marketplace_list_suppliers', {});
+    assert.equal(markdownOf(none), 'No suppliers found with status free.', 'the empty answer says which default it applied');
+    assert.deepEqual(jsonOf(none), [], 'and ends with a JSON block like every other output: no rows');
   });
-  test('echoes a capability filter that matched nothing as one clean line', async () => {
+  test('echoes a capability filter that matched nothing as one clean line, with the empty JSON block', async () => {
     stub({ suppliers: [supplierRow()] });
     const t = await call('vector_marketplace_list_suppliers', { capability_id: 'zz`|\nq', only_free: true, limit: 20 });
-    assert.equal(t, "No suppliers found for zz'¦ q with status free.");
+    assert.equal(markdownOf(t), "No suppliers found for zz'¦ q with status free.");
+    assert.equal(markdownOf(t).split('\n').length, 1, 'one line');
+    assert.deepEqual(jsonOf(t), []);
+  });
+  // post_escrow refuses a fleet advert (send_job could not serve its job), so the list says so before the buyer picks one.
+  test('marks the adverts that post_escrow refuses, the fleet capabilities, and no others; the JSON says it too', async () => {
+    const fleet = ['llm.text.generate.v1', 'llm.chat.v1', 'ocr.page.extract.chandra-ocr-2.v1', 'audio.synthesize.kokoro.v1'];
+    const template = ['identity.history.report.v1', 'mcp.tool.execute.chandra-ocr-2.v1', 'document.pipeline.ocr-summary.v1'];
+    const all = [...fleet, ...template].map((capability_id, i) => supplierRow({ utxo_ref: `${(i + 1).toString(16)}`.repeat(64) + '#0', capability_id, price_lovelace: String(100_000 + i) }));
+    stub({ suppliers: all });
+    const t = await call('vector_marketplace_list_suppliers', { only_free: true, limit: 50 });
+    const rows = markdownOf(t).split('\n').filter((l) => l.startsWith('| `'));
+    assert.equal(rows.length, 7);
+    for (const r of rows) assert.equal(r.split(' | ').length, 9, r);
+    for (const id of fleet) assert.ok(rows.find((r) => r.includes(`| ${id} - not hireable through these tools (fleet route) |`)), `${id} is marked`);
+    for (const id of template) assert.ok(rows.find((r) => r.includes(`| ${id} |`)), `${id} is not`);
+    assert.equal(rows.filter((r) => r.includes('not hireable through these tools (fleet route)')).length, 4);
+    assert.deepEqual(jsonOf(t).map((s: { capability_id: string; fleet_route: boolean }) => [s.capability_id, s.fleet_route]), [...fleet.map((id) => [id, true]), ...template.map((id) => [id, false])]);
+  });
+  test('a capability id that only looks like a fleet one is not marked: the rule is the prefixes post_escrow refuses', async () => {
+    const odd = ['xocr.page.extract.v1', 'ocr.page.extractor.v1', 'llm.text.generated.v1', 'llm.chatter.v1', 'audio.synthesizer.v1'];
+    stub({ suppliers: odd.map((capability_id, i) => supplierRow({ utxo_ref: `${(i + 1).toString(16)}`.repeat(64) + '#0', capability_id })) });
+    const t = await call('vector_marketplace_list_suppliers', { only_free: true, limit: 50 });
+    assert.ok(!markdownOf(t).includes('fleet route'), markdownOf(t));
   });
   test('a non-list indexer answer becomes a text error', async () => {
     stub({ suppliers: { rows: [] } as unknown as unknown[] });

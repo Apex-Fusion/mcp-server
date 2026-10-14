@@ -6,9 +6,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
 import { fetchCapabilities, fetchSuppliers, fetchSupplier, readAdvert, withJson } from './marketplace-indexer.js';
 import { formatOutRef } from './marketplace-datum.js';
-import { fetchManifest } from './marketplace-transport.js';
+import { fetchManifest, isFleetCapability } from './marketplace-transport.js';
 import { text, fail, cell, host, isoOrRaw } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
+
+/** What the supplier table says of an advert that post_escrow refuses: a fleet supplier, which send_job could not serve (see buildPostEscrow). */
+const FLEET_MARK = 'not hireable through these tools (fleet route)';
 
 export function registerMarketplaceReadTools(server: McpServer, checkRateLimit: RateGate) {
   server.tool(
@@ -27,7 +30,7 @@ export function registerMarketplaceReadTools(server: McpServer, checkRateLimit: 
 
   server.tool(
     "vector_marketplace_list_suppliers",
-    "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only. Pick an advert_ref here, then hire it with vector_build_marketplace_post_escrow.",
+    "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only. Pick an advert_ref here, then hire it with vector_build_marketplace_post_escrow. Fleet adverts (llm.text.generate.*, llm.chat.*, ocr.page.extract.*, audio.synthesize.*) are marked 'not hireable through these tools (fleet route)': post_escrow refuses them.",
     {
       capability_id: z.string().optional().describe("Filter by capability id, e.g. 'identity.history.report.v1'"),
       only_free: z.boolean().optional().default(true).describe("Only suppliers currently reporting status 'free' (default true)"),
@@ -38,11 +41,11 @@ export function registerMarketplaceReadTools(server: McpServer, checkRateLimit: 
       try {
         const onlyFree = only_free ?? true; // the schema's defaults, for a caller that bypasses the schema
         const rows = (await fetchSuppliers({ capability_id, onlyFree })).slice(0, limit ?? 20);
-        if (rows.length === 0) return text(`No suppliers found${capability_id ? ` for ${cell(capability_id)}` : ''}${onlyFree ? ' with status free' : ''}.`);
+        if (rows.length === 0) return text(withJson(`No suppliers found${capability_id ? ` for ${cell(capability_id)}` : ''}${onlyFree ? ' with status free' : ''}.`, []));
         const table = rows.map((s) =>
-          `| \`${cell(s.utxo_ref)}\` | ${cell(s.capability_id)} | ${cell(s.model)} | ${lovelaceToAda(s.price_lovelace)} | ${lovelaceToAda(s.supplier_bond_lovelace)} / ${lovelaceToAda(s.buyer_bond_lovelace)} | ${Math.round(s.max_processing_ms / 1000)} s | ${cell(s.status)} | ${cell(s.last_seen_iso ?? '-')} | ${cell(host(s.endpoint_url))} |`).join('\n');
+          `| \`${cell(s.utxo_ref)}\` | ${cell(s.capability_id)}${isFleetCapability(s.capability_id) ? ` - ${FLEET_MARK}` : ''} | ${cell(s.model)} | ${lovelaceToAda(s.price_lovelace)} | ${lovelaceToAda(s.supplier_bond_lovelace)} / ${lovelaceToAda(s.buyer_bond_lovelace)} | ${Math.round(s.max_processing_ms / 1000)} s | ${cell(s.status)} | ${cell(s.last_seen_iso ?? '-')} | ${cell(host(s.endpoint_url))} |`).join('\n');
         const md = `# Marketplace suppliers\n\nThe buyer locks price + supplier bond + buyer bond; on Accept the supplier receives price + supplier bond and the buyer bond returns to the buyer.\n\n| advert_ref | capability | model | price | bonds (supplier / buyer) | window | status | last seen | endpoint |\n|---|---|---|---|---|---|---|---|---|\n${table}`;
-        return text(withJson(md, rows.map((s) => ({ advert_ref: s.utxo_ref, supplier_pkh: s.supplier_pkh, capability_id: s.capability_id, model: s.model, price_lovelace: s.price_lovelace, supplier_bond_lovelace: s.supplier_bond_lovelace, buyer_bond_lovelace: s.buyer_bond_lovelace, max_processing_ms: s.max_processing_ms, status: s.status, last_seen_iso: s.last_seen_iso, endpoint_url: s.endpoint_url, detail_uri: s.detail_uri }))));
+        return text(withJson(md, rows.map((s) => ({ advert_ref: s.utxo_ref, supplier_pkh: s.supplier_pkh, capability_id: s.capability_id, model: s.model, price_lovelace: s.price_lovelace, supplier_bond_lovelace: s.supplier_bond_lovelace, buyer_bond_lovelace: s.buyer_bond_lovelace, max_processing_ms: s.max_processing_ms, status: s.status, last_seen_iso: s.last_seen_iso, endpoint_url: s.endpoint_url, detail_uri: s.detail_uri, fleet_route: isFleetCapability(s.capability_id) }))));
       } catch (err) { return fail('list suppliers', err, ['The public indexer may be unreachable; retry in a minute', 'Try without capability_id to see everything']); }
     },
   );
@@ -55,7 +58,7 @@ export function registerMarketplaceReadTools(server: McpServer, checkRateLimit: 
       const limited = checkRateLimit(); if (limited) return limited;
       try {
         const read = await readAdvert(advert_ref);
-        if ('error' in read) return text(read.error);
+        if ('error' in read) return text(withJson(read.error, { error: read.error }));
         const { utxo, advert, spent } = read;
         const ref = formatOutRef(utxo.tx_hash.toLowerCase(), utxo.tx_index);
         // The indexer tracks one live advert per supplier key. Its status describes THIS advert only when the refs match:
