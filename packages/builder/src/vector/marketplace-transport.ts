@@ -35,6 +35,15 @@
 // who funded the escrow can produce offline, because that attacker holds the buyer_pkh the escrow names. The closure is client-side:
 // the local signer refuses to send for an escrow whose buyer_pkh is not its own key, or a send is mediated by the signer with a
 // nonce the server issues. Until it exists the tool text has to say what the tool cannot know.
+//
+// Residual, because the fields of an escrow are public: Accept and Reclaim follow an escrow along its spend chain (resolveEscrowLineage),
+// which asks Koios for the outputs at the escrow credential whose datum carries the escrow's prompt hash, and reads at most 5,000 of
+// them. Anyone can lock decoys there (each copies the public hash and costs the minimum value of an output), so a flood of 5,000 makes
+// that read refuse, and with it every Accept, and every Reclaim of a Claimed escrow, that goes through these tools. The refusal says so
+// and names the accept clock. It stops the tools and not the escrow: the Accept has to be built some other way within 600 s of the
+// supplier's Submit, or the supplier may Release and keep everything locked. A send of an Open escrow needs no search (its Post output
+// is unspent) and a poll reads only the Post output, so neither is stopped, and the check of a receipt falls back to the indexer to
+// find the Submitted output.
 import type { Provider } from '@lucid-evolution/lucid';
 import { safeFetch } from './safe-fetch.js';
 import { koiosTxInputCreds } from './marketplace-indexer.js';

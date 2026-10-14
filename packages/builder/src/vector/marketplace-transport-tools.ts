@@ -11,15 +11,13 @@ import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { withJson } from './marketplace-indexer.js';
 import { sendJob, getJob, verifyJob } from './marketplace-transport.js';
 import type { Check, ReceiptChecks, VerifiedJob } from './marketplace-transport.js';
-import { text, fail, cell, isoOrRaw, ACCEPT_WINDOW_S, RELEASE_TAKE } from './marketplace-shared.js';
+import { text, fail, cell, isoOrRaw, ACCEPT_WINDOW_S, RELEASE_TAKE, ACCEPT_CLOCK } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
 
 /** How much of a result the markdown shows. The fenced JSON block always carries all of it. */
 const RESULT_VIEW_CHARS = 4_000;
 /** What these tools cannot know, in the words every description uses (see the residual in marketplace-transport.ts). */
 const BUYER_NOTE = "This tool trusts the buyer address and escrow ref your assistant passes; keep its tool use scoped to escrows you posted. A client-side binding to your signer key is planned.";
-/** What a missed accept window costs, as the build tools say it. */
-const ACCEPT_CLOCK = `Accept must land within ${ACCEPT_WINDOW_S} s of the supplier's Submit; after that the supplier may Release and ${RELEASE_TAKE}.`;
 /**
  * How to see where an escrow stands. A poll asks the supplier and never the chain, so it cannot tell a Submitted escrow (the accept clock
  * is running) from an Open one. The Accept builder can: it builds only for a Submitted escrow, prints the seconds left, and refuses with

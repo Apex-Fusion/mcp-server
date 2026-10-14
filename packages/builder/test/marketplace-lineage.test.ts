@@ -9,7 +9,7 @@ import type { UTxO } from '@lucid-evolution/lucid';
 import { FixtureProvider, OWN_ADDRESS } from './fixtures/fixture-provider.ts';
 import { ADVERT_DATUM_HEX, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
 import {
-  escrowKoios, world, koiosFor, escrowAt, stakedEscrowAddress, txInfoRequests, credentialRequests, GENUINE_TXS, DECOY_TXS, DECOY_KINDS,
+  escrowKoios, world, koiosFor, escrowAt, stakedEscrowAddress, txInfoRequests, credentialRequests, floodRefusal, GENUINE_TXS, DECOY_TXS, DECOY_KINDS,
   ESCROW_TX, CLAIM_TX, SUBMIT_TX, DECOY_TX, SLY_DECOY_TX, OTHER_CLAIM_TX, SUPPLIER_ADDRESS,
 } from './fixtures/escrow-koios.fixture.ts';
 import type { KoiosOptions } from './fixtures/escrow-koios.fixture.ts';
@@ -463,7 +463,30 @@ describe('resolveEscrowLineage', () => {
   });
   test('a credential with more matching outputs than the read allows is refused, not truncated', async () => {
     const lots = Array.from({ length: 5_050 }, (_, i) => at(i.toString(16).padStart(64, '0'), claimedDatum));
-    await assert.rejects(() => lineage([...lots, claimed]), refusal(/: Koios credential_utxos: 5000 or more outputs matched; refusing to read them all$/));
+    await assert.rejects(() => lineage([...lots, claimed]), refusal(/: Koios credential_utxos: 5000 or more outputs matched; refusing to read them all\. /));
+  });
+  // The residual: a flood of decoys makes the read refuse, and the refusal says what that costs the buyer. The text is word for word what the
+  // buyer reads (floodRefusal), and it fits the 800 characters an error text is shown in, so the end of it (the accept clock) is never cut off.
+  test('the refusal says a flood of decoys can make Accept unbuildable through these tools, and names the accept clock', async () => {
+    const lots = Array.from({ length: 5_050 }, (_, i) => at(i.toString(16).padStart(64, '0'), claimedDatum));
+    await assert.rejects(() => lineage([...lots, claimed]), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal(err.message, floodRefusal(ESCROW_REF));
+      assert.ok(err.message.length <= 800, `${err.message.length} characters: fail() would cut it`);
+      for (const leak of ['http://', 'https://', 'koios.example']) assert.ok(!err.message.includes(leak), leak);
+      return true;
+    });
+  });
+  test('a Koios that is down is still only a Koios that is down: the flood text belongs to the cap alone', async () => {
+    await assert.rejects(() => lineage([claimed], { credentialStatus: 502 }), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal(err.message, `Could not read escrow ${ESCROW_REF}: Koios credential_utxos answered 502`);
+      return true;
+    });
+    const exactlyTheCap = Array.from({ length: 4_999 }, (_, i) => at(i.toString(16).padStart(64, '0'), claimedDatum)); // 5,000 with the genuine one: refused, as a full last page cannot say there is no more
+    await assert.rejects(() => lineage([...exactlyTheCap, claimed]), refusal(/5000 or more outputs matched; refusing to read them all\. Only a flood of decoys/));
+    const belowTheCap = Array.from({ length: 4_998 }, (_, i) => at(i.toString(16).padStart(64, '0'), claimedDatum)); // 4,999 in all with the genuine one: read in full
+    assert.equal((await lineage([...belowTheCap, claimed])).current?.utxo.txHash, CLAIM_TX);
   });
   // The prompt hash is what the candidate read searches for (1 to 128 bytes of hex). Anyone can lock an output at the escrow
   // credential with a prompt hash of another size, and a spent one of those is a permanent refusal: wording it as a failed Koios

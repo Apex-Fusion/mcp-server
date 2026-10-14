@@ -18,7 +18,7 @@ import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
 import { FixtureProvider, FIXTURE_UTXOS, FIXTURE_TXHASH, OWN_ADDRESS } from './fixtures/fixture-provider.ts';
 import { REF_SCRIPT_UTXO, evaluatingProvider } from './fixtures/escrow-node.fixture.ts';
-import { koiosFor, escrowAt, ESCROW_TX, SUBMIT_TX, SUPPLIER_ADDRESS } from './fixtures/escrow-koios.fixture.ts';
+import { koiosFor, escrowAt, floodRefusal, ESCROW_TX, SUBMIT_TX, SUPPLIER_ADDRESS } from './fixtures/escrow-koios.fixture.ts';
 import type { KoiosOptions } from './fixtures/escrow-koios.fixture.ts';
 
 type Handler = (args: Record<string, unknown>) => Promise<{ content: { type: string; text: string }[] }>;
@@ -578,6 +578,17 @@ describe('vector_build_marketplace_accept', () => {
     assert.equal(lineOf(t, '**Supplier receives:**'), `**Supplier receives:** 1.000000${RAISED} at supplier key \`${BASE.supplier_pkh}\``);
     assert.equal(lineOf(t, '**Your bond back:**'), `**Your bond back:** 1.000000${RAISED}`);
     assert.deepEqual([jsonOf(t).supplier_lovelace, jsonOf(t).buyer_lovelace], ['1000000', '1000000']);
+  });
+  // The residual of the candidate read: anyone can lock decoys at the escrow credential that copy the escrow's public prompt hash, and 5,000 of them make
+  // the read refuse. The buyer reads, whole, that this can make Accept unbuildable through these tools and that the accept clock is the cost.
+  test('a flood of decoys at the escrow credential is a text refusal that says Accept may be unbuildable through these tools, and names the accept clock', async () => {
+    const now = Date.now();
+    const posted = postedAround(now);
+    const decoys = Array.from({ length: 5_050 }, (_, i) => escrowAt(i.toString(16).padStart(64, '0'), { ...posted, state: 'Claimed' }));
+    escrowWorld([], posted, true, { indexed: decoys }); // the Post output is spent; Koios lists the decoys, which the node does not hold
+    const t = await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    assert.equal(t, `Failed to build accept: ${floodRefusal(ESCROW_REF)}${ACCEPT_TIPS}`);
+    assert.doesNotMatch(refusalOf(t), ENDED_WORDING);
   });
   test('an escrow with no live continuation is a text refusal that does not call the escrow over', async () => {
     escrowWorld([], postedAround(Date.now()), true); // Koios says the Post output is spent, and nothing carries the escrow on
