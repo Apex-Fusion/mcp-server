@@ -1526,12 +1526,41 @@ describe('fetchManifest', () => {
   };
   const plainly = (error: string) => { for (const secret of ['203.0.113.9', 'evil.example', 'hunter2', 'manifest.json', 'Bad gateway']) assert.ok(!error.includes(secret), `${secret} leaked into: ${error}`); };
 
-  test('GETs the URI once, asking for JSON, and returns whatever JSON it serves', async () => {
+  test('GETs the URI once, asking for JSON, and returns whatever JSON it serves with the sha256 of the bytes it was served as', async () => {
     const manifest = { name: 'Chandra OCR', capabilities: ['ocr.page.extract.chandra-ocr-2.v1'], nested: { a: [1, 2, { b: null }] } };
     const { f, calls } = fetching(() => reply(200, manifest));
-    assert.deepEqual(await fetchManifest(URI, f), { manifest });
+    assert.deepEqual(await fetchManifest(URI, f), { manifest, sha256: sha256(JSON.stringify(manifest)) });
     assert.deepEqual(calls, [{ url: URI, method: 'GET', headers: { accept: 'application/json' } }]);
-    for (const served of [null, [], 7, 'text', true]) assert.deepEqual(await fetchManifest(URI, fetching(() => reply(200, JSON.stringify(served))).f), { manifest: served }, JSON.stringify(served));
+    for (const served of [null, [], 7, 'text', true]) assert.deepEqual(await fetchManifest(URI, fetching(() => reply(200, JSON.stringify(served))).f), { manifest: served, sha256: sha256(JSON.stringify(served)) }, JSON.stringify(served));
+  });
+  // The advert commits to the file with detail_hash, the sha256 of its bytes. safeFetch hands back text, so the bytes are taken from the stream
+  // it reads: a hash of the decoded text would be another hash for any file that is not valid UTF-8.
+  test('the hash is that of the raw bytes, not of the text they decode to: a file with bytes that are not UTF-8 has the hash of its bytes', async () => {
+    const raw = Buffer.concat([Buffer.from('{"name":"caf'), Buffer.from([0xe9, 0xff, 0xfe]), Buffer.from('"}')]); // Latin-1 e-acute and two bytes that are never UTF-8
+    const r = await fetchManifest(URI, fetching(() => new Response(raw, { status: 200 })).f);
+    assert.ok('manifest' in r, JSON.stringify(r));
+    assert.equal(r.sha256, createHash('sha256').update(raw).digest('hex'));
+    assert.notEqual(r.sha256, sha256(raw.toString('utf8')), 'the decoded text has another hash: a hash of the text would not be the file\'s');
+    assert.equal((r.manifest as { name: string }).name, 'caf\ufffd\ufffd\ufffd', 'the JSON is read from the decoded text, as before');
+  });
+  test('the hash covers every byte however the body is cut into chunks, a multi-byte character split between two chunks included', async () => {
+    const raw = Buffer.from('{"name":"Zagreb \u0161\u0111\u010d\u0107\u017e \ud83d\ude00","n":[1,2,3]}', 'utf8');
+    const oneByteAtATime = new ReadableStream<Uint8Array>({ start(c) { for (const byte of raw) c.enqueue(Uint8Array.of(byte)); c.close(); } });
+    const r = await fetchManifest(URI, fetching(() => new Response(oneByteAtATime, { status: 200 })).f);
+    assert.ok('manifest' in r, JSON.stringify(r));
+    assert.equal(r.sha256, createHash('sha256').update(raw).digest('hex'));
+    assert.deepEqual(r.manifest, JSON.parse(raw.toString('utf8')));
+  });
+  test('an answer that is not 200, not JSON or not fetched at all carries no hash: there is nothing to compare', async () => {
+    for (const r of [
+      await fetchManifest(URI, fetching(() => reply(404, '{}')).f),
+      await fetchManifest(URI, fetching(() => reply(200, 'not json')).f),
+      await fetchManifest(URI, fetching(() => { throw new TypeError('fetch failed'); }).f),
+      await fetchManifest(URI, fetching(() => new Response('', { status: 302, headers: { location: 'https://evil.example/x' } })).f),
+    ]) {
+      assert.ok('error' in r, JSON.stringify(r));
+      assert.ok(!('sha256' in r) && !('manifest' in r));
+    }
   });
   test('an answer that is not 200, and one that is not JSON, are reported without what the host said', async () => {
     for (const status of [201, 206, 401, 404, 500, 503]) {
@@ -1571,6 +1600,17 @@ describe('fetchManifest', () => {
     const full = await fetchManifest(URI, fetching(() => sized(262_144)).f);
     assert.ok('manifest' in full, 'exactly 256 KiB is read');
     assert.deepEqual(await fetchManifest(URI, fetching(() => sized(262_145)).f), { error: "the supplier's answer is over the 262144 byte limit" });
+  });
+});
+
+describe('a manifest host that stops sending part-way', () => {
+  test('a body cut by the time budget after its first bytes is reported as a timeout, whatever tap the bytes pass through', async () => {
+    let sent = false;
+    const stalls = new ReadableStream<Uint8Array>({
+      pull(c) { if (!sent) { sent = true; c.enqueue(new TextEncoder().encode('{"name":')); } else c.error(new DOMException('The operation was aborted due to timeout', 'TimeoutError')); },
+    });
+    const f = (async () => new Response(stalls, { status: 200 })) as unknown as typeof fetch;
+    assert.deepEqual(await heldOpen(fetchManifest('https://203.0.113.9/manifest.json', f)), { error: 'the supplier did not answer within 15 s' });
   });
 });
 

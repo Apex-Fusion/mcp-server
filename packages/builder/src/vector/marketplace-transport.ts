@@ -48,7 +48,7 @@ import type { Provider } from '@lucid-evolution/lucid';
 import { safeFetch } from './safe-fetch.js';
 import { readAdvert, koiosTxInputCreds, fetchEscrows } from './marketplace-indexer.js';
 import type { AdvertRead } from './marketplace-indexer.js';
-import { canonicalize, formatOutRef, parseOutRef, promptHashForPayload, sha256Utf8Hex, wirePayloadFor } from './marketplace-datum.js';
+import { canonicalize, formatOutRef, parseOutRef, promptHashForPayload, sha256BytesHex, sha256Utf8Hex, wirePayloadFor } from './marketplace-datum.js';
 import type { AdvertDatum, EscrowDatum } from './marketplace-datum.js';
 import { paymentKeyHashOf } from './gov-build.js';
 import { resolveEscrowLineage, readEscrowOutput, readSubmittedOutput, submittedRefsOf, koiosFailure } from './marketplace-lineage.js';
@@ -669,17 +669,44 @@ export async function verifyJob(
 
 // ─── The manifest an advert points to ────────────────────────────────────────────────────────────────────────────────────────────
 // An advert's detail_uri is a URL its author chose: a description of what the supplier offers. It is fetched as every URL taken from
-// chain data is, through safeFetch, and is the supplier's own JSON: nothing here checks it against the advert's detail_hash.
+// chain data is, through safeFetch, and is the supplier's own JSON. The advert also commits to it: detail_hash is the sha256 of the
+// detail JSON (agents-marketplace docs/ARCHITECTURE.md), so fetchManifest returns the sha256 of the bytes it read and the caller holds
+// it against detail_hash. A file that does not hash to it is not the file the advert committed to.
 const MANIFEST_CALL = { maxResponseBytes: 256 * 1024, timeoutMs: 15_000 } as const;
 
-/** The JSON the detail_uri serves, or why it could not be fetched, in words that carry neither the URL nor anything the host said. */
-export async function fetchManifest(detailUri: string, fetchImpl: typeof fetch = fetch): Promise<{ manifest: unknown } | { error: string }> {
+/**
+ * `fetchImpl` with a tap on the body: the bytes that whoever reads the answer pulls from the stream are kept, so they can be hashed as
+ * they came. safeFetch returns the answer as text, and text is not the bytes: a file that is not valid UTF-8 decodes with replacement
+ * characters, and the hash of the decoded text is not the hash of the file. (safeFetch is vendored from the sister repo and is not
+ * changed here, so the bytes are taken from the stream it reads.) The tap reads nothing itself, so the cap safeFetch enforces on the
+ * body bounds what is kept, and a stream that safeFetch abandons is abandoned.
+ */
+function tapped(fetchImpl: typeof fetch): { fetchImpl: typeof fetch; bytes: () => Buffer } {
+  const chunks: Uint8Array[] = [];
+  const through = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const res = await fetchImpl(input, init);
+    if (res.body === null) return res;
+    const tap = new TransformStream<Uint8Array, Uint8Array>({ transform(chunk, controller) { chunks.push(chunk); controller.enqueue(chunk); } });
+    return new Response(res.body.pipeThrough(tap), { status: res.status, statusText: res.statusText, headers: res.headers });
+  }) as typeof fetch;
+  return { fetchImpl: through, bytes: () => Buffer.concat(chunks) };
+}
+
+/**
+ * The JSON the detail_uri serves and the sha256 (lower-case hex) of the bytes it was served as, or why it could not be fetched, in words
+ * that carry neither the URL nor anything the host said. A file that cannot be fetched or is not JSON has no hash here: nothing was
+ * checked.
+ */
+export async function fetchManifest(detailUri: string, fetchImpl: typeof fetch = fetch): Promise<{ manifest: unknown; sha256: string } | { error: string }> {
+  const tap = tapped(fetchImpl);
   let res: Awaited<ReturnType<typeof safeFetch>>;
   try {
-    res = await safeFetch(detailUri, { headers: { accept: 'application/json' } }, { ...MANIFEST_CALL, fetchImpl });
+    res = await safeFetch(detailUri, { headers: { accept: 'application/json' } }, { ...MANIFEST_CALL, fetchImpl: tap.fetchImpl });
   } catch (err) {
     return { error: callFailure(err, MANIFEST_CALL) };
   }
   if (res.status !== 200) return { error: `the supplier answered ${res.status}` };
-  try { return { manifest: JSON.parse(res.text) as unknown }; } catch { return { error: 'its answer is not JSON' }; }
+  let manifest: unknown;
+  try { manifest = JSON.parse(res.text) as unknown; } catch { return { error: 'its answer is not JSON' }; }
+  return { manifest, sha256: sha256BytesHex(tap.bytes()) };
 }

@@ -904,7 +904,7 @@
     }
   },
   "vector_marketplace_get_supplier": {
-    "description": "Read one supplier advert from the Vector ledger by advert_ref (all 13 advert fields) plus the indexer's live status, and the manifest its detail_uri points to when it has one (fetched from the supplier's host; the supplier's own JSON, shown as such). Read-only.",
+    "description": "Read one supplier advert from the Vector ledger by advert_ref (all 13 advert fields) plus the indexer's live status, and the manifest its detail_uri points to when it has one (fetched from the supplier's host; the supplier's own JSON, shown as such). The sha256 of the manifest's bytes is held against the advert's detail hash and reported as a match or a mismatch; a manifest that could not be fetched is reported as such and is never a match. Read-only.",
     "inputSchema": {
       "type": "object",
       "properties": {

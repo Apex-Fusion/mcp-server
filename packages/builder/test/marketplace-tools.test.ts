@@ -5,6 +5,7 @@
 // is touched. (Schemas are covered by the smoke suite.)
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { CML, Constr, Data, fromText, getAddressDetails } from '@lucid-evolution/lucid';
 import type { Provider, UTxO } from '@lucid-evolution/lucid';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -50,8 +51,8 @@ const advertUtxo = (datumHex: string, over: Record<string, unknown> = {}) => ({ 
 const MANIFEST_URI = 'https://203.0.113.9/agents/manifest.json';
 interface Net {
   utxos?: unknown[]; capabilities?: unknown[]; suppliers?: unknown[]; supplier?: { status: number; body?: unknown }; koiosStatus?: number;
-  /** What the supplier's host answers at MANIFEST_URI: a status and a body (JSON, or text when `raw`), or a failure to connect. */
-  manifest?: { status?: number; body?: unknown; raw?: string; fails?: Error };
+  /** What the supplier's host answers at MANIFEST_URI: a status and a body (JSON, or text when `raw`, or these exact bytes), or a failure to connect. */
+  manifest?: { status?: number; body?: unknown; raw?: string; bytes?: Uint8Array; fails?: Error };
   /** Payment credentials of the inputs of the transaction that created the advert (default: the supplier's own key). */
   authorCreds?: string[];
 }
@@ -71,6 +72,7 @@ const stub = (net: Net) => {
     if (url.startsWith(`${INDEXER_URL}/suppliers/`)) return net.supplier ? reply(net.supplier.body ?? {}, net.supplier.status) : reply({}, 404);
     if (url === MANIFEST_URI) {
       if (net.manifest?.fails) throw net.manifest.fails;
+      if (net.manifest?.bytes !== undefined) return new Response(new Uint8Array(net.manifest.bytes), { status: net.manifest.status ?? 200 });
       return net.manifest?.raw !== undefined ? new Response(net.manifest.raw, { status: net.manifest.status ?? 200 }) : reply(net.manifest?.body ?? {}, net.manifest?.status ?? 200);
     }
     return reply({ unexpected: url }, 500);
@@ -81,7 +83,7 @@ afterEach(() => { globalThis.fetch = realFetch; node = undefined; });
 
 // A real advert datum with chosen supplier-controlled fields (indexes follow AdvertDatum's on-chain field order).
 const advertDatumWith = (fields: {
-  capability_id?: string; model?: string; endpoint_url?: string; detail_uri?: string; advertised_at?: bigint;
+  capability_id?: string; model?: string; endpoint_url?: string; detail_uri?: string; detail_hash?: string; advertised_at?: bigint;
   price_lovelace?: bigint; supplier_bond_lovelace?: bigint; buyer_bond_lovelace?: bigint;
 }): string => {
   const c = Data.from(ADVERT_DATUM_HEX) as Constr<Data>;
@@ -92,6 +94,7 @@ const advertDatumWith = (fields: {
   if (fields.buyer_bond_lovelace !== undefined) c.fields[7] = fields.buyer_bond_lovelace;
   if (fields.endpoint_url !== undefined) c.fields[8] = fromText(fields.endpoint_url);
   if (fields.detail_uri !== undefined) c.fields[9] = fromText(fields.detail_uri);
+  if (fields.detail_hash !== undefined) c.fields[10] = fields.detail_hash;
   if (fields.advertised_at !== undefined) c.fields[11] = fields.advertised_at;
   return Data.to(c);
 };
@@ -166,7 +169,7 @@ describe('vector_marketplace_get_supplier', () => {
 
   // The advert's detail_uri is a URL its author chose. The tool fetches it through safeFetch and shows it as the supplier's own JSON.
   describe('the manifest at the Detail URI', () => {
-    const withUri = (net: Net = {}) => stub({ utxos: [advertUtxo(advertDatumWith({ detail_uri: MANIFEST_URI }))], ...net });
+    const withUri = (net: Net = {}, detail_hash?: string) => stub({ utxos: [advertUtxo(advertDatumWith({ detail_uri: MANIFEST_URI, detail_hash }))], ...net });
     test('an advert with no Detail URI has no manifest, and nothing is fetched from a supplier', async () => {
       stub({ utxos: [advertUtxo(ADVERT_DATUM_HEX)] });
       const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
@@ -175,15 +178,55 @@ describe('vector_marketplace_get_supplier', () => {
       assert.equal(jsonOf(t).manifest_error, null);
       assert.ok(requested.every((u) => u.includes('/api/v1/') || u.startsWith(INDEXER_URL)), `a supplier was called: ${requested.join(' ')}`);
     });
+    const sha256 = (data: string | Uint8Array) => createHash('sha256').update(data).digest('hex');
     test('fetches the manifest the URI points to, carries it verbatim in the JSON, and says it is the supplier\'s own', async () => {
       const manifest = { name: 'Chandra OCR', note: 'evil | `x`\n## injected', nested: { a: [1, null, { b: 'c' }] } };
-      withUri({ manifest: { body: manifest } });
+      const hash = sha256(JSON.stringify(manifest));
+      withUri({ manifest: { body: manifest } }, hash);
       const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
       assert.ok(requested.includes(MANIFEST_URI));
-      assert.equal(lineOf(markdownOf(t), '- **Manifest:**'), "- **Manifest:** fetched from the Detail URI: the supplier's own JSON, not checked against the detail hash (the full text is in the JSON block)");
+      assert.equal(lineOf(markdownOf(t), '- **Manifest:**'), "- **Manifest:** fetched from the Detail URI: the supplier's own JSON; the sha256 of its bytes matches the advert's detail hash (the full text is in the JSON block)");
       assert.deepEqual(jsonOf(t).manifest, manifest);
       assert.equal(jsonOf(t).manifest_error, null);
+      assert.deepEqual([jsonOf(t).manifest_sha256, jsonOf(t).manifest_hash_matches], [hash, true]);
       assert.ok(!markdownOf(t).includes('injected'), 'nothing of the manifest is in the markdown');
+    });
+    test('a manifest that does not hash to the advert\'s detail hash is reported as a mismatch, with both hashes, and is still carried in the JSON as the supplier\'s word', async () => {
+      const manifest = { name: 'Chandra OCR' };
+      const committed = sha256('{"name":"another file"}');
+      withUri({ manifest: { body: manifest } }, committed);
+      const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
+      assert.equal(lineOf(markdownOf(t), '- **Manifest:**'),
+        `- **Manifest:** fetched from the Detail URI: the supplier's own JSON, but it is NOT the file the advert committed to: the sha256 of its bytes is \`${sha256(JSON.stringify(manifest))}\` and the advert's detail hash is \`${committed}\` (the full text is in the JSON block)`);
+      assert.deepEqual([jsonOf(t).manifest_sha256, jsonOf(t).manifest_hash_matches], [sha256(JSON.stringify(manifest)), false]);
+      assert.deepEqual(jsonOf(t).manifest, manifest);
+      assert.match(markdownOf(t), /\*\*Detail hash:\*\* `[0-9a-f]{64}`/, 'the advert\'s own hash is still shown on its own line');
+    });
+    test('the live advert\'s detail hash (the hash of an empty file) does not match a manifest that has content', async () => {
+      withUri({ manifest: { body: { name: 'x' } } });
+      const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
+      assert.equal(jsonOf(t).manifest_hash_matches, false);
+      assert.match(lineOf(markdownOf(t), '- **Manifest:**'), /NOT the file the advert committed to/);
+    });
+    test('the hash is of the bytes served, not of the text they decode to: a manifest that is not valid UTF-8 matches the hash of its bytes', async () => {
+      const bytes = Buffer.concat([Buffer.from('{"name":"caf'), Buffer.from([0xe9, 0xff]), Buffer.from('"}')]);
+      withUri({ manifest: { bytes } }, sha256(bytes));
+      const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
+      assert.deepEqual([jsonOf(t).manifest_sha256, jsonOf(t).manifest_hash_matches], [sha256(bytes), true]);
+      assert.match(lineOf(markdownOf(t), '- **Manifest:**'), /matches the advert's detail hash/);
+      // the same file under the hash of its decoded text is the other file: a mismatch
+      withUri({ manifest: { bytes } }, sha256(bytes.toString('utf8')));
+      assert.equal(jsonOf(await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF })).manifest_hash_matches, false);
+    });
+    test('the hash is compared as hex whatever its case on the way in, and an advert hash of another size never matches', async () => {
+      const manifest = { name: 'Chandra OCR' };
+      const hash = sha256(JSON.stringify(manifest));
+      withUri({ manifest: { body: manifest } }, hash.toUpperCase());
+      assert.equal(jsonOf(await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF })).manifest_hash_matches, true);
+      for (const odd of ['', hash.slice(0, 62), `${hash}00`]) {
+        withUri({ manifest: { body: manifest } }, odd);
+        assert.equal(jsonOf(await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF })).manifest_hash_matches, false, odd);
+      }
     });
     test('a manifest that cannot be fetched is said so in a fixed phrase, without the URL or what the host said', async () => {
       const failures: Array<[Net['manifest'], string]> = [
@@ -196,9 +239,11 @@ describe('vector_marketplace_get_supplier', () => {
         withUri({ manifest });
         const t = await call('vector_marketplace_get_supplier', { advert_ref: ADVERT_REF });
         assert.ok(t.startsWith('# Advert '), t.slice(0, 200));
-        assert.equal(lineOf(markdownOf(t), '- **Manifest:**'), `- **Manifest:** could not be fetched (${why})`);
+        // reported, and never a pass: nothing was fetched, so nothing was compared with the detail hash
+        assert.equal(lineOf(markdownOf(t), '- **Manifest:**'), `- **Manifest:** could not be fetched (${why}); the detail hash could not be checked`);
         assert.equal(jsonOf(t).manifest, null);
         assert.equal(jsonOf(t).manifest_error, why);
+        assert.deepEqual([jsonOf(t).manifest_sha256, jsonOf(t).manifest_hash_matches], [null, null]);
         for (const secret of ['hunter2', 'evil.example', 'Bad gateway', '203.0.113.9:443']) assert.ok(!t.includes(secret), `${secret} leaked into: ${t}`);
       }
     });
