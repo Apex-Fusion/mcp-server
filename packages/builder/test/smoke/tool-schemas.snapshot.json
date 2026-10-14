@@ -802,6 +802,55 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
+  "vector_marketplace_get_supplier": {
+    "description": "Read one supplier advert from the Vector ledger by advert_ref (all 13 advert fields) plus the indexer's live status. Read-only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "advert_ref": {
+          "description": "Advert UTxO reference '<txid>#<index>' from vector_marketplace_list_suppliers",
+          "type": "string"
+        }
+      },
+      "required": [
+        "advert_ref"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_marketplace_list_capabilities": {
+    "description": "List the capability ids currently advertised on the Vector agents marketplace, with supplier counts. Read-only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_marketplace_list_suppliers": {
+    "description": "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "capability_id": {
+          "description": "Filter by capability id, e.g. 'identity.history.report.v1'",
+          "type": "string"
+        },
+        "only_free": {
+          "description": "Only suppliers currently reporting status 'free' (default true)",
+          "default": true,
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "Maximum rows (default 20, max 50)",
+          "default": 20,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
   "vector_self_improvement_analyze_metrics": {
     "description": "Analyze proposal metrics: proposal activity, adoption rate, treasury health, and engagement statistics. Read-only, takes no key material.",
     "inputSchema": {

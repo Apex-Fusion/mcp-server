@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { startServer, stopServer, ServerContext } from '../setup.ts';
 
 /**
- * Snapshot of the current tool surface (24 tools) for the non-custodial split
+ * Snapshot of the current tool surface (EXPECTED_TOOLS below) for the non-custodial split
  * series (see docs/architecture/non-custodial-split.md). PR 6 (Task 5) is the
  * PR that took this list from 25 to 23: it deleted `vector_get_address`
  * outright, along with the tool that reported per-transaction/daily
@@ -47,6 +47,9 @@ const EXPECTED_TOOLS = [
   'vector_get_balance',
   'vector_get_transaction_history',
   'vector_get_utxos',
+  'vector_marketplace_get_supplier',
+  'vector_marketplace_list_capabilities',
+  'vector_marketplace_list_suppliers',
   'vector_self_improvement_analyze_metrics',
   'vector_self_improvement_browse',
   'vector_submit_transaction',
@@ -100,11 +103,11 @@ after(async () => {
 });
 
 describe('tool inventory smoke test', () => {
-  test('exposes exactly 24 tools', () => {
+  test(`exposes exactly ${EXPECTED_TOOLS.length} tools`, () => {
     assert.equal(
       actualNames.length,
-      24,
-      `expected 24 tools, got ${actualNames.length}: ${JSON.stringify(actualNames)}`
+      EXPECTED_TOOLS.length,
+      `expected ${EXPECTED_TOOLS.length} tools, got ${actualNames.length}: ${JSON.stringify(actualNames)}`
     );
   });
 
@@ -140,7 +143,7 @@ describe('tool schema snapshot', () => {
   });
 
   // One assertion per tool (rather than a single deepStrictEqual over the whole
-  // 24-tool map) so a failure names the specific tool and shows a readable
+  // tool map) so a failure names the specific tool and shows a readable
   // diff of just that tool's schema, instead of "objects differ" over an
   // unreadable combined structure.
   for (const toolName of Object.keys(schemaSnapshot).sort()) {

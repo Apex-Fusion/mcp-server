@@ -61,7 +61,7 @@ const streamableIdentities = new Map<string, string>();
 // session (initialize, and every subsequent handleRequest). /mcp has no
 // disconnect signal: a caller can POST initialize, take the session id, and
 // drop the connection without ever sending DELETE. Nothing in the SDK
-// notices - the transport, its McpServer, and its 24 registered tools sit in
+// notices - the transport, its McpServer, and its registered tools sit in
 // memory until process exit. This map plus the reaper below is what bounds
 // that.
 const streamableLastSeen = new Map<string, number>();

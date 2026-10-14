@@ -1,5 +1,5 @@
 // packages/builder/scripts/regen-tool-schemas.mjs
-// Boots the BUILT server, lists tools over SSE, rewrites the smoke snapshot
+// Boots the BUILT server, lists tools over Streamable HTTP (/mcp), rewrites the smoke snapshot
 // sorted by name. Run: npm run build && node packages/builder/scripts/regen-tool-schemas.mjs
 // (npm run build must still run from the repo root - or via `npm run build
 // --workspace=...` - since it's an npm script; but this script itself now
@@ -23,7 +23,7 @@ import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 // Resolved from this file's own location, not from process.cwd(), so the
 // script behaves identically regardless of where it's invoked from (repo
@@ -56,7 +56,7 @@ try {
   });
 
   const client = new Client({ name: 'regen', version: '0.0.0' });
-  await client.connect(new SSEClientTransport(new URL(`http://localhost:${PORT}/sse`)));
+  await client.connect(new StreamableHTTPClientTransport(new URL(`http://localhost:${PORT}/mcp`)));
   const { tools } = await client.listTools();
   const snapshot = Object.fromEntries(
     tools
