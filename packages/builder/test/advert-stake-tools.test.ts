@@ -3,7 +3,7 @@
 // reputation stake steps. A minimal fake server captures the handlers, Koios is a stubbed global fetch, and the node is a fixture handed
 // in as the provider argument, as in marketplace-tools.test.ts; the stake and Retire nodes evaluate the deployed validators
 // (uplc-node.fixture.ts). No network is touched. (Schemas and descriptions are covered by the smoke suite.)
-import { describe, test, afterEach } from 'node:test';
+import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Provider, UTxO } from '@lucid-evolution/lucid';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -52,6 +52,12 @@ const stubKoios = (rows: unknown[]) => {
     return new Response(JSON.stringify({ unexpected: url }), { status: 500 });
   }) as typeof fetch;
 };
+// Every test starts with a fetch that reaches nothing and records what was asked, so a change that makes a tool fetch fails here
+// instead of calling the live network; a test that needs Koios replaces it with stubKoios.
+beforeEach(() => {
+  requested = [];
+  globalThis.fetch = (async (input: unknown) => { requested.push(String(input)); throw new Error('the network was touched'); }) as typeof fetch;
+});
 afterEach(() => { globalThis.fetch = realFetch; node = undefined; });
 
 const ADVOCATE = decodeAdvertDatum(ADVERT_POSTS[4].datumHex);
@@ -78,26 +84,39 @@ describe('vector_build_marketplace_post_advert', () => {
     assert.match(t, /\*\*Per job:\*\* a buyer locks price 3\.000000 \+ supplier bond 1\.000000 \+ buyer bond 1\.000000; on Accept the supplier receives price \+ supplier bond and the buyer bond returns to the buyer/);
     assert.match(t, /\*\*Deposit locked:\*\* 2\.000000 \(returns to you when you retire the advert with vector_build_marketplace_retire_advert\)/);
     assert.match(t, /\(as given\)/);
+    assert.match(t, /\*\*Supplier runtime:\*\* once this confirms, set your supplier runtime's ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names \(after a Retire and a new Post, ADVERT_REF must change to the new ref\)\./);
     assert.ok(t.includes(SIGN_COPY));
     assert.equal(j.advert_ref, `${j.tx_hash}#0`);
     assert.equal(j.supplier_pkh, ADVOCATE.supplier_pkh);
     assert.equal(j.deposit_lovelace, '2000000');
     assert.equal(j.detail_hash_source, 'given');
     assert.equal(j.collateral_kept, true);
-    assert.deepEqual(requested, [], 'a given detail_hash fetches nothing');
+    assert.deepEqual(requested, [], 'nothing is fetched');
   });
   test('text that comes back from the caller is escaped in the markdown and verbatim in the JSON', async () => {
     node = new FixtureProvider(supplierWallet);
     const t = await call('vector_build_marketplace_post_advert', postArgs({ capability_id: 'research.a|b.v1', model: 'm`x' }));
     assert.match(t, /\*\*Capability:\*\* `research\.a¦b\.v1`, model `m'x`/);
     assert.equal(jsonOf(t).capability_id, 'research.a|b.v1');
+    assert.deepEqual(requested, []);
   });
   test('a refusal says what to fix and builds nothing', async () => {
     node = new FixtureProvider(supplierWallet);
     const t = await call('vector_build_marketplace_post_advert', postArgs({ capability_id: 'llm.chat.v1' }));
     assert.match(t, /^Failed to build advert post: capability_id llm\.chat\.v1 is in a fleet namespace/);
-    assert.match(t, /\*\*Troubleshooting Tips:\*\*\n1\. capability_id, model, endpoint_url and detail_uri each hold at most 64 bytes of UTF-8; endpoint_url and detail_uri must be https URLs\n2\. The wallet needs the deposit/);
+    assert.match(t, /\*\*Troubleshooting Tips:\*\*\n1\. capability_id, model, endpoint_url and detail_uri each hold at most 64 bytes of UTF-8; endpoint_url and detail_uri must be https URLs, and endpoint_url has no whitespace, query or fragment\n2\. The wallet needs the deposit/);
     assert.ok(!t.includes('Unsigned TX CBOR'));
+    assert.deepEqual(requested, []);
+  });
+  test('a detail_uri without its hash is refused, "" included, and nothing is fetched', async () => {
+    node = new FixtureProvider(supplierWallet);
+    for (const detail_hash of [undefined, '']) {
+      const t = await call('vector_build_marketplace_post_advert', postArgs({ detail_hash }));
+      assert.match(t, /^Failed to build advert post: detail_hash is required with a detail_uri/);
+    }
+    const none = jsonOf(await call('vector_build_marketplace_post_advert', postArgs({ detail_uri: '', detail_hash: '' })));
+    assert.equal(none.detail_hash_source, 'empty');
+    assert.deepEqual(requested, []);
   });
 });
 
@@ -116,6 +135,7 @@ describe('vector_build_marketplace_retire_advert', () => {
     assert.ok(t.startsWith('# Unsigned Advert Retire Built (Not Submitted)\n'), t.slice(0, 300));
     assert.match(t, new RegExp(`\\*\\*Advert:\\*\\* \`${RETIRE_REF}\` \\(\`audio\\.transcript\\.snippets\\.v1\`\\)`));
     assert.match(t, /\*\*Deposit returned to you:\*\* 2\.017080/);
+    assert.match(t, /\*\*Supplier runtime:\*\* after this confirms, its ADVERT_REF names a consumed advert; to list the supplier again, post a new advert with vector_build_marketplace_post_advert and set ADVERT_REF to the new advert_ref\./);
     const j = jsonOf(t);
     assert.equal(j.advert_ref, RETIRE_REF);
     assert.equal(j.return_lovelace, '2017080');

@@ -181,7 +181,7 @@
     }
   },
   "vector_build_marketplace_post_advert": {
-    "description": "Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace: posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert. Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key. The transaction is valid for 5 minutes. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace: posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert. Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key; once the Post confirms, set your supplier runtime's ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names (after a Retire and a new Post, ADVERT_REF must change to the new ref). The transaction is valid for 5 minutes. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -206,9 +206,9 @@
           "maximum": 9007199254740991
         },
         "max_processing_ms": {
-          "description": "Processing window in milliseconds, at most 86400000 (24 h): how long the supplier has to submit a job",
+          "description": "Processing window in milliseconds, from 1 to 86400000 (24 h): how long the supplier has to submit a job",
           "type": "integer",
-          "minimum": 0,
+          "minimum": 1,
           "maximum": 86400000
         },
         "price_lovelace": {
@@ -232,17 +232,17 @@
           "maximum": 9007199254740991
         },
         "endpoint_url": {
-          "description": "https URL of your supplier runtime, at most 64 bytes (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
+          "description": "https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
           "type": "string",
           "minLength": 1
         },
         "detail_uri": {
-          "description": "Optional https URL of your manifest (agent.json), at most 64 bytes",
+          "description": "Optional https URL of your manifest (agent.json), at most 64 bytes; requires detail_hash",
           "default": "",
           "type": "string"
         },
         "detail_hash": {
-          "description": "Optional sha256 (64 hex) of the bytes detail_uri serves. Omitted with a detail_uri: the tool fetches detail_uri once and uses the sha256 of the bytes served. Omitted without one: the sha256 of no bytes",
+          "description": "sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used",
           "type": "string"
         }
       },
@@ -313,7 +313,7 @@
     }
   },
   "vector_build_marketplace_retire_advert": {
-    "description": "Build an UNSIGNED transaction that retires your supplier advert on the Vector agents marketplace: consumes the advert and returns its deposit to changeAddress. Only the advert's supplier key can retire it. Once it confirms, buyers can no longer hire the advert, and a buyer whose escrow against it is posted but whose job is not yet sent can no longer send it (that buyer reclaims everything after deliver_by): retire when no job is in flight. Takes no key material. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "Build an UNSIGNED transaction that retires your supplier advert on the Vector agents marketplace: consumes the advert and returns its deposit to changeAddress. Only the advert's supplier key can retire it. Once it confirms, buyers can no longer hire the advert, and a buyer whose escrow against it is posted but whose job is not yet sent can no longer send it (that buyer reclaims everything after deliver_by): retire when no job is in flight. After it confirms, the supplier runtime's ADVERT_REF names a consumed advert: to list the supplier again, post a new advert and set ADVERT_REF to its ref. Takes no key material. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
     "inputSchema": {
       "type": "object",
       "properties": {

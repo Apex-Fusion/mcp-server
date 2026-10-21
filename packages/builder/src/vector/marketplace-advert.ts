@@ -25,7 +25,7 @@ import type { AdvertDatum } from './marketplace-datum.js';
 import { readAdvert } from './marketplace-indexer.js';
 import { nodeFailure } from './marketplace-lineage.js';
 import { reserveCollateralInputs, assertCollateral, assertWalletIs } from './marketplace-build.js';
-import { isFleetCapability, fetchManifest } from './marketplace-transport.js';
+import { isFleetCapability } from './marketplace-transport.js';
 import { isPrivateAddress } from './safe-fetch.js';
 import { cell } from './marketplace-shared.js';
 
@@ -77,7 +77,7 @@ function textField(name: string, value: unknown, required: boolean): string {
 }
 
 /**
- * A URL the marketplace tools will call (safeFetch's rules, checked without a network): https, no credentials, a host, and not an IP
+ * A URL the marketplace tools will call (safeFetch's rules, checked without a network): https (whose URLs always have a host), no credentials, and not an IP
  * literal in a private or reserved range. A name that resolves to such a range is refused when a buyer's call is made; it cannot be
  * known here without a lookup.
  */
@@ -86,14 +86,13 @@ function callableUrl(name: string, value: string): string {
   try { u = new URL(value); } catch { throw new Error(`${name} is not a URL.`); }
   if (u.protocol !== 'https:') throw new Error(`${name} must be an https URL: the marketplace tools call https only.`);
   if (u.username || u.password) throw new Error(`${name} must not carry credentials.`);
-  if (!u.host) throw new Error(`${name} has no host.`);
   const literal = u.hostname.startsWith('[') && u.hostname.endsWith(']') ? u.hostname.slice(1, -1) : u.hostname;
   if (isIP(literal) && isPrivateAddress(literal)) throw new Error(`${name} points at a private or reserved address; buyers' calls to it would be refused.`);
   return u.host;
 }
 
-function wholeNumber(name: string, value: unknown, max: number, why = ''): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be a whole number from 0.`);
+function wholeNumber(name: string, value: unknown, max: number, why = '', min = 0, whyMin = ''): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) throw new Error(`${name} must be a whole number from ${min}${whyMin}.`);
   if (value > max) throw new Error(`${name} is ${value}, more than ${max}${why}.`);
   return value;
 }
@@ -119,13 +118,20 @@ export function planPostAdvert(terms: AdvertTerms, supplierPkh: string, nowMs: n
   if (isFleetCapability(capabilityId)) throw new Error(`capability_id ${cell(capabilityId)} is in a fleet namespace (llm.text.generate.*, llm.chat.*, ocr.page.extract.* or audio.synthesize.*), which these tools do not hire; name the capability outside those namespaces (for example research.summary.v1).`);
   const model = textField('model', terms.model, true);
   const endpointUrl = textField('endpoint_url', terms.endpointUrl, true);
+  // A job goes to `<endpoint_url>/v1/job` (the template route appends the path to the text, trimming only trailing slashes), so anything
+  // that keeps the result from being that path is refused: whitespace (the URL parser drops a trailing space, the route does not), a query
+  // or a fragment (the path would land inside it).
+  if (/\s/.test(endpointUrl)) throw new Error('endpoint_url must not contain whitespace: jobs are sent to <endpoint_url>/v1/job, and whitespace breaks that URL.');
+  if (endpointUrl.includes('?')) throw new Error('endpoint_url must not contain a query (?): jobs are sent to <endpoint_url>/v1/job, and the path would land inside the query.');
+  if (endpointUrl.includes('#')) throw new Error('endpoint_url must not contain a fragment (#): jobs are sent to <endpoint_url>/v1/job, and the path would land inside the fragment.');
   const endpointHost = callableUrl('endpoint_url', endpointUrl);
   const detailUri = textField('detail_uri', terms.detailUri, false);
   if (detailUri !== '') callableUrl('detail_uri', detailUri);
   if (typeof terms.detailHash !== 'string' || !HASH_HEX.test(terms.detailHash)) throw new Error('detail_hash must be 64 hex characters (the sha256 of the bytes detail_uri serves).');
   const maxOutputTokens = wholeNumber('max_output_tokens', terms.maxOutputTokens, Number.MAX_SAFE_INTEGER);
   // The buyer's Post caps the window at 24 h (a buyer cannot reclaim before deliver_by), so a longer one could not be hired.
-  const maxProcessingMs = wholeNumber('max_processing_ms', terms.maxProcessingMs, MAX_PROCESSING_MS_CEILING, ' (24 h), the longest window vector_build_marketplace_post_escrow will hold a buyer\'s escrow for; it is milliseconds, check the unit');
+  // The supplier template needs a positive window (ADVERT_MAX_PROCESSING_MS) and refuses jobs for an advert whose window is smaller than its own.
+  const maxProcessingMs = wholeNumber('max_processing_ms', terms.maxProcessingMs, MAX_PROCESSING_MS_CEILING, ' (24 h), the longest window vector_build_marketplace_post_escrow will hold a buyer\'s escrow for; it is milliseconds, check the unit', 1, ': the supplier template needs a positive processing window');
   const datum: AdvertDatum = {
     supplier_pkh: supplierPkh, capability_id: capabilityId, model,
     max_output_tokens: maxOutputTokens, max_processing_ms: maxProcessingMs,
@@ -158,8 +164,8 @@ export function advertOutputZero(txCbor: string, expected: { datumHex: string; d
   return coin;
 }
 
-/** Where the advert's detail_hash came from: given by the caller, the hash of what detail_uri served at build time, or the hash of no bytes. */
-export type DetailHashSource = 'given' | 'served' | 'empty';
+/** Where the advert's detail_hash came from: given by the caller, or the hash of no bytes when there is no detail URI. */
+export type DetailHashSource = 'given' | 'empty';
 
 export type PostAdvertBuild = VectorUnsignedBuildResult & {
   advertRef: string; datum: AdvertDatum; endpointHost: string;
@@ -173,31 +179,26 @@ export type PostAdvertBuild = VectorUnsignedBuildResult & {
 
 /**
  * Builds the unsigned Post of an advert at output 0 of a new transaction, naming the key of `changeAddress` as its supplier. Nothing is
- * signed or submitted. When `detailHash` is not given and `detailUri` is, the manifest is fetched once (through safeFetch, as
- * vector_marketplace_get_supplier fetches it) and the sha256 of the bytes it served becomes the detail_hash; when neither is given, the
- * hash of no bytes (the supplier template's default). The Post leaves the wallet's smallest pure 5-unit output alone when it can.
+ * signed or submitted, and nothing is fetched: a detail URI needs the caller's detail_hash (the server never fetches a URL a caller
+ * gives), and without a detail URI the hash is that of no bytes (the supplier template's default). A detail_hash of '' counts as not
+ * given, as in the template. The wallet must be the one bound to changeAddress. The Post leaves the wallet's smallest pure 5-unit output
+ * alone when it can.
  */
 export async function buildPostAdvert(
   lucid: LucidEvolution, provider: Provider,
   p: { changeAddress: string; terms: Omit<AdvertTerms, 'detailHash'> & { detailHash?: string }; nowMs?: number },
-  fetchImpl: typeof fetch = fetch,
 ): Promise<PostAdvertBuild> {
   const supplierPkh = paymentKeyHashOf(p.changeAddress);
   const nowMs = p.nowMs ?? Date.now();
-  // Everything that needs no network is checked first, so a request that is wrong anyway never makes the manifest call.
-  planPostAdvert({ ...p.terms, detailHash: p.terms.detailHash ?? EMPTY_DETAIL_HASH }, supplierPkh, nowMs);
-  let detailHash = p.terms.detailHash;
-  let detailHashSource: DetailHashSource = 'given';
-  if (detailHash === undefined && p.terms.detailUri === '') { detailHash = EMPTY_DETAIL_HASH; detailHashSource = 'empty'; }
-  if (detailHash === undefined) {
-    const got = await fetchManifest(p.terms.detailUri, fetchImpl);
-    if ('error' in got) throw new Error(`Could not read the manifest at detail_uri to hash it (${got.error}); serve it first, or pass detail_hash.`);
-    detailHash = got.sha256;
-    detailHashSource = 'served';
+  const given = p.terms.detailHash === '' ? undefined : p.terms.detailHash;
+  if (given === undefined && p.terms.detailUri !== '') {
+    throw new Error('detail_hash is required with a detail_uri: pass the sha256 (64 hex) of the exact bytes detail_uri serves. This server does not fetch it; vector_marketplace_get_supplier checks the hash against the served bytes once the advert is posted.');
   }
-  const plan = planPostAdvert({ ...p.terms, detailHash }, supplierPkh, nowMs);
+  const detailHashSource: DetailHashSource = given === undefined ? 'empty' : 'given';
+  const plan = planPostAdvert({ ...p.terms, detailHash: given ?? EMPTY_DETAIL_HASH }, supplierPkh, nowMs);
 
   await ensureSlotConfig(provider as unknown as SlotClockProvider);
+  await assertWalletIs(lucid, p.changeAddress);
   // A fresh builder per attempt: one that failed in complete() is not reused.
   const assemble = () => lucid.newTx()
     .pay.ToAddressWithData(ADVERT_ADDRESS, { kind: 'inline', value: plan.datumHex }, { lovelace: plan.depositLovelace })

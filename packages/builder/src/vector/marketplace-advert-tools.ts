@@ -16,27 +16,28 @@ import type { RateGate } from './marketplace-shared.js';
 
 const HASH_SOURCE: Record<DetailHashSource, string> = {
   given: 'as given',
-  served: 'the sha256 of the bytes detail_uri served when this was built',
   empty: 'the sha256 of no bytes (no detail URI)',
 };
-const TEXT_LIMITS = 'capability_id, model, endpoint_url and detail_uri each hold at most 64 bytes of UTF-8; endpoint_url and detail_uri must be https URLs';
+const TEXT_LIMITS = 'capability_id, model, endpoint_url and detail_uri each hold at most 64 bytes of UTF-8; endpoint_url and detail_uri must be https URLs, and endpoint_url has no whitespace, query or fragment';
+/** The supplier template serves only the advert its ADVERT_REF names (agent/src/routes/custom.ts), so every new advert needs it set. */
+const ADVERT_REF_COPY = 'set your supplier runtime\'s ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names (after a Retire and a new Post, ADVERT_REF must change to the new ref).';
 
 export function registerMarketplaceAdvertTools(server: McpServer, checkRateLimit: RateGate, providerFor: () => Provider) {
   server.tool(
     "vector_build_marketplace_post_advert",
-    "Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace: posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert. Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key. The transaction is valid for 5 minutes. " + SIGN_COPY,
+    "Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace: posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert. Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key; once the Post confirms, " + ADVERT_REF_COPY + " The transaction is valid for 5 minutes. " + SIGN_COPY,
     {
       changeAddress: z.string().describe("Your supplier wallet address: its key becomes the advert's supplier key, the only key that can retire the advert. Get it from vector_signer_get_address."),
       capability_id: z.string().min(1).describe("Capability id, at most 64 bytes, outside the fleet namespaces llm.text.generate.*, llm.chat.*, ocr.page.extract.* and audio.synthesize.* (for example research.summary.v1). A reputation stake names the same id."),
       model: z.string().min(1).describe("Model or service version the supplier runs, at most 64 bytes"),
       max_output_tokens: z.number().int().min(0).describe("Largest output the supplier commits to, in tokens (0 if not token-based)"),
-      max_processing_ms: z.number().int().min(0).max(MAX_PROCESSING_MS_CEILING).describe("Processing window in milliseconds, at most 86400000 (24 h): how long the supplier has to submit a job"),
+      max_processing_ms: z.number().int().min(1).max(MAX_PROCESSING_MS_CEILING).describe("Processing window in milliseconds, from 1 to 86400000 (24 h): how long the supplier has to submit a job"),
       price_lovelace: z.number().int().min(0).describe("Price per job in lovelace (1 AP3X = 1000000)"),
       supplier_bond_lovelace: z.number().int().min(0).default(1_000_000).describe("Supplier bond in lovelace (default 1000000). A buyer locks price + both bonds per job; on Accept the supplier receives price + supplier bond. It is also the advert's deposit, raised to 2 units"),
       buyer_bond_lovelace: z.number().int().min(0).default(1_000_000).describe("Buyer bond in lovelace (default 1000000); it returns to the buyer on Accept"),
-      endpoint_url: z.string().min(1).describe("https URL of your supplier runtime, at most 64 bytes (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)"),
-      detail_uri: z.string().default('').describe("Optional https URL of your manifest (agent.json), at most 64 bytes"),
-      detail_hash: z.string().optional().describe("Optional sha256 (64 hex) of the bytes detail_uri serves. Omitted with a detail_uri: the tool fetches detail_uri once and uses the sha256 of the bytes served. Omitted without one: the sha256 of no bytes"),
+      endpoint_url: z.string().min(1).describe("https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)"),
+      detail_uri: z.string().default('').describe("Optional https URL of your manifest (agent.json), at most 64 bytes; requires detail_hash"),
+      detail_hash: z.string().optional().describe("sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used"),
     },
     async ({ changeAddress, capability_id, model, max_output_tokens, max_processing_ms, price_lovelace, supplier_bond_lovelace, buyer_bond_lovelace, endpoint_url, detail_uri, detail_hash }) => {
       const limited = checkRateLimit(); if (limited) return limited;
@@ -65,6 +66,7 @@ export function registerMarketplaceAdvertTools(server: McpServer, checkRateLimit
           `**Deposit locked:** ${lovelaceToAda(r.depositLovelace)} (returns to you when you retire the advert with vector_build_marketplace_retire_advert)\n` +
           `**Valid until:** ${isoOrRaw(r.validTo)} (sign and submit before then, or build it again)\n` +
           `**Estimated fee:** ${r.feeAda}\n**Collateral kept aside:** ${r.collateralKept ? 'yes' : 'no'}${warning}\n\n` +
+          `**Supplier runtime:** once this confirms, ${ADVERT_REF_COPY}\n\n` +
           `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\n${SIGN_COPY} Once it confirms, vector_marketplace_get_supplier { advert_ref } reads the advert back.`;
         return text(withJson(md, {
           advert_ref: r.advertRef, supplier_pkh: d.supplier_pkh, capability_id: d.capability_id, deposit_lovelace: r.depositLovelace,
@@ -82,7 +84,7 @@ export function registerMarketplaceAdvertTools(server: McpServer, checkRateLimit
 
   server.tool(
     "vector_build_marketplace_retire_advert",
-    "Build an UNSIGNED transaction that retires your supplier advert on the Vector agents marketplace: consumes the advert and returns its deposit to changeAddress. Only the advert's supplier key can retire it. Once it confirms, buyers can no longer hire the advert, and a buyer whose escrow against it is posted but whose job is not yet sent can no longer send it (that buyer reclaims everything after deliver_by): retire when no job is in flight. Takes no key material. " + SIGN_COPY,
+    "Build an UNSIGNED transaction that retires your supplier advert on the Vector agents marketplace: consumes the advert and returns its deposit to changeAddress. Only the advert's supplier key can retire it. Once it confirms, buyers can no longer hire the advert, and a buyer whose escrow against it is posted but whose job is not yet sent can no longer send it (that buyer reclaims everything after deliver_by): retire when no job is in flight. After it confirms, the supplier runtime's ADVERT_REF names a consumed advert: to list the supplier again, post a new advert and set ADVERT_REF to its ref. Takes no key material. " + SIGN_COPY,
     {
       changeAddress: z.string().describe("The supplier wallet address whose key the advert names. Get it from vector_signer_get_address."),
       advert_ref: z.string().describe("Advert '<txid>#<index>', as vector_build_marketplace_post_advert returned it"),
@@ -94,7 +96,8 @@ export function registerMarketplaceAdvertTools(server: McpServer, checkRateLimit
         const lucid = await lucidForAddress(provider, changeAddress);
         const r = await buildRetireAdvert(lucid, provider, { changeAddress, advertRef: advert_ref });
         const md = `# Unsigned Advert Retire Built (Not Submitted)\n\n**Advert:** \`${r.advertRef}\` (\`${cell(r.capabilityId)}\`)\n` +
-          `**Deposit returned to you:** ${lovelaceToAda(r.returnLovelace)}\n**Estimated fee:** ${r.feeAda}\n\n` +
+          `**Deposit returned to you:** ${lovelaceToAda(r.returnLovelace)}\n**Estimated fee:** ${r.feeAda}\n` +
+          `**Supplier runtime:** after this confirms, its ADVERT_REF names a consumed advert; to list the supplier again, post a new advert with vector_build_marketplace_post_advert and set ADVERT_REF to the new advert_ref.\n\n` +
           `**Unsigned TX CBOR:**\n\`\`\`\n${r.txCbor}\n\`\`\`\n\n${SIGN_COPY}`;
         return text(withJson(md, { advert_ref: r.advertRef, tx_hash: r.txHash, supplier_pkh: r.supplierPkh, return_lovelace: r.returnLovelace, fee: r.fee }));
       } catch (err) {
