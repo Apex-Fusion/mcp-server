@@ -206,9 +206,9 @@
           "maximum": 9007199254740991
         },
         "max_processing_ms": {
-          "description": "Processing window in milliseconds, from 1 to 86400000 (24 h): how long the supplier has to submit a job",
+          "description": "Processing window in milliseconds, from 60001 to 86400000 (24 h): how long the supplier has to submit a job. A vector-agent-template supplier needs at least its SERVICE_TIMEOUT_MS + 60000 (180000 with the default)",
           "type": "integer",
-          "minimum": 1,
+          "minimum": 60001,
           "maximum": 86400000
         },
         "price_lovelace": {

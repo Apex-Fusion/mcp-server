@@ -18,7 +18,7 @@ import { ensureSlotConfig, paymentKeyHashOf } from './gov-build.js';
 import type { SlotClockProvider } from './gov-build.js';
 import {
   ADVERT_ADDRESS, ADVERT_REF_UTXO, ADVERT_SCRIPT_HASH, ADVERT_REDEEMER, ADVERT_DEPOSIT_FLOOR_LOVELACE, ADVERT_VALID_BEFORE_MS,
-  ADVERT_VALID_AFTER_MS, DATUM_BYTES_MAX, EMPTY_DETAIL_HASH, MARKETPLACE_MIN_FEE, MAX_PROCESSING_MS_CEILING,
+  ADVERT_VALID_AFTER_MS, DATUM_BYTES_MAX, EMPTY_DETAIL_HASH, MARKETPLACE_MIN_FEE, MAX_PROCESSING_MS_CEILING, MIN_PROCESSING_MS_FLOOR,
 } from './marketplace-constants.js';
 import { encodeAdvertDatum, formatOutRef, parseOutRef } from './marketplace-datum.js';
 import type { AdvertDatum } from './marketplace-datum.js';
@@ -130,8 +130,9 @@ export function planPostAdvert(terms: AdvertTerms, supplierPkh: string, nowMs: n
   if (typeof terms.detailHash !== 'string' || !HASH_HEX.test(terms.detailHash)) throw new Error('detail_hash must be 64 hex characters (the sha256 of the bytes detail_uri serves).');
   const maxOutputTokens = wholeNumber('max_output_tokens', terms.maxOutputTokens, Number.MAX_SAFE_INTEGER);
   // The buyer's Post caps the window at 24 h (a buyer cannot reclaim before deliver_by), so a longer one could not be hired.
-  // The supplier template needs a positive window (ADVERT_MAX_PROCESSING_MS) and refuses jobs for an advert whose window is smaller than its own.
-  const maxProcessingMs = wholeNumber('max_processing_ms', terms.maxProcessingMs, MAX_PROCESSING_MS_CEILING, ' (24 h), the longest window vector_build_marketplace_post_escrow will hold a buyer\'s escrow for; it is milliseconds, check the unit', 1, ': the supplier template needs a positive processing window');
+  // A supplier template starts only when its ADVERT_MAX_PROCESSING_MS is at least SERVICE_TIMEOUT_MS + 60 s, and it refuses jobs for an
+  // advert whose window is smaller than that, so no template supplier serves a window under MIN_PROCESSING_MS_FLOOR.
+  const maxProcessingMs = wholeNumber('max_processing_ms', terms.maxProcessingMs, MAX_PROCESSING_MS_CEILING, ' (24 h), the longest window vector_build_marketplace_post_escrow will hold a buyer\'s escrow for; it is milliseconds, check the unit', MIN_PROCESSING_MS_FLOOR, ': a supplier template needs at least its SERVICE_TIMEOUT_MS + 60000 ms (180000 with the default), so it cannot serve a shorter window');
   const datum: AdvertDatum = {
     supplier_pkh: supplierPkh, capability_id: capabilityId, model,
     max_output_tokens: maxOutputTokens, max_processing_ms: maxProcessingMs,

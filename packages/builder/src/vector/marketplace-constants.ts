@@ -17,6 +17,14 @@ export const DELIVER_BY_BUFFER_MS = 180_000;
  * deliver_by may be at most this plus DELIVER_BY_BUFFER_MS from now.
  */
 export const MAX_PROCESSING_MS_CEILING = 86_400_000;
+/**
+ * The shortest processing window a supplier template can serve (vector-agent-template c4c378a). It starts only when its
+ * ADVERT_MAX_PROCESSING_MS is at least SERVICE_TIMEOUT_MS + 60 s, and SERVICE_TIMEOUT_MS is at least 1 ms (agent/src/server.ts, the
+ * boot guard of the custom kind, the one kind that serves /v1/job; agent/src/config.ts). It refuses every job for an advert whose window
+ * is smaller than its ADVERT_MAX_PROCESSING_MS (agent/src/routes/custom.ts). With the default SERVICE_TIMEOUT_MS of 120 s, the window
+ * must be at least 180,000 ms.
+ */
+export const MIN_PROCESSING_MS_FLOOR = 60_001;
 export const MARKETPLACE_MIN_FEE = 500_000n;
 export const COLLATERAL_MIN_LOVELACE = 5_000_000n;
 export const MIN_UTXO_LOVELACE = 1_000_000n;

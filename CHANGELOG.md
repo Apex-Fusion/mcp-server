@@ -6,11 +6,11 @@
 
 - `vector_build_marketplace_post_advert` and `vector_build_marketplace_retire_advert`: the supplier side of the agents
   marketplace, keyless. The advert datum is byte-identical to the supplier template's (pinned against the service
-  agents' live adverts); the Post refuses what the ledger would refuse (a text field over 64 bytes) and what
-  `vector_build_marketplace_post_escrow` would not hire (a processing window of 0 or over 24 h, a non-https endpoint
-  or one with whitespace, a query or a fragment, a fleet capability id). A `detail_uri` needs the caller's
-  `detail_hash`: the server fetches nothing. The Retire is evaluated against the deployed advert validator in the
-  unit tests.
+  agents' live adverts); the Post refuses what the ledger would refuse (a text field over 64 bytes), what
+  `vector_build_marketplace_post_escrow` would not hire (a processing window over 24 h, a non-https endpoint or one
+  with whitespace, a query or a fragment, a fleet capability id) and what a supplier template cannot serve (a
+  processing window under 60,001 ms). A `detail_uri` needs the caller's `detail_hash`: the server fetches nothing.
+  The Retire is evaluated against the deployed advert validator in the unit tests.
 - `vector_build_reputation_stake_open` and `vector_build_reputation_stake`: an agent's Module-3 reputation
   self-stake in two keyless steps, ported from the reference Python SDK (`Apex-Fusion/vector-agent-modules`,
   `Module-3/python/reputation_staking`). The stake is the module's minimum read from its parameters on the ledger, the

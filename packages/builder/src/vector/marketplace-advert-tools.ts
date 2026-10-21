@@ -10,7 +10,7 @@ import { lucidForAddress } from './build.js';
 import { withJson } from './marketplace-indexer.js';
 import { buildPostAdvert, buildRetireAdvert } from './marketplace-advert.js';
 import type { DetailHashSource } from './marketplace-advert.js';
-import { MAX_PROCESSING_MS_CEILING } from './marketplace-constants.js';
+import { MAX_PROCESSING_MS_CEILING, MIN_PROCESSING_MS_FLOOR } from './marketplace-constants.js';
 import { text, fail, cell, isoOrRaw, SIGN_COPY } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
 
@@ -31,7 +31,7 @@ export function registerMarketplaceAdvertTools(server: McpServer, checkRateLimit
       capability_id: z.string().min(1).describe("Capability id, at most 64 bytes, outside the fleet namespaces llm.text.generate.*, llm.chat.*, ocr.page.extract.* and audio.synthesize.* (for example research.summary.v1). A reputation stake names the same id."),
       model: z.string().min(1).describe("Model or service version the supplier runs, at most 64 bytes"),
       max_output_tokens: z.number().int().min(0).describe("Largest output the supplier commits to, in tokens (0 if not token-based)"),
-      max_processing_ms: z.number().int().min(1).max(MAX_PROCESSING_MS_CEILING).describe("Processing window in milliseconds, from 1 to 86400000 (24 h): how long the supplier has to submit a job"),
+      max_processing_ms: z.number().int().min(MIN_PROCESSING_MS_FLOOR).max(MAX_PROCESSING_MS_CEILING).describe("Processing window in milliseconds, from 60001 to 86400000 (24 h): how long the supplier has to submit a job. A vector-agent-template supplier needs at least its SERVICE_TIMEOUT_MS + 60000 (180000 with the default)"),
       price_lovelace: z.number().int().min(0).describe("Price per job in lovelace (1 AP3X = 1000000)"),
       supplier_bond_lovelace: z.number().int().min(0).default(1_000_000).describe("Supplier bond in lovelace (default 1000000). A buyer locks price + both bonds per job; on Accept the supplier receives price + supplier bond. It is also the advert's deposit, raised to 2 units"),
       buyer_bond_lovelace: z.number().int().min(0).default(1_000_000).describe("Buyer bond in lovelace (default 1000000); it returns to the buyer on Accept"),

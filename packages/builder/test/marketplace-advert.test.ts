@@ -11,7 +11,7 @@ import { lucidForAddress } from '../src/vector/build.ts';
 import { ensureSlotConfig } from '../src/vector/gov-build.ts';
 import {
   ADVERT_ADDRESS, ADVERT_REF_UTXO, ADVERT_SCRIPT_HASH, ADVERT_DEPOSIT_FLOOR_LOVELACE, EMPTY_DETAIL_HASH, MARKETPLACE_MIN_FEE,
-  MAX_PROCESSING_MS_CEILING, DELIVER_BY_BUFFER_MS,
+  MAX_PROCESSING_MS_CEILING, MIN_PROCESSING_MS_FLOOR, DELIVER_BY_BUFFER_MS,
 } from '../src/vector/marketplace-constants.ts';
 import { decodeAdvertDatum, encodeAdvertDatum, formatOutRef } from '../src/vector/marketplace-datum.ts';
 import type { AdvertDatum } from '../src/vector/marketplace-datum.ts';
@@ -141,10 +141,15 @@ describe('planPostAdvert', () => {
       refuses({ endpointUrl: `https://x.example${String.fromCharCode(0xa0)}` }, /endpoint_url must not contain whitespace/);
       refuses({ endpointUrl: 'https://x.example/api?key=1' }, /must not contain a query/);
     });
-    test('a processing window of 0 or over 24 h, and numbers that are not whole lovelace or milliseconds', () => {
+    test('a processing window under 60,001 ms or over 24 h, and numbers that are not whole lovelace or milliseconds', () => {
       refuses({ maxProcessingMs: MAX_PROCESSING_MS_CEILING + 1 }, /max_processing_ms is 86400001, more than 86400000 \(24 h\)/);
-      refuses({ maxProcessingMs: 0 }, /max_processing_ms must be a whole number from 1: the supplier template needs a positive processing window/);
-      refuses({ maxProcessingMs: 1.5 }, /max_processing_ms must be a whole number from 1/);
+      // A supplier template starts only with ADVERT_MAX_PROCESSING_MS >= SERVICE_TIMEOUT_MS (at least 1 ms) + 60 s, and refuses jobs for a
+      // smaller window: 60,000 ms is one millisecond short of what any template supplier can serve.
+      assert.equal(MIN_PROCESSING_MS_FLOOR, 60_001);
+      refuses({ maxProcessingMs: 60_000 }, /max_processing_ms must be a whole number from 60001: a supplier template needs at least its SERVICE_TIMEOUT_MS \+ 60000 ms \(180000 with the default\), so it cannot serve a shorter window/);
+      refuses({ maxProcessingMs: 0 }, /max_processing_ms must be a whole number from 60001/);
+      assert.equal(planPostAdvert({ ...TERMS, maxProcessingMs: 60_001 }, SUPPLIER, NOW).datum.max_processing_ms, 60_001, 'the floor itself is accepted');
+      refuses({ maxProcessingMs: 60_001.5 }, /max_processing_ms must be a whole number from 60001/);
       refuses({ maxOutputTokens: -1 }, /max_output_tokens must be a whole number from 0/);
       refuses({ priceLovelace: -1n }, /price_lovelace must be a whole number of lovelace from 0/);
       refuses({ buyerBondLovelace: BigInt(Number.MAX_SAFE_INTEGER) + 1n }, /check the unit/);
@@ -173,7 +178,7 @@ describe('planPostAdvert', () => {
     }
   });
   test('an advert it accepts is one vector_build_marketplace_post_escrow hires, at every window and price it allows', () => {
-    for (const maxProcessingMs of [1, 1_000, 300_000, MAX_PROCESSING_MS_CEILING]) {
+    for (const maxProcessingMs of [MIN_PROCESSING_MS_FLOOR, 180_000, 300_000, MAX_PROCESSING_MS_CEILING]) {
       for (const [price, sBond, bBond] of [[0n, 0n, 0n], [200_000n, 1_000_000n, 1_000_000n], [BigInt(Number.MAX_SAFE_INTEGER), BigInt(Number.MAX_SAFE_INTEGER), BigInt(Number.MAX_SAFE_INTEGER)]]) {
         const plan = planPostAdvert({ ...TERMS, maxProcessingMs, priceLovelace: price, supplierBondLovelace: sBond, buyerBondLovelace: bBond }, SUPPLIER, NOW);
         const hire = planPostEscrow(plan.datum, `${'cd'.repeat(32)}#0`, OTHER_PKH, 'a payload', NOW + 1_000);
