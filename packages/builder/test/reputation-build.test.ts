@@ -2,11 +2,15 @@
 // The Module-3 self-stake, ported from the reference Python SDK. Parity is held against two stakes the SDK built on mainnet
 // (advert-stake-golden.fixture.ts): the same opening datum, stake datum, stake token, redeemers, reference inputs and validity range,
 // from the same agent, owner, capabilities and tip, and the deployed reputation validator evaluating each built transaction against the
-// ledger state those stakes were made in (uplc-node.fixture.ts). Negative controls show the evaluator rejects what the validator
-// rejects: the SDK's testnet clock, a capability the registry record does not list, and a decrease below the module's minimum.
-// No network is touched.
+// ledger state those stakes were made in (uplc-node.fixture.ts). Each "verdict" test pairs an accepted twin with the rejected case: the
+// SDK's testnet clock, a capability the registry record does not list. The tool text about the stake is pinned the same way: a decrease
+// below the module's minimum is rejected, and the module's oracle key consumes all of a stake through ClaimDecayRefund once its activity
+// window (about 163 s as deployed) has passed. No network is touched.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join, sep } from 'node:path';
 import { CML, Constr, Data, fromText, getAddressDetails, validatorToScriptHash, credentialToAddress } from '@lucid-evolution/lucid';
 import type { UTxO } from '@lucid-evolution/lucid';
 import { blake2b } from '@noble/hashes/blake2b';
@@ -20,12 +24,13 @@ import {
   CREATE_STAKE_REDEEMER, MINT_STAKE_TOKEN_REDEEMER,
   encodeStakeDatum, decodeStakeDatum, stakeTokenName, stakeTokenUnit, decodeStakeParams, decodeCrossRefs, readRegistryRecord,
   stakedCapabilities, capabilityText, planStakeOpening, planStake, stakeClock, buildStakeOpening, buildStake, reputationAddressFromHash,
+  stakeOutputZero,
 } from '../src/vector/reputation-build.ts';
 import type { RegistryRecord } from '../src/vector/reputation-build.ts';
 import {
   STAKE_A, STAKE_B, PARAMS_UTXO, CROSS_REFS_UTXO, REPUTATION_REF_UTXO_BARE, REPUTATION_SCRIPT_CBOR, REGISTRATION_TX, ADVERT_POSTS,
 } from './fixtures/advert-stake-golden.fixture.ts';
-import { uplcEvaluatingProvider } from './fixtures/uplc-node.fixture.ts';
+import { uplcEvaluatingProvider, UPLC_PATH } from './fixtures/uplc-node.fixture.ts';
 
 const ZERO = VECTOR_MAINNET_ZERO_TIME_MS;
 const REF_SCRIPT: UTxO = { ...REPUTATION_REF_UTXO_BARE, scriptRef: { type: 'PlutusV3', script: REPUTATION_SCRIPT_CBOR } };
@@ -72,6 +77,17 @@ const minted = (cbor: string): Record<string, string> => {
   }
   return out;
 };
+
+describe('the evaluator the tests use is the one lucid pins', () => {
+  test('@lucid-evolution/uplc is loaded from where lucid resolves it, at the version lucid pins, not the copy nested under the wallet package', () => {
+    const lucidDir = join(dirname(createRequire(import.meta.url).resolve('@lucid-evolution/lucid')), '..');
+    const pinned = JSON.parse(readFileSync(join(lucidDir, 'package.json'), 'utf-8')).dependencies['@lucid-evolution/uplc'];
+    const loaded = JSON.parse(readFileSync(join(dirname(UPLC_PATH), '..', '..', 'package.json'), 'utf-8'));
+    assert.equal(loaded.name, '@lucid-evolution/uplc');
+    assert.equal(loaded.version, pinned);
+    assert.ok(!UPLC_PATH.includes(`${sep}wallet${sep}`), UPLC_PATH);
+  });
+});
 
 describe('the deployment the builders name is the one on the ledger', () => {
   test('script hash, address, reference script, parameters holder and cross references', () => {
@@ -120,7 +136,17 @@ describe('the stake datum and token, byte for byte against the SDK\'s', () => {
   });
   test('decodeStakeDatum refuses what is not a stake datum', () => {
     assert.throws(() => decodeStakeDatum(Data.to(new Constr(0, ['aa']))), /not a stake datum/);
+    assert.throws(() => decodeStakeDatum(Data.to(new Constr(1, ['aa', new Constr(0, ['bb']), 1n, [], 1n, 0n]))), /not a stake datum/);
+    assert.throws(() => decodeStakeDatum(Data.to(new Constr(0, [1n, new Constr(0, ['bb']), 1n, [], 1n, 0n]))), /agent_did is not bytes/);
     assert.throws(() => decodeStakeDatum(Data.to(new Constr(0, ['aa', new Constr(1, ['bb']), 1n, [], 1n, 0n]))), /not a verification-key credential/);
+    assert.throws(() => decodeStakeDatum(Data.to(new Constr(0, ['aa', new Constr(0, ['bb']), 'cc', [], 1n, 0n]))), /an integer field is not an integer/);
+    assert.throws(() => decodeStakeDatum(Data.to(new Constr(0, ['aa', new Constr(0, ['bb']), 1n, [1n], 1n, 0n]))), /staked_capabilities is not a list of bytes/);
+  });
+  test('stakeTokenName, decodeCrossRefs and decodeStakeParams refuse what they cannot read', () => {
+    assert.throws(() => stakeTokenName('zz'), /agent_did must be hex bytes/);
+    assert.throws(() => stakeTokenName(''), /agent_did must be hex bytes/);
+    assert.throws(() => decodeCrossRefs(Data.to(new Constr(0, ['aa']))), /not the cross-validator references datum/);
+    assert.throws(() => decodeStakeParams(Data.to(new Constr(0, ['aa', 1n, 2n, 3n]))), /not a positive integer/);
   });
 });
 
@@ -147,6 +173,16 @@ describe('readRegistryRecord and stakedCapabilities', () => {
   test('refuses a DID of another policy, and one with no record', async () => {
     await assert.rejects(readRegistryRecord(nodeFor(STAKE_A), STAKE_A.agentId.replace(REGISTRY_POLICY_ID, 'ab'.repeat(28))), /is not a DID of the agent registry/);
     await assert.rejects(readRegistryRecord(nodeFor(STAKE_A), STAKE_B.agentId), /Agent not found/);
+    await assert.rejects(readRegistryRecord(nodeFor(STAKE_A), STAKE_A.agentId.slice(0, -2)), /asset name must be 64 hex characters/);
+  });
+  test('refuses a registry token that is not at the registry address, and a record whose owner is not a verification key', async () => {
+    // Koios (getUtxoByUnit) may find the token anywhere; the record counts only at the registry address.
+    const moved = Object.assign(nodeFor(STAKE_A), { getUtxoByUnit: async () => ({ ...STAKE_A.registry, address: STAKE_A.ownerAddress }) });
+    await assert.rejects(readRegistryRecord(moved, STAKE_A.agentId), /is not at the registry address/);
+    const f = (Data.from(STAKE_A.registry.datum!) as Constr<Data>).fields;
+    const scriptOwned = { ...STAKE_A.registry, datum: Data.to(new Constr(0, [new Constr(1, [ownerOf(STAKE_A)]), ...f.slice(1)])) };
+    const node = uplcEvaluatingProvider([STAKE_A.wallet, scriptOwned, ...MODULE], Number(STAKE_A.tx.invalidBefore));
+    await assert.rejects(readRegistryRecord(node, STAKE_A.agentId), /has no verification-key owner or no capability list/);
   });
   test('the staked capabilities are a subset of the record\'s, byte for byte, without repeats', () => {
     const record = recordOf(STAKE_A);
@@ -225,26 +261,24 @@ describe('buildStake (step 2): the deployed validator accepts what the SDK built
       assert.equal(r.lastUpdated, lowerBound(c));
     });
   }
-  test('the evaluator is a verdict: a stake stamped with the SDK\'s unpatched testnet clock is rejected by the deployed validator', async () => {
-    const c = STAKE_A;
+  /** A CreateStake built by hand, past every check of the builder, with the datum the caller gives: what the deployed validator alone says of it. */
+  const handBuiltStake = async (c: Case, datum: (plan: ReturnType<typeof planStake>) => string, capsHex = c.capabilities.map(fromText)) => {
     const node = nodeFor(c);
     await ensureSlotConfig(node);
     const lucid = await lucidForAddress(node, c.ownerAddress);
-    const plan = planStake(recordOf(c), ownerOf(c), c.capabilities.map(fromText), decodeStakeParams(PARAMS_UTXO.datum!), decodeStakeDatum(c.opening.datum!), lowerBound(c), c.agentId);
-    const testnetStamp = { ...plan.datum, last_updated: plan.datum.last_updated - (1_756_485_600 - 1_752_057_484) * 1000 };
-    await assert.rejects(lucid.newTx().readFrom([...MODULE, c.registry]).collectFrom([c.opening], plan.spendRedeemerHex).mintAssets({ [plan.tokenUnit]: 1n }, plan.mintRedeemerHex)
-      .pay.ToAddressWithData(REPUTATION_ADDRESS, { kind: 'inline', value: encodeStakeDatum(testnetStamp) }, { lovelace: plan.stakeLovelace, [plan.tokenUnit]: 1n })
-      .addSignerKey(ownerOf(c)).validFrom(plan.validFrom).validTo(plan.validTo).complete({ localUPLCEval: false }), /failed script execution/);
+    const plan = planStake(recordOf(c), ownerOf(c), capsHex, decodeStakeParams(PARAMS_UTXO.datum!), decodeStakeDatum(c.opening.datum!), lowerBound(c), c.agentId);
+    return lucid.newTx().readFrom([...MODULE, c.registry]).collectFrom([c.opening], plan.spendRedeemerHex).mintAssets({ [plan.tokenUnit]: 1n }, plan.mintRedeemerHex)
+      .pay.ToAddressWithData(REPUTATION_ADDRESS, { kind: 'inline', value: datum(plan) }, { lovelace: plan.stakeLovelace, [plan.tokenUnit]: 1n })
+      .addSignerKey(ownerOf(c)).validFrom(plan.validFrom).validTo(plan.validTo).complete({ localUPLCEval: false });
+  };
+  test('the evaluator is a verdict: the stake stamped with the tip is accepted, the same stamped with the SDK\'s unpatched testnet clock rejected', async () => {
+    await assert.doesNotReject(handBuiltStake(STAKE_A, (plan) => plan.datumHex), 'the twin: last_updated = the lower bound, accepted');
+    const testnetStamp = (plan: ReturnType<typeof planStake>) => encodeStakeDatum({ ...plan.datum, last_updated: plan.datum.last_updated - (1_756_485_600 - 1_752_057_484) * 1000 });
+    await assert.rejects(handBuiltStake(STAKE_A, testnetStamp), /failed script execution/);
   });
-  test('the evaluator is a verdict: a capability the registry record does not list is rejected by the deployed validator too', async () => {
-    const c = STAKE_A;
-    const node = nodeFor(c);
-    await ensureSlotConfig(node);
-    const lucid = await lucidForAddress(node, c.ownerAddress);
-    const plan = planStake(recordOf(c), ownerOf(c), [fromText('data_analysis')], decodeStakeParams(PARAMS_UTXO.datum!), decodeStakeDatum(c.opening.datum!), lowerBound(c), c.agentId);
-    await assert.rejects(lucid.newTx().readFrom([...MODULE, c.registry]).collectFrom([c.opening], plan.spendRedeemerHex).mintAssets({ [plan.tokenUnit]: 1n }, plan.mintRedeemerHex)
-      .pay.ToAddressWithData(REPUTATION_ADDRESS, { kind: 'inline', value: plan.datumHex }, { lovelace: plan.stakeLovelace, [plan.tokenUnit]: 1n })
-      .addSignerKey(ownerOf(c)).validFrom(plan.validFrom).validTo(plan.validTo).complete({ localUPLCEval: false }), /failed script execution/);
+  test('the evaluator is a verdict: a listed capability is accepted, one the registry record does not list rejected', async () => {
+    await assert.doesNotReject(handBuiltStake(STAKE_A, (plan) => plan.datumHex, [fromText(STAKE_A.capabilities[0])]), 'the twin: the record\'s capability, accepted');
+    await assert.rejects(handBuiltStake(STAKE_A, (plan) => plan.datumHex, [fromText('data_analysis')]), /failed script execution/);
   });
   test('what the tool text says about withdrawal: the deployed validator refuses to decrease a stake below the minimum, and allows it above', async () => {
     const c = STAKE_A;
@@ -264,6 +298,48 @@ describe('buildStake (step 2): the deployed validator accepts what the SDK built
     await assert.rejects(decrease(10_000_000n, 1_000_000n), /failed script execution/, 'a stake at the minimum (10 units) cannot be decreased');
     await assert.doesNotReject(decrease(11_000_000n, 1_000_000n), 'down to the minimum it can');
   });
+  test('what the tool text says about decay: the module\'s oracle key consumes all of a stake at the minimum through ClaimDecayRefund about 163 s after its last update', async () => {
+    // The module's configuration as deployed: the oracle key (deploy_state wallet_vkey_hash, the key the refs token policy is locked to)
+    // and the treasury script (the SDK's TREASURY_SCRIPT_HASH). A decay that drops the stake below the minimum burns the token and must
+    // send the treasury its share; nothing sends the rest to the owner. The parameters' epoch_length (900) and activity_window (180) are
+    // compared with POSIX milliseconds: decay opens once (now - last_updated) / 900 > 180, at 162.9 s.
+    const ORACLE = '151cadb75179beb35c094c4d05aed5cf9ac1ef5295e5161ac4141de4';
+    const oracleAddress = credentialToAddress('Mainnet', { type: 'Key', hash: ORACLE });
+    const treasury = credentialToAddress('Mainnet', { type: 'Script', hash: 'ab1aad52c4774e5da9f2c0fa1a4d07220a0bdd57ee3dce9be860dac6' });
+    const c = STAKE_A;
+    const live = decodeStakeDatum(c.stakeDatumHex);
+    const unit = stakeTokenUnit(c.agentDidHex);
+    const stake: UTxO = { txHash: c.tx.txHash, outputIndex: 0, address: REPUTATION_ADDRESS, assets: { lovelace: 10_000_000n, [unit]: 1n }, datum: c.stakeDatumHex };
+    const oracleWallet: UTxO = { txHash: 'f1'.repeat(32), outputIndex: 0, address: oracleAddress, assets: { lovelace: 20_000_000n } };
+    const decay = async (afterMs: number, treasuryLovelace: bigint) => {
+      const at = live.last_updated + afterMs;
+      const node = uplcEvaluatingProvider([oracleWallet, stake, ...MODULE], (at - ZERO) / 1000);
+      await ensureSlotConfig(node);
+      const lucid = await lucidForAddress(node, oracleAddress);
+      return lucid.newTx().readFrom(MODULE).collectFrom([stake], Data.to(new Constr(4, []))) // StakeAction.ClaimDecayRefund
+        .mintAssets({ [unit]: -1n }, Data.to(new Constr(1, []))) // StakeMintAction.BurnStakeToken
+        .pay.ToAddress(treasury, { lovelace: treasuryLovelace })
+        .addSignerKey(ORACLE).validFrom(at).validTo(at + 600_000).complete({ localUPLCEval: false });
+    };
+    // At + 200 s: 222 epochs, 42 past the window; decay 10 x 1% x 42 = 4.2 units, 5% of it (0.21) to the collector, 3.99 to the treasury.
+    await assert.rejects(decay(150_000, 3_990_000n), /failed script execution/, 'rejected at last_updated + 150 s');
+    await assert.rejects(decay(162_000, 3_990_000n), /failed script execution/, 'still rejected at + 162 s');
+    await assert.doesNotReject(decay(163_000, 3_990_000n), 'accepted at + 163 s');
+    const accepted = await decay(200_000, 3_990_000n);
+    await assert.rejects(decay(200_000, 3_989_999n), /failed script execution/, 'the treasury\'s share is the rule: one lovelace short is rejected');
+    const outs = txOf(accepted.toCBOR()).body().outputs();
+    const paid: Array<[string, bigint]> = [];
+    for (let i = 0; i < outs.len(); i++) paid.push([outs.get(i).address().to_bech32(), BigInt(outs.get(i).amount().coin().toString())]);
+    assert.deepEqual(paid[0], [treasury, 3_990_000n], 'the treasury output');
+    assert.ok(paid.slice(1).every(([address]) => address === oracleAddress), 'every other output is the oracle\'s: the collector fee and the rest of the stake');
+    const fee = BigInt(txOf(accepted.toCBOR()).body().fee().toString());
+    const inputs = inputRefs(accepted.toCBOR()).reduce((sum, ref) => sum + (ref === `${stake.txHash}#0` ? 10_000_000n : ref === `${oracleWallet.txHash}#0` ? 20_000_000n : 0n), 0n);
+    const toOracle = paid.slice(1).reduce((sum, [, l]) => sum + l, 0n);
+    assert.equal(toOracle, inputs - 3_990_000n - fee, 'the oracle takes everything the treasury does not');
+    assert.ok(toOracle >= 10_000_000n - 3_990_000n - fee, 'including the rest of the stake (6.01 units, the 0.21 collector fee among them), less the fee');
+    assert.ok(!paid.some(([address]) => address === c.ownerAddress), 'nothing goes to the owner');
+    assert.deepEqual(minted(accepted.toCBOR()), { [unit]: '-1' }, 'the stake token is burned');
+  });
 });
 
 describe('buildStake refusals, before anything is built', () => {
@@ -282,7 +358,24 @@ describe('buildStake refusals, before anything is built', () => {
   });
   test('an agent that already has a stake', async () => {
     const existing: UTxO = { txHash: STAKE_A.tx.txHash, outputIndex: 0, address: REPUTATION_ADDRESS, assets: { lovelace: 10_000_000n, [stakeTokenUnit(STAKE_A.agentDidHex)]: 1n }, datum: STAKE_A.stakeDatumHex };
-    await assert.rejects(run(STAKE_A, { node: nodeFor(STAKE_A, [existing]) }), new RegExp(`already has a stake, at ${STAKE_A.tx.txHash}#0`));
+    await assert.rejects(run(STAKE_A, { node: nodeFor(STAKE_A, [existing]) }), new RegExp(`already has a stake, at ${STAKE_A.tx.txHash}#0\\. These tools build one stake per agent; nothing was built\\.`));
+  });
+  test('an opening output with no datum, or with a datum that is not a stake datum', async () => {
+    const bare: UTxO = { ...STAKE_A.opening, txHash: 'c1'.repeat(32), datum: undefined };
+    await assert.rejects(run(STAKE_A, { node: nodeFor(STAKE_A, [bare]), openingRef: `${'c1'.repeat(32)}#0` }), /has no inline datum, so it is not an opening output/);
+    const odd: UTxO = { ...STAKE_A.opening, txHash: 'c2'.repeat(32), datum: Data.to(new Constr(0, [STAKE_A.agentDidHex])) };
+    await assert.rejects(run(STAKE_A, { node: nodeFor(STAKE_A, [odd]), openingRef: `${'c2'.repeat(32)}#0` }), /is not an opening output \(not a stake datum/);
+  });
+  test('a wallet that is not the one bound to changeAddress', async () => {
+    const node = nodeFor(STAKE_A, [{ ...STAKE_B.wallet }]);
+    await assert.rejects(buildStake(await lucidForAddress(node, STAKE_B.ownerAddress), node, {
+      changeAddress: STAKE_A.ownerAddress, agentId: STAKE_A.agentId, capabilities: STAKE_A.capabilities, openingRef: `${STAKE_A.opening.txHash}#0`, nowMs: lowerBound(STAKE_A) + 5_000,
+    }), /changeAddress is not the address this wallet is bound to/);
+    assert.equal(node.evaluations.length, 0);
+  });
+  test('a node that cannot give its tip: a refusal that names the failure, not the endpoint', async () => {
+    const node = Object.assign(nodeFor(STAKE_A), { getNetworkTip: async () => { throw new Error('connect ECONNREFUSED https://ogmios.internal.example'); } });
+    await assert.rejects(run(STAKE_A, { node }), (err: Error) => /Could not read the chain tip from the node: node request failed/.test(err.message) && !err.message.includes('ogmios.internal.example'));
   });
   test('an opening output that has not confirmed, is elsewhere, holds tokens, or names another agent', async () => {
     await assert.rejects(run(STAKE_A, { openingRef: `${'cd'.repeat(32)}#0` }), /has not confirmed yet \(run vector_await_transaction first\)/);
@@ -298,6 +391,16 @@ describe('buildStake refusals, before anything is built', () => {
     await assert.rejects(run(STAKE_A, { node: without(REF_SCRIPT, [REPUTATION_REF_UTXO_BARE]) }), /does not carry the reputation validator/);
     await assert.rejects(run(STAKE_A, { node: without(PARAMS_UTXO, [{ ...PARAMS_UTXO, address: STAKE_A.ownerAddress }]) }), /is not the module's parameters/);
     await assert.rejects(run(STAKE_A, { node: without(CROSS_REFS_UTXO, [{ ...CROSS_REFS_UTXO, assets: { lovelace: 3_000_000n } }]) }), /is not the module's cross-validator references/);
+    await assert.rejects(run(STAKE_A, { node: without(CROSS_REFS_UTXO, [{ ...CROSS_REFS_UTXO, datum: Data.to(new Constr(0, ['ab'.repeat(28), 'cd'.repeat(28)])) }]) }), /is not the module's cross-validator references/, 'references naming another validator');
+    await assert.rejects(run(STAKE_A, { node: without(PARAMS_UTXO, [{ ...PARAMS_UTXO, datum: Data.to(new Constr(0, [])) }]) }), /The module's parameters at 705d6b57.*#0 could not be read \(not the module parameters datum\)/);
+  });
+  test('the owner is checked before the node is asked about stakes or the clock', async () => {
+    const stranger = credentialToAddress('Mainnet', { type: 'Key', hash: 'ab'.repeat(28) });
+    const existing: UTxO = { txHash: STAKE_A.tx.txHash, outputIndex: 0, address: REPUTATION_ADDRESS, assets: { lovelace: 10_000_000n, [stakeTokenUnit(STAKE_A.agentDidHex)]: 1n }, datum: STAKE_A.stakeDatumHex };
+    const node = nodeFor(STAKE_A, [existing, { txHash: 'ab'.repeat(32), outputIndex: 0, address: stranger, assets: { lovelace: 40_000_000n } }]);
+    await assert.rejects(run(STAKE_A, { node, changeAddress: stranger }), /is not the owner of/, 'step 2');
+    await assert.rejects(buildStakeOpening(await lucidForAddress(node, stranger), node, { changeAddress: stranger, agentId: STAKE_A.agentId, capabilities: STAKE_A.capabilities, nowMs: lowerBound(STAKE_A) }),
+      /is not the owner of/, 'step 1');
   });
   test('a node whose tip is not near this server\'s clock, and a wallet with no collateral', async () => {
     await assert.rejects(run(STAKE_A, { nowMs: lowerBound(STAKE_A) + 600_000 }), /more than 120 s from this server's clock/);
@@ -332,6 +435,46 @@ describe('buildStakeOpening (step 1)', () => {
     await assert.rejects(open(node([existing])), /already has a stake/);
     await assert.rejects(open(node(), { nowMs: lowerBound(c) + 300_000 }), /more than 120 s/);
   });
+  test('refuses a wallet that could not go on to make the stake, before it locks the 2 units', async () => {
+    const c = STAKE_A;
+    const withWallet = (wallet: UTxO[]) => uplcEvaluatingProvider([...wallet, c.registry, ...MODULE], Number(c.tx.invalidBefore));
+    const open = async (n: ReturnType<typeof withWallet>) => buildStakeOpening(await lucidForAddress(n, c.ownerAddress), n, { changeAddress: c.ownerAddress, agentId: c.agentId, capabilities: c.capabilities, nowMs: lowerBound(c) });
+    const at = (lovelace: bigint, i = 0, extra: Record<string, bigint> = {}): UTxO => ({ ...c.wallet, txHash: 'a1'.repeat(32), outputIndex: i, assets: { lovelace, ...extra } });
+    // The review's case: 4.5 units build step 1 and leave step 2 without the stake or its collateral.
+    await assert.rejects(open(withWallet([at(4_500_000n)])), /The wallet holds 4\.500000 units; a stake needs 13\.000000: the 2-unit opening output, the module's minimum of 10\.000000 and about 1 unit of fees for the two steps\. Nothing was built\./);
+    await assert.rejects(open(withWallet([at(12_999_999n)])), /a stake needs 13\.000000/, 'one lovelace short');
+    await assert.rejects(open(withWallet([at(4_000_000n), at(4_500_000n, 1), at(4_500_000n, 2)])), /no pure output of at least 5 units, which step 2 needs as collateral/);
+    await assert.rejects(open(withWallet([at(20_000_000n, 0, { [`${'ab'.repeat(28)}74`]: 1n })])), /no pure output of at least 5 units/, 'an output that carries a token is not collateral');
+    await assert.doesNotReject(open(withWallet([at(13_000_000n)])), 'exactly enough');
+  });
+  test('refuses a wallet that is not the one bound to changeAddress', async () => {
+    const c = STAKE_A;
+    const n = uplcEvaluatingProvider([c.wallet, STAKE_B.wallet, c.registry, ...MODULE], Number(c.tx.invalidBefore));
+    await assert.rejects(buildStakeOpening(await lucidForAddress(n, STAKE_B.ownerAddress), n, { changeAddress: c.ownerAddress, agentId: c.agentId, capabilities: c.capabilities, nowMs: lowerBound(c) }),
+      /changeAddress is not the address this wallet is bound to/);
+  });
+  test('stakeOutputZero: the opening output and the stake must be output 0, with their datum, lovelace and (for the stake) one token', async () => {
+    const c = STAKE_A;
+    // Step 1, built: output 0 is the opening output.
+    const live = decodeStakeDatum(c.opening.datum!);
+    const n1 = uplcEvaluatingProvider([c.wallet, c.registry, ...MODULE], (live.last_updated - ZERO) / 1000);
+    const opened = await buildStakeOpening(await lucidForAddress(n1, c.ownerAddress), n1, { changeAddress: c.ownerAddress, agentId: c.agentId, capabilities: c.capabilities, nowMs: live.last_updated });
+    assert.equal(stakeOutputZero(opened.txCbor, { datumHex: c.opening.datum!, lovelace: STAKE_OPENING_LOVELACE }), STAKE_OPENING_LOVELACE);
+    assert.throws(() => stakeOutputZero(opened.txCbor, { datumHex: c.stakeDatumHex, lovelace: STAKE_OPENING_LOVELACE }), /not have the planned output as output 0/, 'another datum');
+    assert.throws(() => stakeOutputZero(opened.txCbor, { datumHex: c.opening.datum!, lovelace: STAKE_OPENING_LOVELACE + 1n }), /not have the planned output as output 0/, 'more lovelace than it holds');
+    assert.throws(() => stakeOutputZero(opened.txCbor, { datumHex: c.opening.datum!, lovelace: STAKE_OPENING_LOVELACE, unit: stakeTokenUnit(c.agentDidHex) }), /not have the planned output as output 0/, 'no stake token');
+    // Step 2, built: output 0 is the stake with its token, and buildStake returns the lovelace it holds.
+    const n2 = nodeFor(c);
+    const staked = await buildStake(await lucidForAddress(n2, c.ownerAddress), n2, { changeAddress: c.ownerAddress, agentId: c.agentId, capabilities: c.capabilities, openingRef: `${c.opening.txHash}#0`, nowMs: lowerBound(c) });
+    const unit = stakeTokenUnit(c.agentDidHex);
+    assert.equal(stakeOutputZero(staked.txCbor, { datumHex: c.stakeDatumHex, lovelace: 10_000_000n, unit }), staked.stakeLovelace);
+    assert.throws(() => stakeOutputZero(staked.txCbor, { datumHex: c.stakeDatumHex, lovelace: 10_000_000n, unit: stakeTokenUnit(STAKE_B.agentDidHex) }), /not have the planned output as output 0/, 'another agent\'s token');
+    // The same datum and lovelace at another address is not the stake.
+    await ensureSlotConfig(n2);
+    const elsewhere = await (await lucidForAddress(n2, c.ownerAddress)).newTx()
+      .pay.ToAddressWithData(c.ownerAddress, { kind: 'inline', value: c.opening.datum! }, { lovelace: STAKE_OPENING_LOVELACE }).complete();
+    assert.throws(() => stakeOutputZero(elsewhere.toCBOR(), { datumHex: c.opening.datum!, lovelace: STAKE_OPENING_LOVELACE }), /not have the planned output as output 0/, 'another address');
+  });
   test('an agent that already has an opening output is pointed at it, not given a second one to strand', async () => {
     const c = STAKE_A;
     const n = uplcEvaluatingProvider([c.wallet, c.opening, STAKE_B.opening, c.registry, ...MODULE], Number(c.tx.invalidBefore));
@@ -339,8 +482,11 @@ describe('buildStakeOpening (step 1)', () => {
       buildStakeOpening(await lucidForAddress(n, c.ownerAddress), n, { changeAddress: c.ownerAddress, agentId: c.agentId, capabilities: c.capabilities, nowMs: lowerBound(c) }),
       new RegExp(`An opening output for .* is already at ${c.opening.txHash}#0; pass it to vector_build_reputation_stake as opening_ref`),
     );
-    // Another agent's opening output does not count.
-    const other = uplcEvaluatingProvider([c.wallet, STAKE_B.opening, c.registry, ...MODULE], Number(c.tx.invalidBefore));
-    await assert.doesNotReject(buildStakeOpening(await lucidForAddress(other, c.ownerAddress), other, { changeAddress: c.ownerAddress, agentId: c.agentId, capabilities: c.capabilities, nowMs: lowerBound(c) }));
+    // Another agent's opening output does not count, nor an output that holds a token (an opening output holds lovelace only).
+    const otherAgent = uplcEvaluatingProvider([c.wallet, STAKE_B.opening, c.registry, ...MODULE], Number(c.tx.invalidBefore));
+    await assert.doesNotReject(buildStakeOpening(await lucidForAddress(otherAgent, c.ownerAddress), otherAgent, { changeAddress: c.ownerAddress, agentId: c.agentId, capabilities: c.capabilities, nowMs: lowerBound(c) }));
+    const withToken: UTxO = { ...c.opening, txHash: 'c3'.repeat(32), assets: { lovelace: 2_000_000n, [`${REPUTATION_SCRIPT_HASH}aa`]: 1n } };
+    const tokened = uplcEvaluatingProvider([c.wallet, withToken, c.registry, ...MODULE], Number(c.tx.invalidBefore));
+    await assert.doesNotReject(buildStakeOpening(await lucidForAddress(tokened, c.ownerAddress), tokened, { changeAddress: c.ownerAddress, agentId: c.agentId, capabilities: c.capabilities, nowMs: lowerBound(c) }));
   });
 });

@@ -20,6 +20,10 @@ describe('a node whose chain start is not Vector mainnet\'s', () => {
     const node = Object.assign(onTestnetClock(), { getSystemStartMs: async () => { throw new Error('connect ECONNREFUSED https://ogmios.internal.example'); } });
     await assert.rejects(stakeClock(node, Date.now()), (err: Error) => /Could not read the chain clock from the node/.test(err.message) && !err.message.includes('ogmios.internal.example'));
   });
+  test('a node that answers with something that is not a clock is refused as such, and nothing is cached', async () => {
+    const node = Object.assign(onTestnetClock(), { getSystemStartMs: async () => Number.NaN });
+    await assert.rejects(stakeClock(node, Date.now()), /The node did not report a usable chain start time \(got NaN\)/);
+  });
   test('the stake time is refused, naming both starts, and step 1 locks nothing', async () => {
     const node = onTestnetClock();
     await assert.rejects(stakeClock(node, TESTNET_ZERO + 100_000), /The node reports a chain start of 2025-07-09T10:38:04\.000Z, not Vector mainnet's 2025-08-29T16:40:00\.000Z\. The reputation module these tools build for is deployed on mainnet only; nothing was built\./);

@@ -27,6 +27,7 @@ import { REGISTRY_POLICY_ID, getRegistryAddress, parseDid, resolveAgentUtxo } fr
 import { formatOutRef, parseOutRef } from './marketplace-datum.js';
 import { nodeFailure } from './marketplace-lineage.js';
 import { reserveCollateralInputs, assertCollateral, assertWalletIs } from './marketplace-build.js';
+import { COLLATERAL_MIN_LOVELACE } from './marketplace-constants.js';
 import { cell } from './marketplace-shared.js';
 
 // ─── Deployment (Vector mainnet) ───────────────────────────────────────────
@@ -51,6 +52,8 @@ export const REPUTATION_REFS_TOKEN_POLICY = '09dce01a3c2f2fddeda34a547bb4a5ef9f1
 export const VECTOR_MAINNET_ZERO_TIME_MS = 1_756_485_600_000;
 /** What step 1 locks, and the stake_amount its datum names: the SDK's opening output (client.py, min_lovelace = 2_000_000). */
 export const STAKE_OPENING_LOVELACE = 2_000_000n;
+/** What the two steps' fees are allowed together when step 1 checks that the wallet can go on to make the stake (about 0.2 + 0.6 units). */
+export const STAKE_FEE_ALLOWANCE_LOVELACE = 1_000_000n;
 /** Step 2 is valid for 600 slots from its lower bound, as the SDK builds it (ttl = current_slot + 600). */
 export const STAKE_VALIDITY_MS = 600_000;
 /** How far the node's tip may be from this server's clock before the stake's time is not trusted (the deployments' own check, 120 s). */
@@ -228,8 +231,8 @@ export async function stakeClock(provider: Provider, nowMs: number): Promise<num
 }
 
 /**
- * What the reputation address holds for an agent: its stake (the output carrying its stake token; the module keeps one per agent, and
- * a second CreateStake would mint the token twice) and its opening outputs (lovelace only, with a stake datum naming the agent).
+ * What the reputation address holds for an agent: its stake (the output carrying its stake token; these tools build one stake per agent)
+ * and its opening outputs (lovelace only, with a stake datum naming the agent).
  */
 async function agentOutputs(provider: Provider, agentDidHex: string): Promise<{ stake?: UTxO; openings: UTxO[] }> {
   const unit = stakeTokenUnit(agentDidHex);
@@ -244,7 +247,7 @@ async function agentOutputs(provider: Provider, agentDidHex: string): Promise<{ 
 
 /** Refuses when the agent already has a stake. */
 function assertNoStake(held: { stake?: UTxO }, agentId: string): void {
-  if (held.stake) throw new Error(`${agentId} already has a stake, at ${formatOutRef(held.stake.txHash, held.stake.outputIndex)}. The module keeps one stake per agent; nothing was built.`);
+  if (held.stake) throw new Error(`${agentId} already has a stake, at ${formatOutRef(held.stake.txHash, held.stake.outputIndex)}. These tools build one stake per agent; nothing was built.`);
 }
 
 // ─── Step 1: the opening output ────────────────────────────────────────────
@@ -261,8 +264,11 @@ export function planStakeOpening(record: RegistryRecord, callerPkh: string, caps
   return { datum, datumHex: encodeStakeDatum(datum), lovelace: STAKE_OPENING_LOVELACE };
 }
 
-/** The planned output must be output 0 (the ref the next step is given is `<txHash>#0`): its address, inline datum and at least its lovelace. */
-function outputZero(txCbor: string, expected: { datumHex: string; lovelace: bigint; unit?: string }): bigint {
+/**
+ * The planned output must be output 0 (the ref the next step is given is `<txHash>#0`): its address, inline datum, at least its lovelace
+ * and, for the stake, exactly one stake token. Returns the lovelace output 0 holds.
+ */
+export function stakeOutputZero(txCbor: string, expected: { datumHex: string; lovelace: bigint; unit?: string }): bigint {
   const outputs = CML.Transaction.from_cbor_hex(txCbor).body().outputs();
   const first = outputs.len() > 0 ? outputs.get(0) : undefined;
   const coin = first ? BigInt(first.amount().coin().toString()) : -1n;
@@ -279,15 +285,34 @@ function outputZero(txCbor: string, expected: { datumHex: string; lovelace: bigi
   return coin;
 }
 
+/**
+ * Pure. Refuses step 1 for a wallet that could not go on to make the stake: besides the 2-unit opening output it must hold the module's
+ * minimum and about 1 unit for the fees of the two steps (the opening output returns as change in step 2), and a pure output of at least
+ * 5 units for step 2's collateral.
+ */
+export function assertMeansForStake(utxos: UTxO[], minSelfStake: bigint): void {
+  const units = (l: bigint) => (Number(l) / 1_000_000).toFixed(6);
+  const total = utxos.reduce((sum, u) => sum + u.assets.lovelace, 0n);
+  const needed = STAKE_OPENING_LOVELACE + minSelfStake + STAKE_FEE_ALLOWANCE_LOVELACE;
+  if (total < needed) {
+    throw new Error(`The wallet holds ${units(total)} units; a stake needs ${units(needed)}: the 2-unit opening output, the module's minimum of ${units(minSelfStake)} and about 1 unit of fees for the two steps. Nothing was built.`);
+  }
+  if (!utxos.some((u) => Object.keys(u.assets).every((k) => k === 'lovelace') && u.assets.lovelace >= COLLATERAL_MIN_LOVELACE)) {
+    throw new Error('The wallet holds no pure output of at least 5 units, which step 2 needs as collateral (it runs a script). Nothing was built.');
+  }
+}
+
 export type StakeOpeningBuild = VectorUnsignedBuildResult & {
   openingRef: string; agentDidHex: string; ownerPkh: string; capabilities: string[]; lovelace: bigint; collateralKept: boolean;
 };
 
 /**
- * Step 1 of 2. Builds the unsigned transaction that locks the opening output at the reputation address. Everything step 2 will check
- * about the agent is checked first (registry record, owner, capabilities, no stake yet, the chain clock), so the 2 units are not locked
- * for a stake that cannot be made; and an agent that already has an opening output is pointed at it instead of being given a second. Leaves the wallet's smallest pure 5-unit output alone when it can: step 2 runs a script and needs it as
- * collateral. Nothing is signed or submitted.
+ * Step 1 of 2. Builds the unsigned transaction that locks the opening output at the reputation address. What step 2 will check about the
+ * agent is checked first (registry record, owner, capabilities, no stake yet, the chain clock, the module's outputs), and so is the
+ * wallet's means for step 2 (assertMeansForStake), so that the 2 units are not locked by a wallet that cannot then make the stake. An
+ * agent that already has an opening output is pointed at it instead of being given a second. Leaves the wallet's smallest pure 5-unit
+ * output alone when it can: step 2 needs it as collateral. The wallet must be the one bound to changeAddress. Nothing is signed or
+ * submitted.
  */
 export async function buildStakeOpening(
   lucid: LucidEvolution, provider: Provider, p: { changeAddress: string; agentId: string; capabilities: string[]; nowMs?: number },
@@ -302,9 +327,13 @@ export async function buildStakeOpening(
   const open = held.openings[0];
   if (open) throw new Error(`An opening output for ${p.agentId} is already at ${formatOutRef(open.txHash, open.outputIndex)}; pass it to vector_build_reputation_stake as opening_ref. Nothing was built.`);
   const at = await stakeClock(provider, p.nowMs ?? Date.now());
+  const refs = await readModuleReferences(provider);
+  await assertWalletIs(lucid, p.changeAddress);
+  const wallet = await lucid.wallet().getUtxos();
+  assertMeansForStake(wallet, refs.stakeParams.minSelfStake);
   const plan = planStakeOpening(record, callerPkh, capsHex, at, p.agentId);
   const assemble = () => lucid.newTx().pay.ToAddressWithData(REPUTATION_ADDRESS, { kind: 'inline', value: plan.datumHex }, { lovelace: plan.lovelace });
-  const inputs = reserveCollateralInputs(await lucid.wallet().getUtxos(), plan.lovelace);
+  const inputs = reserveCollateralInputs(wallet, plan.lovelace);
   let completed: TxSignBuilder | undefined;
   let reservedFailure: unknown;
   if (inputs) {
@@ -315,7 +344,7 @@ export async function buildStakeOpening(
     try { completed = await assemble().complete({}); } catch (err) { throw inputs ? new ErrorWithCause(errorText(err), { cause: reservedFailure }) : err; }
   }
   const r = toBuildResult(completed);
-  const lovelace = outputZero(r.txCbor, plan);
+  const lovelace = stakeOutputZero(r.txCbor, plan);
   return {
     ...r, openingRef: formatOutRef(r.txHash, 0), agentDidHex: record.agentDidHex, ownerPkh: callerPkh,
     capabilities: capsHex.map(capabilityText), lovelace, collateralKept,
@@ -332,7 +361,7 @@ export interface StakePlan {
 /**
  * Pure. What CreateStake must say: the stake datum (owner = the record's owner, the capabilities, the module's minimum, last_updated =
  * the lower bound, no history), the token, the redeemers and the validity range. The stake is exactly the module's minimum: nothing here
- * or in the SDK decreases a stake, and the validator lets an owner decrease one only down to that minimum, so more would stay locked too.
+ * or in the SDK decreases a stake, and the deployed validator lets an owner decrease one only down to that minimum.
  * The opening output must name the same agent: the validator finds the stake output by the token of the agent the opening output names.
  */
 export function planStake(record: RegistryRecord, callerPkh: string, capsHex: string[], params: StakeParams, opening: StakeDatum, validFromMs: number, agentId: string): StakePlan {
@@ -401,10 +430,10 @@ export async function buildStake(
     .validTo(plan.validTo)
     .complete({ localUPLCEval: false });
   const r = toBuildResult(completed);
-  outputZero(r.txCbor, { datumHex: plan.datumHex, lovelace: plan.stakeLovelace, unit: plan.tokenUnit });
+  const stakeLovelace = stakeOutputZero(r.txCbor, { datumHex: plan.datumHex, lovelace: plan.stakeLovelace, unit: plan.tokenUnit });
   return {
     ...r, stakeRef: formatOutRef(r.txHash, 0), openingRef: opening.ref, agentDidHex: record.agentDidHex, ownerPkh: callerPkh,
-    capabilities: capsHex.map(capabilityText), stakeLovelace: plan.stakeLovelace, tokenUnit: plan.tokenUnit,
+    capabilities: capsHex.map(capabilityText), stakeLovelace, tokenUnit: plan.tokenUnit,
     lastUpdated: plan.datum.last_updated, validTo: plan.validTo, stakeCooldown: refs.stakeParams.stakeCooldown,
   };
 }

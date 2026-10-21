@@ -137,7 +137,7 @@ describe('vector_build_reputation_stake_open and vector_build_reputation_stake',
     const wallet: UTxO[] = [{ ...STAKE_A.wallet, txHash: 'ab'.repeat(32) }, { ...STAKE_A.wallet, txHash: 'ab'.repeat(32), outputIndex: 2, assets: { lovelace: 5_000_000n } }];
     node = uplcEvaluatingProvider([...wallet, STAKE_A.registry, PARAMS_UTXO, CROSS_REFS_UTXO, refScript], nowSlot());
     const t = await call('vector_build_reputation_stake_open', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: STAKE_A.capabilities });
-    assert.ok(t.startsWith('# Unsigned Stake Opening Built (Not Submitted), step 1 of 2\n'), t.slice(0, 300));
+    assert.ok(t.startsWith('# Unsigned Stake Opening Built (Not Submitted), step 1 of 2\n\n**Hold:** Do not use on mainnet until the Module-3 reputation module is fixed and redeployed.\n'), t.slice(0, 300));
     const j = jsonOf(t);
     assert.equal(j.opening_ref, `${j.tx_hash}#0`);
     assert.deepEqual(j.capabilities, STAKE_A.capabilities);
@@ -148,8 +148,9 @@ describe('vector_build_reputation_stake_open and vector_build_reputation_stake',
     const n = stakeNode([STAKE_A.opening]);
     node = n;
     const t = await call('vector_build_reputation_stake', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: STAKE_A.capabilities, opening_ref: `${STAKE_A.opening.txHash}#0` });
-    assert.ok(t.startsWith('# Unsigned Reputation Stake Built (Not Submitted), step 2 of 2\n'), t.slice(0, 300));
-    assert.match(t, new RegExp(`\\*\\*Stake locked:\\*\\* 10\\.000000 with stake token \`${stakeTokenUnit(STAKE_A.agentDidHex)}\`\\. The deployed validator lets an owner decrease a stake only down to the module's minimum, so a stake at the minimum stays locked`));
+    assert.ok(t.startsWith('# Unsigned Reputation Stake Built (Not Submitted), step 2 of 2\n\n**Hold:** Do not use on mainnet until the Module-3 reputation module is fixed and redeployed.\n'), t.slice(0, 300));
+    assert.ok(t.includes(`**Stake locked:** 10.000000 with stake token \`${stakeTokenUnit(STAKE_A.agentDidHex)}\`. As deployed, the owner cannot withdraw a stake at the module's minimum; the module's oracle key can consume all of it through ClaimDecayRefund about 163 s after its last update; and a falsified capability slashes 1/N of it, where N is the number of staked capabilities (all of it when N = 1).\n`));
+    assert.match(t, /\*\*Valid until:\*\* \S+ \(sign and submit before then, or build it again\)/);
     const j = jsonOf(t);
     assert.equal(j.stake_ref, `${j.tx_hash}#0`);
     assert.equal(j.stake_lovelace, '10000000');
