@@ -180,6 +180,84 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
+  "vector_build_marketplace_post_advert": {
+    "description": "Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace: posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert. Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key. The transaction is valid for 5 minutes. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your supplier wallet address: its key becomes the advert's supplier key, the only key that can retire the advert. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "capability_id": {
+          "description": "Capability id, at most 64 bytes, outside the fleet namespaces llm.text.generate.*, llm.chat.*, ocr.page.extract.* and audio.synthesize.* (for example research.summary.v1). A reputation stake names the same id.",
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "description": "Model or service version the supplier runs, at most 64 bytes",
+          "type": "string",
+          "minLength": 1
+        },
+        "max_output_tokens": {
+          "description": "Largest output the supplier commits to, in tokens (0 if not token-based)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_processing_ms": {
+          "description": "Processing window in milliseconds, at most 86400000 (24 h): how long the supplier has to submit a job",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "price_lovelace": {
+          "description": "Price per job in lovelace (1 AP3X = 1000000)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "supplier_bond_lovelace": {
+          "description": "Supplier bond in lovelace (default 1000000). A buyer locks price + both bonds per job; on Accept the supplier receives price + supplier bond. It is also the advert's deposit, raised to 2 units",
+          "default": 1000000,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "buyer_bond_lovelace": {
+          "description": "Buyer bond in lovelace (default 1000000); it returns to the buyer on Accept",
+          "default": 1000000,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "endpoint_url": {
+          "description": "https URL of your supplier runtime, at most 64 bytes (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
+          "type": "string",
+          "minLength": 1
+        },
+        "detail_uri": {
+          "description": "Optional https URL of your manifest (agent.json), at most 64 bytes",
+          "default": "",
+          "type": "string"
+        },
+        "detail_hash": {
+          "description": "Optional sha256 (64 hex) of the bytes detail_uri serves. Omitted with a detail_uri: the tool fetches detail_uri once and uses the sha256 of the bytes served. Omitted without one: the sha256 of no bytes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeAddress",
+        "capability_id",
+        "model",
+        "max_output_tokens",
+        "max_processing_ms",
+        "price_lovelace",
+        "endpoint_url"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
   "vector_build_marketplace_post_escrow": {
     "description": "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Template-contract suppliers only in this release. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref, the same payload (the JSON block echoes it verbatim) and your wallet address as buyerAddress. The transaction is valid for at most 180 s, so sign and submit it at once. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
     "inputSchema": {
@@ -230,6 +308,27 @@
       "required": [
         "changeAddress",
         "escrow_ref"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_marketplace_retire_advert": {
+    "description": "Build an UNSIGNED transaction that retires your supplier advert on the Vector agents marketplace: consumes the advert and returns its deposit to changeAddress. Only the advert's supplier key can retire it. Once it confirms, buyers can no longer hire the advert, and a buyer whose escrow against it is posted but whose job is not yet sent can no longer send it (that buyer reclaims everything after deliver_by): retire when no job is in flight. Takes no key material. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "The supplier wallet address whose key the advert names. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "advert_ref": {
+          "description": "Advert '<txid>#<index>', as vector_build_marketplace_post_advert returned it",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeAddress",
+        "advert_ref"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
@@ -314,6 +413,73 @@
         "capabilities",
         "framework",
         "endpoint"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_reputation_stake": {
+    "description": "Build an UNSIGNED transaction that creates your agent's reputation self-stake on Vector (step 2 of 2): consumes the opening output from vector_build_reputation_stake_open, mints the agent's stake token and locks the module's minimum self-stake (read from the module's parameters on the ledger; 10 units on mainnet today) behind the named capabilities, with your key as its owner. The deployed validator lets an owner decrease a stake only down to the module's minimum, so a stake at the minimum stays locked at the reputation address: no tool here, and no method of the reference SDK, withdraws it. A resolved challenge that falsifies a staked capability can slash part of it. The stake's time is the ledger's tip: sign and submit within 10 minutes. Mainnet only. Takes no key material. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "The SAME owner wallet address used in step 1. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "agent_id": {
+          "description": "Agent DID: did:vector:agent:{policyId}:{nftAssetName}, as vector_build_register_agent returned it",
+          "type": "string"
+        },
+        "capabilities": {
+          "description": "Capabilities to stake on: each must be one the agent's registry record lists, exactly (vector_get_agent_profile shows them); for a supplier, the capability_id of its advert",
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "opening_ref": {
+          "description": "The CONFIRMED opening output '<txid>#0' that vector_build_reputation_stake_open returned",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeAddress",
+        "agent_id",
+        "capabilities",
+        "opening_ref"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_reputation_stake_open": {
+    "description": "Build an UNSIGNED transaction that opens a reputation self-stake for your registered agent on Vector (step 1 of 2): locks a 2-unit opening output at the reputation (Module-3) validator, naming the agent and the capabilities to stake on. The validator mints a stake token only when it consumes an output of its own, so step 2, vector_build_reputation_stake, consumes this one and the 2 units return as change. Checked first, so the 2 units are not locked for a stake that cannot be made: the agent's registry record lists every capability, changeAddress is the record's owner (the same key a supplier's adverts name), the agent has no stake yet, and the node's clock is Vector mainnet's. An agent that already has an opening output is pointed at it instead. Mainnet only. Takes no key material. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "The agent owner's wallet address (the wallet that registered the agent). Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "agent_id": {
+          "description": "Agent DID: did:vector:agent:{policyId}:{nftAssetName}, as vector_build_register_agent returned it",
+          "type": "string"
+        },
+        "capabilities": {
+          "description": "Capabilities to stake on: each must be one the agent's registry record lists, exactly (vector_get_agent_profile shows them); for a supplier, the capability_id of its advert",
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "changeAddress",
+        "agent_id",
+        "capabilities"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
