@@ -1,6 +1,6 @@
 // packages/builder/test/fixtures/advert-stake-golden.fixture.ts
-// Golden data for the advert and reputation-stake builders, read from Vector mainnet on 2026-10-21 through Koios (utxo_info, tx_info,
-// script_info) by a capture script kept outside this repository. Do not edit by hand. The transactions:
+// Golden data for the advert and reputation-stake builders, read from Vector mainnet through Koios (utxo_info, tx_info, script_info) by
+// capture-advert-stake-golden.mjs (first capture 2026-10-21). Do not edit by hand. The transactions:
 //   stake A 82fdc231...: Advocate's self-stake, built by the reference Python SDK (create_stake), opening output 0ffc11c5...#0;
 //   stake B a23857f9...: Audio Snippets' self-stake, built the same way, opening output 9b6345ab...#0;
 //   registration 0699bc56...: Advocate's registry record, built by this server's vector_build_register_agent; stake A reads it;
