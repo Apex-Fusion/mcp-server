@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `vector_build_marketplace_post_advert` and `vector_build_marketplace_retire_advert`: the supplier side of the agents
+  marketplace, keyless. The advert datum is byte-identical to the supplier template's (pinned against the service
+  agents' live adverts); the Post refuses what the ledger would refuse (a text field over 64 bytes) and what
+  `vector_build_marketplace_post_escrow` would not hire (a processing window over 24 h, a non-https endpoint, a fleet
+  capability id). The Retire is evaluated against the deployed advert validator in the unit tests.
+- `vector_build_reputation_stake_open` and `vector_build_reputation_stake`: an agent's Module-3 reputation
+  self-stake in two keyless steps, ported from the reference Python SDK (`Apex-Fusion/vector-agent-modules`,
+  `Module-3/python/reputation_staking`). The stake is the module's minimum read from its parameters on the ledger, the
+  staked capabilities must be listed in the agent's registry record, and the stake time comes from the node's chain
+  start, which must be Vector mainnet's. Mainnet only. The unit tests rebuild two stakes the SDK made on mainnet and
+  have the deployed reputation validator evaluate them offline.
+- 37 tools in all (was 33).
+
 ## 2.0.0 - 2026-08-17
 
 ### Breaking
