@@ -17,7 +17,9 @@
 // Rule 6 is where the SDK's clock went wrong on mainnet: it stamps the time from a genesis constant that is testnet's, and the datum lands
 // about 51 days off. Here the time comes from the node's own chain start, and that start is pinned to Vector mainnet's and held against
 // this server's wall clock before anything is built.
-import { Data, Constr, CML, fromText, toText, validatorToScriptHash, credentialToAddress, getAddressDetails } from '@lucid-evolution/lucid';
+import {
+  Data, Constr, CML, fromText, toText, validatorToScriptHash, credentialToAddress, getAddressDetails, calculateMinLovelaceFromUTxO,
+} from '@lucid-evolution/lucid';
 import type { LucidEvolution, Provider, TxSignBuilder, UTxO } from '@lucid-evolution/lucid';
 import { blake2b } from '@noble/hashes/blake2b';
 import type { VectorUnsignedBuildResult } from '@apexfusion/vector-mcp-shared/types';
@@ -288,14 +290,24 @@ export function stakeOutputZero(txCbor: string, expected: { datumHex: string; lo
 /**
  * Pure. Refuses step 1 for a wallet that could not go on to make the stake: besides the 2-unit opening output it must hold the module's
  * minimum and about 1 unit for the fees of the two steps (the opening output returns as change in step 2), and a pure output of at least
- * 5 units for step 2's collateral.
+ * 5 units for step 2's collateral. Only lovelace the wallet can spend counts: an output that holds tokens keeps the ledger minimum for
+ * them (calculateMinLovelaceFromUTxO at coinsPerUtxoByte, as Lucid sizes its outputs), because that lovelace goes with the tokens into
+ * a change output.
  */
-export function assertMeansForStake(utxos: UTxO[], minSelfStake: bigint): void {
+export function assertMeansForStake(utxos: UTxO[], minSelfStake: bigint, coinsPerUtxoByte: bigint): void {
   const units = (l: bigint) => (Number(l) / 1_000_000).toFixed(6);
-  const total = utxos.reduce((sum, u) => sum + u.assets.lovelace, 0n);
+  let spendable = 0n;
+  let kept = 0n;
+  for (const u of utxos) {
+    const minimum = Object.keys(u.assets).some((k) => k !== 'lovelace') ? calculateMinLovelaceFromUTxO(coinsPerUtxoByte, u) : 0n;
+    const keep = minimum < u.assets.lovelace ? minimum : u.assets.lovelace;
+    kept += keep;
+    spendable += u.assets.lovelace - keep;
+  }
   const needed = STAKE_OPENING_LOVELACE + minSelfStake + STAKE_FEE_ALLOWANCE_LOVELACE;
-  if (total < needed) {
-    throw new Error(`The wallet holds ${units(total)} units; a stake needs ${units(needed)}: the 2-unit opening output, the module's minimum of ${units(minSelfStake)} and about 1 unit of fees for the two steps. Nothing was built.`);
+  if (spendable < needed) {
+    const besides = kept > 0n ? ` it can spend, besides ${units(kept)} that its outputs with tokens must keep` : '';
+    throw new Error(`The wallet holds ${units(spendable)} units${besides}; a stake needs ${units(needed)}: the 2-unit opening output, the module's minimum of ${units(minSelfStake)} and about 1 unit of fees for the two steps. Nothing was built.`);
   }
   if (!utxos.some((u) => Object.keys(u.assets).every((k) => k === 'lovelace') && u.assets.lovelace >= COLLATERAL_MIN_LOVELACE)) {
     throw new Error('The wallet holds no pure output of at least 5 units, which step 2 needs as collateral (it runs a script). Nothing was built.');
@@ -330,7 +342,10 @@ export async function buildStakeOpening(
   const refs = await readModuleReferences(provider);
   await assertWalletIs(lucid, p.changeAddress);
   const wallet = await lucid.wallet().getUtxos();
-  assertMeansForStake(wallet, refs.stakeParams.minSelfStake);
+  // The protocol parameters Lucid read from the node when lucidForAddress made it (as slotClockOf reads its provider).
+  const params = lucid.config().protocolParameters;
+  if (!params) throw new Error('Lucid instance has no protocol parameters - build it via lucidForAddress first.');
+  assertMeansForStake(wallet, refs.stakeParams.minSelfStake, params.coinsPerUtxoByte);
   const plan = planStakeOpening(record, callerPkh, capsHex, at, p.agentId);
   const assemble = () => lucid.newTx().pay.ToAddressWithData(REPUTATION_ADDRESS, { kind: 'inline', value: plan.datumHex }, { lovelace: plan.lovelace });
   const inputs = reserveCollateralInputs(wallet, plan.lovelace);

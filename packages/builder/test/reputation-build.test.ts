@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, sep } from 'node:path';
-import { CML, Constr, Data, fromText, getAddressDetails, validatorToScriptHash, credentialToAddress } from '@lucid-evolution/lucid';
+import { CML, Constr, Data, fromText, getAddressDetails, validatorToScriptHash, credentialToAddress, calculateMinLovelaceFromUTxO } from '@lucid-evolution/lucid';
 import type { UTxO } from '@lucid-evolution/lucid';
 import { blake2b } from '@noble/hashes/blake2b';
 import { lucidForAddress } from '../src/vector/build.ts';
@@ -31,6 +31,7 @@ import {
   STAKE_A, STAKE_B, PARAMS_UTXO, CROSS_REFS_UTXO, REPUTATION_REF_UTXO_BARE, REPUTATION_SCRIPT_CBOR, REGISTRATION_TX, ADVERT_POSTS,
 } from './fixtures/advert-stake-golden.fixture.ts';
 import { uplcEvaluatingProvider, UPLC_PATH } from './fixtures/uplc-node.fixture.ts';
+import { fixtureProtocolParameters } from './fixtures/fixture-provider.ts';
 
 const ZERO = VECTOR_MAINNET_ZERO_TIME_MS;
 const REF_SCRIPT: UTxO = { ...REPUTATION_REF_UTXO_BARE, scriptRef: { type: 'PlutusV3', script: REPUTATION_SCRIPT_CBOR } };
@@ -445,6 +446,16 @@ describe('buildStakeOpening (step 1)', () => {
     await assert.rejects(open(withWallet([at(12_999_999n)])), /a stake needs 13\.000000/, 'one lovelace short');
     await assert.rejects(open(withWallet([at(4_000_000n), at(4_500_000n, 1), at(4_500_000n, 2)])), /no pure output of at least 5 units, which step 2 needs as collateral/);
     await assert.rejects(open(withWallet([at(20_000_000n, 0, { [`${'ab'.repeat(28)}74`]: 1n })])), /no pure output of at least 5 units/, 'an output that carries a token is not collateral');
+    // Lovelace that an output with tokens must keep does not count. Four outputs of 2 units with six tokens each are valid outputs,
+    // but most of their 8 units must stay with the tokens: when it was counted, step 1 locked 2 units here, and step 2 then failed
+    // because its change output could not hold the tokens' minimum.
+    const tokens = (tag: string): Record<string, bigint> => Object.fromEntries([0, 1, 2, 3, 4, 5].map((i) => [`${'ab'.repeat(28)}${fromText(`${tag}${i}`.padEnd(32, '.'))}`, 1n]));
+    const tokenOutputs = [1, 2, 3, 4].map((i) => at(2_000_000n, i, tokens(`t${i}`)));
+    const { coinsPerUtxoByte } = fixtureProtocolParameters();
+    for (const u of tokenOutputs) assert.ok(calculateMinLovelaceFromUTxO(coinsPerUtxoByte, u) < u.assets.lovelace, 'a valid output: 2 units hold its six tokens');
+    await assert.rejects(open(withWallet([at(5_000_000n), ...tokenOutputs])),
+      /The wallet holds \d+\.\d{6} units it can spend, besides \d+\.\d{6} that its outputs with tokens must keep; a stake needs 13\.000000: /);
+    await assert.doesNotReject(open(withWallet([at(5_000_000n), at(12_000_000n, 1, tokens('u'))])), 'tokens with enough lovelace beside them');
     await assert.doesNotReject(open(withWallet([at(13_000_000n)])), 'exactly enough');
   });
   test('refuses a wallet that is not the one bound to changeAddress', async () => {
