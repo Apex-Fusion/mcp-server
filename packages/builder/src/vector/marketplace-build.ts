@@ -302,14 +302,14 @@ async function escrowRefScript(provider: Provider): Promise<UTxO> {
 }
 
 /** Lucid picks the collateral itself. This only turns a wallet with nothing suitable into a readable refusal instead of a ledger error. */
-function assertCollateral(utxos: UTxO[]) {
+export function assertCollateral(utxos: UTxO[]) {
   if (!utxos.some((u) => Object.keys(u.assets).every((k) => k === 'lovelace') && u.assets.lovelace >= COLLATERAL_MIN_LOVELACE)) {
     throw new Error('Collateral required: the wallet must hold one pure output of at least 5 units.');
   }
 }
 
 /** The payout goes to changeAddress but Lucid sends its own change to the wallet it is bound to: the two must be one address, or the buyer's money would be paid out to two places. */
-async function assertWalletIs(lucid: LucidEvolution, changeAddress: string): Promise<void> {
+export async function assertWalletIs(lucid: LucidEvolution, changeAddress: string): Promise<void> {
   if ((await lucid.wallet().address()) !== changeAddress) {
     throw new Error('changeAddress is not the address this wallet is bound to: the payout would go to changeAddress but Lucid\'s change to the wallet\'s own address, so nothing was built. Bind the wallet to changeAddress.');
   }

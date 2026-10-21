@@ -25,3 +25,21 @@ export const indexerUrlFrom = (configured: string | undefined): string => (confi
 export const INDEXER_URL = indexerUrlFrom(process.env.VECTOR_MARKETPLACE_INDEXER_URL);
 /** Redeemer constructor indices of the escrow validator (escrow.ak). */
 export const REDEEMER = { Claim: 0, Submit: 1, Accept: 2, Reclaim: 3, Release: 4 } as const;
+/** Redeemer constructor indices of the advert validator (advert.ak, types.ak AdvertRedeemer). PostAdvert never reaches the validator: creating an output runs no script. */
+export const ADVERT_REDEEMER = { PostAdvert: 0, UpdateAdvert: 1, RetireAdvert: 2 } as const;
+/**
+ * The least an advert output locks: the supplier template's floor (vector-agent-template c4c378a, liveCbor.ts MIN_UTXO_LOVELACE). The
+ * template locks the supplier bond raised to it, and Lucid raises the output further to the ledger minimum for its datum when that is
+ * higher (the live adverts lock 2,000,000 to 2,047,250). The deposit returns to the supplier on Retire.
+ */
+export const ADVERT_DEPOSIT_FLOOR_LOVELACE = 2_000_000n;
+/** An advert Post or Retire is valid from 60 s before the build to 5 min after it, as the supplier template builds them. */
+export const ADVERT_VALID_BEFORE_MS = 60_000;
+export const ADVERT_VALID_AFTER_MS = 300_000;
+/**
+ * The longest bytestring a datum may hold as one piece: the ledger refuses a definite-length bytestring over 64 bytes in Plutus data,
+ * and the marketplace's encoder writes each advert field as one. So each text field of an advert holds at most 64 bytes of UTF-8.
+ */
+export const DATUM_BYTES_MAX = 64;
+/** sha256 of no bytes: the detail_hash the supplier template writes when an advert has no detail URI. */
+export const EMPTY_DETAIL_HASH = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
