@@ -160,6 +160,25 @@ const cborConstr = (alt: number, fields: string[]): string => 'd8' + byteHex(0x7
 const some = (field: string): string => cborConstr(0, [field]);
 const none = (): string => cborConstr(1, []);
 
+/**
+ * The advert datum as the marketplace writes it (agents-marketplace packages/shared/src/cbor/AdvertDatum.ts, the encoder the supplier
+ * template vendors): the same framing as encodeEscrowDatum, every integer as 1b + 8 bytes, the four text fields as their UTF-8 bytes,
+ * status as constructor 0 (Active) or 1 (Retired). Byte-identical to the live adverts it is pinned against in
+ * test/marketplace-advert.test.ts. It frames what it is given; the limits a Post must respect (64 bytes per field) are planPostAdvert's.
+ */
+export function encodeAdvertDatum(d: AdvertDatum): string {
+  const statusAlt = d.status === 'Active' ? 0 : d.status === 'Retired' ? 1 : -1;
+  if (statusAlt < 0) throw new Error(`advert.status: unknown status "${String(d.status)}"`);
+  return cborConstr(0, [
+    cborBytes(d.supplier_pkh), cborBytes(fromText(d.capability_id)), cborBytes(fromText(d.model)),
+    cborUint(BigInt(d.max_output_tokens)), cborUint(BigInt(d.max_processing_ms)),
+    cborUint(d.price_lovelace), cborUint(d.supplier_bond_lovelace), cborUint(d.buyer_bond_lovelace),
+    cborBytes(fromText(d.endpoint_url)), cborBytes(fromText(d.detail_uri)), cborBytes(d.detail_hash),
+    cborUint(BigInt(d.advertised_at)),
+    cborConstr(statusAlt, []),
+  ]);
+}
+
 export function encodeEscrowDatum(d: EscrowDatum): string {
   const stateAlt = STATES.indexOf(d.state);
   if (stateAlt < 0) throw new Error(`escrow.state: unknown state "${String(d.state)}"`);

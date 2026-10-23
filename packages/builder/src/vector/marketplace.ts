@@ -1,8 +1,9 @@
 // packages/builder/src/vector/marketplace.ts
-// The marketplace family, as registerVectorTools sees it: one entry that registers every marketplace tool. Three files, one per
+// The marketplace family, as registerVectorTools sees it: one entry that registers every marketplace tool. Four files, one per
 // family: the read tools (marketplace-read-tools.ts: indexer and Koios, plus the advert's manifest), the keyless build tools
-// (marketplace-build-tools.ts: escrow post, accept, reclaim) and the transport tools (marketplace-transport-tools.ts: send a job,
-// poll it, check its receipt; the only ones that call a supplier). Same conventions as agent-network.ts.
+// (marketplace-build-tools.ts: escrow post, accept, reclaim), the transport tools (marketplace-transport-tools.ts: send a job,
+// poll it, check its receipt; the only ones that call a supplier) and the supplier's advert tools (marketplace-advert-tools.ts:
+// advert post and retire). Same conventions as agent-network.ts.
 // What the families share lives in marketplace-shared.ts. What is decided here is what they share at registration: the caller's
 // rate limiter (one budget of calls per minute for all marketplace tools of an identity) and the node the build and transport tools
 // talk to.
@@ -16,6 +17,7 @@ import { rateGate } from './marketplace-shared.js';
 import { registerMarketplaceReadTools } from './marketplace-read-tools.js';
 import { registerMarketplaceBuildTools } from './marketplace-build-tools.js';
 import { registerMarketplaceTransportTools } from './marketplace-transport-tools.js';
+import { registerMarketplaceAdvertTools } from './marketplace-advert-tools.js';
 
 function newProvider() { return new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL }); }
 
@@ -32,4 +34,5 @@ export function registerMarketplaceTools(
   registerMarketplaceReadTools(server, gate);
   registerMarketplaceBuildTools(server, gate, provider);
   registerMarketplaceTransportTools(server, gate, provider);
+  registerMarketplaceAdvertTools(server, gate, provider);
 }

@@ -739,12 +739,13 @@ describe('the build tools\' error text and rate limit', () => {
 });
 
 describe('registration', () => {
-  test('registers exactly the three read tools, the three build tools and the three transport tools', () => {
-    const nine = [
-      'vector_build_marketplace_accept', 'vector_build_marketplace_post_escrow', 'vector_build_marketplace_reclaim',
+  test('registers exactly the three read tools, the three build tools, the three transport tools and the two advert tools', () => {
+    const eleven = [
+      'vector_build_marketplace_accept', 'vector_build_marketplace_post_advert', 'vector_build_marketplace_post_escrow', 'vector_build_marketplace_reclaim',
+      'vector_build_marketplace_retire_advert',
       'vector_marketplace_get_job', 'vector_marketplace_get_supplier', 'vector_marketplace_list_capabilities', 'vector_marketplace_list_suppliers',
       'vector_marketplace_send_job', 'vector_marketplace_verify_receipt',
     ];
-    assert.deepEqual([...handlers.keys()].sort(), nine);
+    assert.deepEqual([...handlers.keys()].sort(), eleven);
   });
 });

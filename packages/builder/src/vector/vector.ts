@@ -15,6 +15,7 @@ import { pollUntilConfirmed, buildConfirmationCheck } from './poll.js';
 import { registerAgentNetworkTools } from './agent-network.js';
 import { registerSelfImprovementTools } from './self-improvement.js';
 import { registerMarketplaceTools } from './marketplace.js';
+import { registerReputationTools } from './reputation-tools.js';
 import type { VectorDryRunResult } from '@apexfusion/vector-mcp-shared/types';
 import {
   lucidForAddress, buildSendApex, buildSendTokens, buildMultiOutput,
@@ -729,4 +730,7 @@ Sign locally with vector_signer_sign { txCbor }, then broadcast with vector_subm
 
   // Marketplace tools (adverts, escrow, receipts): marketplace.ts is the entry, one file per tool family
   registerMarketplaceTools(server, identity);
+
+  // Reputation tools (Module-3 self-stake): reputation-tools.ts
+  registerReputationTools(server, identity);
 }
