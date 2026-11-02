@@ -43,6 +43,9 @@
   `_reclaim`, `_set_successor`, `_recovery_start`, `_recovery_cancel`, `_recovery_complete`, `_end_subagents`.
   Every build returns the unsigned transaction and every key hash that must sign it, with its role; each key
   holder signs in turn with `vector_signer_sign`. Lucid runs the applied identity script on each build.
+  Register, adopt and update refuse an appointment that Module-1 would not consent to before they build. A
+  revocation takes `invalid_from` from one hour before the record's `created_at` up to the start of the validity
+  window, so a key-compromise revocation right after the registration is possible.
 - **Attestation, delegation and vault build tools** (Part 2 Sections 4 and 5): `vector_build_attestation_attest`,
   `_revoke`, `_contest`, `_withdraw`; `vector_build_delegation_delegate`, `_undelegate`;
   `vector_build_vault_open`, `_pay`, `_close`.
@@ -56,7 +59,7 @@
   neither), optional `VECTOR_IDENTITY_POLICY_ID`, the reference-script UTxOs `VECTOR_IDENTITY_REF_UTXO`,
   `VECTOR_IDENTITY_{ATTESTATION,DELEGATION,VAULT,ESCROW,ADVERT,MODULE1}_REF_UTXO`, and `VECTOR_IDENTITY_ALLOWLIST_URL`.
   The server applies the deployment parameters to the unapplied scripts of the identity-marketplace blueprint
-  (agents-marketplace b5d66a6, generated into `identity-scripts.generated.ts` by
+  (agents-marketplace 1643583, generated into `identity-scripts.generated.ts` by
   `packages/builder/scripts/gen-identity-scripts.mjs`, with a checksum test) at startup, with the uplc crate of
   Aiken (`@lucid-evolution/uplc`, now a direct dependency), so the hashes equal `aiken blueprint apply`.
 - `vector_resolve_did`: resolves a `did:vector` DID (canonical or legacy form, optional `versionId` or

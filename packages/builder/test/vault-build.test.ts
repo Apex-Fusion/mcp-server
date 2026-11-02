@@ -5,14 +5,18 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML } from '@lucid-evolution/lucid';
 import type { UTxO } from '@lucid-evolution/lucid';
-import { CONTROLLER, DEPLOYMENT, NOW, DAY, OWN_ADDRESS, identityWorld, lucidOn } from './fixtures/identity-world.ts';
+import { CONTROLLER, DEPLOYMENT, NOW, DAY, OWN_ADDRESS, REF_UTXOS, identityWorld, lucidOn } from './fixtures/identity-world.ts';
 import {
   ADVERT_REF, AGENT_ID, DELEGATE_KEY, DELEGATION_ID, IDENTITY_ADVERT, OWN_PKH, PAYLOAD, advertUtxo, agentRecord, chainFake, delegateRecord, delegation,
   delegationUtxo, listedRow, liveVault, vaultUtxo,
 } from './fixtures/escrow-identity.fixture.ts';
 import { buildVaultOpen, buildVaultPay, buildVaultClose } from '../src/vector/vault-build.ts';
-import { decodeVaultDatum, encodeVaultDatum, plutusAddressFromBech32, utf8Hex } from '../src/vector/identity-codec.ts';
-import { decodeIdentityEscrowDatum } from '../src/vector/marketplace-datum.ts';
+import { decodeVaultDatum, encodeVaultDatum, encodeVaultSpend, plutusAddressFromBech32, utf8Hex } from '../src/vector/identity-codec.ts';
+import { decodeIdentityEscrowDatum, encodeIdentityEscrowDatum } from '../src/vector/marketplace-datum.ts';
+import type { IdentityEscrowDatum } from '../src/vector/marketplace-datum.ts';
+import { planVaultEscrow } from '../src/vector/marketplace-build.ts';
+import type { PostEscrowPlan } from '../src/vector/marketplace-build.ts';
+import { chainClock, windowAt } from '../src/vector/identity-chain.ts';
 
 const outputs = (txCbor: string) => {
   const outs = CML.Transaction.from_cbor_hex(txCbor).body().outputs();
@@ -88,6 +92,45 @@ describe('buildVaultPay (the real vault script)', () => {
     await assert.rejects(pay(world({ type: 'Returned', owner })), /holds an escrow refund \(Returned\)/);
     await assert.rejects(pay(world(liveVault(), { vaultLovelace: 5_000_000n })), /below the \d+ its output needs/);
     await assert.rejects(pay(world(), chainFake({ live: [advertUtxo()], listed: [] })), /is not listed by the marketplace indexer/);
+  });
+});
+
+describe('the vault script: each escrow output of a Pay holds exactly payment + both bonds (Part 2 Section 5.3)', () => {
+  // A Pay assembled as buildVaultPay assembles it, with the escrow output that `escrow` makes from the plan; the vault pays exactly
+  // that output. The vault script of agents-marketplace 1643583 (valid_escrow_output) refuses an escrow output whose AP3X is not the
+  // payment + buyer bond + supplier bond of its datum.
+  async function shape(advert: typeof IDENTITY_ADVERT, escrow: (plan: PostEscrowPlan) => { datumHex: string; lovelace: bigint }) {
+    const vault = vaultUtxo(liveVault());
+    const link = delegationUtxo();
+    const delegate = delegateRecord();
+    const provider = identityWorld([vault, link, delegate]);
+    const lucid = await lucidOn(provider);
+    await chainClock(provider);
+    const window = windowAt(NOW);
+    const refund = { address: plutusAddressFromBech32(DEPLOYMENT.vault.address), datum: encodeVaultDatum({ type: 'Returned', owner }) };
+    const out = escrow(planVaultEscrow(advert, ADVERT_REF, DELEGATE_KEY.keyHash, PAYLOAD, window, { agentId: AGENT_ID, refund }));
+    const next = encodeVaultDatum({ type: 'Live', owner, delegation: DELEGATION_ID, spent: out.lovelace, periodStart: window.hi });
+    return lucid.newTx()
+      .readFrom([REF_UTXOS[3], link, delegate])
+      .collectFrom([vault], encodeVaultSpend({ type: 'Pay' }))
+      .pay.ToAddressWithData(DEPLOYMENT.escrow.address, { kind: 'inline', value: out.datumHex }, { lovelace: out.lovelace })
+      .pay.ToAddressWithData(DEPLOYMENT.vault.address, { kind: 'inline', value: next }, { lovelace: 100_000_000n - out.lovelace })
+      .addSignerKey(DELEGATE_KEY.keyHash)
+      .validFrom(window.lo)
+      .validTo(window.hi)
+      .complete();
+  }
+  const asPlanned = (plan: PostEscrowPlan) => ({ datumHex: plan.datumHex, lovelace: plan.lockLovelace });
+
+  test('the planned escrow output passes; one lovelace above payment + both bonds fails', async () => {
+    await shape(IDENTITY_ADVERT, asPlanned);
+    await assert.rejects(shape(IDENTITY_ADVERT, (plan) => ({ ...asPlanned(plan), lovelace: plan.lockLovelace + 1n })), /failed script execution Spend/);
+  });
+  test('a lock floor above the advert\'s amounts passes only with the top-up in the buyer bond', async () => {
+    const small = { ...IDENTITY_ADVERT, price_lovelace: 100_000n, supplier_bond_lovelace: 100_000n, buyer_bond_lovelace: 100_000n };
+    await shape(small, asPlanned);
+    const withoutTopUp = (plan: PostEscrowPlan) => ({ datumHex: encodeIdentityEscrowDatum({ ...(plan.datum as IdentityEscrowDatum), buyer_bond_lovelace: 100_000n }), lovelace: plan.lockLovelace });
+    await assert.rejects(shape(small, withoutTopUp), /failed script execution Spend/);
   });
 });
 

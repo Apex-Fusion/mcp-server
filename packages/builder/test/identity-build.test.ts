@@ -301,14 +301,30 @@ describe('buildRevoke', () => {
     assert.deepEqual(b.signers, new Set([PARTY_KEY.keyHash]));
   });
 
+  test('reason 1 at once after the creation: invalid_from = lo, before created_at, by the controller and by a party', async () => {
+    // The record of a Register built at NOW (created_at = hi), revoked at once with the same window, so lo < created_at. The identity
+    // script takes invalid_from in [created_at - 3,600,000, lo] (Part 2 Section 3.7).
+    const created = rootRecord({ parties: [{ ...CONTROLLER_ACCOUNTABLE, notBefore: lo }, { ...ACCOUNTABLE_KEY, notBefore: lo }], createdAt: hi });
+    const byController = inspect(await buildRevoke(await withRecord(created), { ...common, reason: 1, invalidFrom: lo }));
+    assert.deepEqual(byController.spend, { type: 'Revoke', actor: { type: 'ByController' } });
+    assert.deepEqual(byController.datum, tombstone(created, { type: 'Revoked', by: { type: 'ControllerSet' }, reason: 1, at: lo, invalidFrom: lo, successor: null }));
+    const byParty = inspect(await buildRevoke(await withRecord(created), { ...common, actor: { type: 'party', index: 1 }, reason: 1, invalidFrom: lo }));
+    assert.deepEqual(byParty.datum.status, { type: 'Revoked', by: { type: 'KeyHash', hash: PARTY_KEY.keyHash }, reason: 1, at: lo, invalidFrom: lo, successor: null });
+    assert.deepEqual(byParty.signers, new Set([PARTY_KEY.keyHash]));
+    // The lower bound: exactly one hour before created_at passes; one millisecond earlier is refused before the build.
+    const lowest = hi - 3_600_000;
+    assert.equal(inspect(await buildRevoke(await withRecord(created), { ...common, reason: 1, invalidFrom: lowest })).datum.status.type, 'Revoked');
+    await assert.rejects(buildRevoke(await withRecord(created), { ...common, reason: 1, invalidFrom: lowest - 1 }), /invalid_from must lie between .*, one hour before created_at/);
+  });
+
   test('refusals name the rule', async () => {
     const record = rootRecord({ parties: [CONTROLLER_ACCOUNTABLE, ACCOUNTABLE_KEY, keyParty(OTHER, 'Responsible', 1)] });
     const world = () => withRecord(record, [successorUtxo()]);
     await assert.rejects(buildRevoke(await world(), { ...common, reason: 64 }), /belongs to Module-1/);
     await assert.rejects(buildRevoke(await world(), { ...common, reason: 6 }), /Reason 6 is not allowed in a Revoke/);
     await assert.rejects(buildRevoke(await world(), { ...common, reason: 1 }), /needs invalid_from/);
-    await assert.rejects(buildRevoke(await world(), { ...common, reason: 0, invalidFrom: record.createdAt - 1 }), /must lie between the creation of the record/);
-    await assert.rejects(buildRevoke(await world(), { ...common, reason: 0, invalidFrom: lo + 1000 }), /must lie between the creation of the record/);
+    await assert.rejects(buildRevoke(await world(), { ...common, reason: 0, invalidFrom: record.createdAt - 3_600_001 }), /invalid_from must lie between .*, one hour before created_at/);
+    await assert.rejects(buildRevoke(await world(), { ...common, reason: 0, invalidFrom: lo + 1000 }), /invalid_from must lie between .*, and the start of the validity window/);
     await assert.rejects(buildRevoke(await world(), { ...common, reason: 3, actor: { type: 'party', index: 1 }, successor: SUCCESSOR }), /Only the controller names a successor/);
     await assert.rejects(buildRevoke(await world(), { ...common, reason: 9, actor: { type: 'party', index: 2 } }), /has no revoke right/);
     await assert.rejects(buildRevoke(await world(), { ...common, reason: 4, successor: ID }), /cannot name itself/);

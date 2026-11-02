@@ -18,7 +18,7 @@ import {
 } from './identity-chain.js';
 import type { RecordUtxo, SignedByBuild, Window } from './identity-chain.js';
 import {
-  DAY_MS, DAYS_7_MS, DAYS_30_MS, MAX_CAPABILITIES, MAX_DEPTH, MIN_RECORD_LOVELACE, REASON_DISPUTE_VERDICT, REASON_KEY_COMPROMISE,
+  DAY_MS, DAYS_7_MS, DAYS_30_MS, MAX_CAPABILITIES, MAX_DEPTH, MAX_RANGE_MS, MIN_RECORD_LOVELACE, REASON_DISPUTE_VERDICT, REASON_KEY_COMPROMISE,
   REASON_NAMES, REVOKE_REASONS, RIGHT, ROLE_MAX_RIGHTS, SUSPEND_REASONS, accountable, allowlistProof, covers, datumProblems,
   effectiveStatus, eligibleGuardian, guardianBound, hasRight, holdsOf, keptHolds, keyHashOf, purposeNames, rightNames, signerText,
   terminal, tombstone, verifyAllowlistProof,
@@ -185,7 +185,8 @@ export interface RegisterBuild extends SignedByBuild {
  * output is the seed, so the identifier is known before signing. Signers: the controller, each listed Ed25519 key, each party (a
  * key-hash party by its key, the controller party by the controller key, Module-1 by its consent withdrawal), and for a subagent the
  * parent's controller. Refuses a record that would be invalid, one without an Accountable Party that covers the window, a guardian
- * threshold above the guardians, a deposit below 10 AP3X, and a parent that is not Active or already at depth 4.
+ * threshold above the guardians, an appointment that Module-1 would not consent to (module1ConsentProblems, as Adopt and Update
+ * check it), a deposit below 10 AP3X, and a parent that is not Active or already at depth 4.
  */
 export async function buildRegister(ctx: IdentityContext, p: RegisterParams): Promise<RegisterBuild> {
   const { lucid, provider, deployment } = ctx;
@@ -219,6 +220,8 @@ export async function buildRegister(ctx: IdentityContext, p: RegisterParams): Pr
     controller: p.controller, keys: p.keys, parties: p.parties, guardianThreshold: p.guardianThreshold,
     profile: { name: p.name, description: p.description ?? '', framework: p.framework ?? '', endpoint: p.endpoint ?? '', capabilities: p.capabilities ?? [] },
   }, lineage, window, m1, signers);
+  const consentProblems = module1ConsentProblems([], record.parties, window.lo);
+  if (consentProblems.length > 0) throw new Error(`Module-1 would not consent to this appointment: ${consentProblems.join('; ')} (Part 2 Section 3.8).`);
   if (parent) signers.addKey(parent.record.controller, `controller of the parent ${didOf(parent.id)}`);
 
   const unit = `${deployment.identity.hash}${id}`;
@@ -1015,7 +1018,10 @@ export interface RevokeParams extends BuildCommon {
   actor?: ActorSpec;
   /** A reason code that a Revoke allows (Part 2 Appendix A; not 64). */
   reason: number;
-  /** POSIX ms from which signatures by the keys of the record are invalid, in [created_at, the start of the window]; reason 1 needs it. */
+  /**
+   * POSIX ms from which signatures by the keys of the record are invalid, in [created_at − 3,600,000, the start of the window]; reason
+   * 1 needs it.
+   */
   invalidFrom?: number;
   /** The identifier of the successor; only the controller names one. */
   successor?: string;
@@ -1025,7 +1031,7 @@ export interface RevokeParams extends BuildCommon {
  * Builds the unsigned Revoke of a live record (Part 2 Sections 3.5 and 3.7) by the controller or by a party with the revoke right that
  * covers the window and signs. D' is the tombstone with Revoked{by, reason, at: lo, invalid_from, successor}. Only the controller names
  * a successor (its live Root record is a reference input, and its controller signs). The record keeps its value. Refuses Module-1 as
- * the actor, reason 64, a keyCompromise without invalid_from, and an invalid_from outside [created_at, lo].
+ * the actor, reason 64, a keyCompromise without invalid_from, and an invalid_from outside [created_at − 3,600,000, lo].
  */
 export async function buildRevoke(ctx: IdentityContext, p: RevokeParams): Promise<RecordSpendBuild> {
   const { build } = await spendWith(ctx, p, async ({ current, window }) => {
@@ -1036,10 +1042,12 @@ export async function buildRevoke(ctx: IdentityContext, p: RevokeParams): Promis
     if (invalidFrom === null && p.reason === REASON_KEY_COMPROMISE) {
       throw new Error('A keyCompromise revocation (reason 1) needs invalid_from: the time from which signatures by the keys of the record are invalid.');
     }
-    // The pinned blueprint (agents-marketplace b5d66a6) checks [created_at, lo]. A contract fix widens the range to
-    // [created_at - 3,600,000, lo]; until the deployment takes that fix, the builder keeps the narrower range, which passes both.
-    if (invalidFrom !== null && (invalidFrom < record.createdAt || invalidFrom > window.lo)) {
-      throw new Error(`invalid_from must lie between the creation of the record (${iso(record.createdAt)}) and the start of the validity window (${iso(window.lo)}).`);
+    // Part 2 Section 3.7: invalid_from is in [created_at − 3,600,000, lo]. created_at is the upper bound of the range of the transaction
+    // that created the record, so the lower bound reaches the block that created it, and a keyCompromise revocation is possible at once
+    // after the creation (invalid_from = lo can then be before created_at).
+    const lowest = record.createdAt - MAX_RANGE_MS;
+    if (invalidFrom !== null && (invalidFrom < lowest || invalidFrom > window.lo)) {
+      throw new Error(`invalid_from must lie between ${iso(lowest)}, one hour before created_at (${iso(record.createdAt)}, the end of the validity window of the transaction that created the record), and the start of the validity window (${iso(window.lo)}).`);
     }
     const signers = new SignerList();
     const acting = actingAs(record, p.actor, 'revoke', window, signers);

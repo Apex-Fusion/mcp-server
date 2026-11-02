@@ -25,10 +25,10 @@ const MODULE = resolve(import.meta.dirname!, '../src/vector/identity-scripts.gen
 describe('the generated scripts module is the blueprint at the recorded commit', () => {
   const text = readFileSync(FIXTURE, 'utf8');
 
-  test('the copied blueprint has the sha256 that the module records (agents-marketplace b5d66a6)', () => {
+  test('the copied blueprint has the sha256 that the module records (agents-marketplace 1643583)', () => {
     assert.equal(createHash('sha256').update(text, 'utf8').digest('hex'), IDENTITY_BLUEPRINT.sha256);
-    assert.equal(IDENTITY_BLUEPRINT.sha256, '0d4e3ec1ba3982c4e4e60c29045cd9a0fd554ec3ee598ca77fbabeb85723f7c3');
-    assert.equal(IDENTITY_BLUEPRINT.commit, 'b5d66a6');
+    assert.equal(IDENTITY_BLUEPRINT.sha256, '9c8d948a2da12fa519b6f97286cbb8374c002b6bca7e4a3ef1a6d65cca51df3e');
+    assert.equal(IDENTITY_BLUEPRINT.commit, '1643583');
   });
 
   test('the generator renders exactly the checked-in module from the copy', () => {
@@ -51,25 +51,26 @@ describe('the generated scripts module is the blueprint at the recorded commit',
 
   test('the generator refuses a blueprint that is not Plutus V3 or misses a validator', () => {
     const blueprint = JSON.parse(text);
-    assert.throws(() => renderIdentityScripts(JSON.stringify({ ...blueprint, preamble: { ...blueprint.preamble, plutusVersion: 'v2' } }), 'b5d66a6'), /not Plutus V3/);
-    assert.throws(() => renderIdentityScripts(JSON.stringify({ ...blueprint, validators: blueprint.validators.filter((v: { title: string }) => !v.title.startsWith('vault.')) }), 'b5d66a6'), /no validator vault/);
+    assert.throws(() => renderIdentityScripts(JSON.stringify({ ...blueprint, preamble: { ...blueprint.preamble, plutusVersion: 'v2' } }), '1643583'), /not Plutus V3/);
+    assert.throws(() => renderIdentityScripts(JSON.stringify({ ...blueprint, validators: blueprint.validators.filter((v: { title: string }) => !v.title.startsWith('vault.')) }), '1643583'), /no validator vault/);
     assert.throws(() => renderIdentityScripts(text, 'not-a-commit'), /commit/);
   });
 });
 
 describe('the deployment applies parameters as aiken blueprint apply does', () => {
-  // Computed with aiken v1.1.21 `blueprint apply` and `blueprint hash` on the blueprint at b5d66a6, for the seed 5d…5d#2 and the
-  // legacy root a1…a1.
+  // Computed with aiken v1.1.21 `blueprint apply` and `blueprint hash` on the blueprint at 1643583, for the seed 5d…5d#2 and the
+  // legacy root a1…a1. The config_holder, config_seal and advert scripts are the same as at b5d66a6; the identity script changed, so
+  // every script that takes its hash changed too.
   const deployment = makeIdentityDeployment({ legacyRoot: 'a1'.repeat(32), configSeed: { txHash: '5d'.repeat(32), outputIndex: 2 } });
 
   test('every script hash equals the Aiken CLI result', () => {
     assert.equal(deployment.configHolder.hash, '288fea77a0f674c6080aadd8ed3ca42cd5a920bf1f00c0d3e63306e4');
     assert.equal(deployment.configSeal.hash, 'a22bb45073479e4187abc4a317d12186ab161eb5934b5d51a19608e8');
-    assert.equal(deployment.identity.hash, '6796754490b50b7cba34e736e6305d7c137bb5ef1f5e96125fc84728');
-    assert.equal(deployment.attestation.hash, '1d512e0f0c0c7335245bc08fd071404367e321c747256ca7f69061f5');
-    assert.equal(deployment.delegation.hash, '8c8e867d739d8e42b7c859d7cf4150afb7704061b7f37b3f3f419a97');
-    assert.equal(deployment.escrow.hash, 'dc5dd979e9da5c69c267c79dc76a29128c4f7912a2f30c902266404c');
-    assert.equal(deployment.vault.hash, '5081c95137843c47507c7b6b95ac43aaf67c144dcea59b2c6f7ed725');
+    assert.equal(deployment.identity.hash, '94ded084a666c1d11a46a6e43486678a0c9634f24295b21d9d69543a');
+    assert.equal(deployment.attestation.hash, '450d730378e7cb5df673e4499d432d4f4e2c244e9a406a8d496ea896');
+    assert.equal(deployment.delegation.hash, '21076c62d5fd941f1f09b04f20ddfa23d6fd43664420583d19d23113');
+    assert.equal(deployment.escrow.hash, 'c3117c002e7741229fed3180c71c6deecf094722b605f65ddd0f5901');
+    assert.equal(deployment.vault.hash, 'c450e870a3030f029780df1c18429690803140cd5483b7108e0a163a');
     assert.equal(deployment.advert.hash, 'f36e366e06d4480651aa0e1064578f0bfe275af96dfcaaabe5efe26c');
   });
 
@@ -100,11 +101,11 @@ describe('identityDeploymentFrom (environment)', () => {
   });
 
   test('both required values give the deployment; a matching VECTOR_IDENTITY_POLICY_ID is accepted', () => {
-    const d = identityDeploymentFrom({ ...env, VECTOR_IDENTITY_POLICY_ID: '6796754490b50b7cba34e736e6305d7c137bb5ef1f5e96125fc84728' })!;
-    assert.equal(d.identity.hash, '6796754490b50b7cba34e736e6305d7c137bb5ef1f5e96125fc84728');
+    const d = identityDeploymentFrom({ ...env, VECTOR_IDENTITY_POLICY_ID: '94ded084a666c1d11a46a6e43486678a0c9634f24295b21d9d69543a' })!;
+    assert.equal(d.identity.hash, '94ded084a666c1d11a46a6e43486678a0c9634f24295b21d9d69543a');
     assert.equal(d.legacyRoot, 'a1'.repeat(32));
     assert.deepEqual(d.refs, {});
-    assert.match(describeDeployment(d), /policy 6796754490b5.*identity unset/);
+    assert.match(describeDeployment(d), /policy 94ded084a666.*identity unset/);
   });
 
   test('reference UTxOs and the allowlist URL are read from their variables', () => {
@@ -122,7 +123,7 @@ describe('identityDeploymentFrom (environment)', () => {
     assert.throws(() => identityDeploymentFrom({ ...env, VECTOR_IDENTITY_CONFIG_SEED: '5d'.repeat(32) }), /VECTOR_IDENTITY_CONFIG_SEED must be <64 hex characters>#<output index>/);
     assert.throws(() => identityDeploymentFrom({ ...env, VECTOR_IDENTITY_VAULT_REF_UTXO: 'x#1' }), /VECTOR_IDENTITY_VAULT_REF_UTXO must be/);
     assert.throws(() => identityDeploymentFrom({ ...env, VECTOR_IDENTITY_ALLOWLIST_URL: 'http://id.example/a.json' }), /must be an https URL/);
-    assert.throws(() => identityDeploymentFrom({ ...env, VECTOR_IDENTITY_POLICY_ID: 'ff'.repeat(28) }), /give the identity policy 6796754490b5/);
+    assert.throws(() => identityDeploymentFrom({ ...env, VECTOR_IDENTITY_POLICY_ID: 'ff'.repeat(28) }), /give the identity policy 94ded084a666/);
   });
 
   test('every reference variable has the VECTOR_IDENTITY_ prefix and parseRef refuses a leading zero index', () => {

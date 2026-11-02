@@ -1,7 +1,7 @@
 // packages/builder/test/identity-codec.test.ts
 // The identity codecs against the Aiken CBOR fixtures (agents-marketplace contracts/identity-marketplace/fixtures/cbor-fixtures.json
-// at b5d66a6, copied to test/fixtures/identity-cbor-fixtures.json): every datum decodes and encodes back to the same bytes, and
-// every redeemer encodes to the bytes Aiken writes. Then the refusals of the decoders.
+// at 1643583, the same bytes as at b5d66a6, copied to test/fixtures/identity-cbor-fixtures.json): every datum decodes and encodes back
+// to the same bytes, and every redeemer encodes to the bytes Aiken writes. Then the refusals of the decoders.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

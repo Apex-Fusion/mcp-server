@@ -1212,7 +1212,7 @@
           ]
         },
         "invalid_from": {
-          "description": "From when signatures by the keys of the record are invalid: between the creation of the record and the start of the validity window. A keyCompromise (1) needs it (POSIX milliseconds)",
+          "description": "From when signatures by the keys of the record are invalid: from one hour before the record's created_at (the end of the validity window of its registration or adoption) up to the start of the validity window. A keyCompromise (1) needs it (POSIX milliseconds)",
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991

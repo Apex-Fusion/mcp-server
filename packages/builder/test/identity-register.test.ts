@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { CML, Constr, Data, credentialToAddress } from '@lucid-evolution/lucid';
 import type { UTxO } from '@lucid-evolution/lucid';
 import {
-  DEPLOYMENT, NOW, WINDOW, CONTROLLER, LISTED, PARTY_KEY, GUARDIAN_A, CONTROLLER_ACCOUNTABLE, M1, OWN_ADDRESS, LEGACY_IDS, REF_UTXOS,
+  DEPLOYMENT, NOW, WINDOW, DAY, CONTROLLER, LISTED, PARTY_KEY, GUARDIAN_A, CONTROLLER_ACCOUNTABLE, M1, OWN_ADDRESS, LEGACY_IDS, REF_UTXOS,
   identityWorld, lucidOn, rootRecord, recordUtxo, testKey,
 } from './fixtures/identity-world.ts';
 import { legacyAgentDatum } from './fixtures/legacy-datum.ts';
 import { LEGACY_BURN_REDEEMER, LEGACY_DEREGISTER_REDEEMER, LEGACY_OWNER_OUTPUT_LOVELACE, buildAdopt, buildRegister } from '../src/vector/identity-build.ts';
-import type { AdoptParams } from '../src/vector/identity-build.ts';
+import type { AdoptParams, PartySpec } from '../src/vector/identity-build.ts';
 import { decodeIdentityDatum, decodeIdentityMint, encodeIdentityDatum, encodeIdentityMint, encodeLegacyDatum, utf8Hex } from '../src/vector/identity-codec.ts';
 import type { IdentityDatum } from '../src/vector/identity-codec.ts';
 import { chainClock, identifierFromSeed, windowAt } from '../src/vector/identity-chain.ts';
@@ -76,6 +76,22 @@ describe('buildRegister (real identity script, offline)', () => {
     await assert.rejects(register({ guardianThreshold: 1 }), /guardian threshold/);
     await assert.rejects(register({ depositLovelace: 9_999_999n }), /at least 10 AP3X/);
     await assert.rejects(register({ name: '' }), /name must be 1 to 64 bytes/);
+  });
+
+  test('refuses, before it builds, an appointment that Module-1 would not consent to (Part 2 Section 3.8), as Adopt and Update do', async () => {
+    // The test deployment's Module-1 accepts every withdrawal, so only the builder's own check can refuse these.
+    const controllerParty: PartySpec = { role: 'Accountable', signer: { type: 'ControllerSet' }, organisation: null, notAfter: null, rights: 3, removalAfter: null };
+    const appoint = (over: Partial<PartySpec>) => register({
+      parties: [controllerParty, { role: 'Responsible', signer: { type: 'Script', hash: M1 }, organisation: null, notAfter: null, rights: 1, removalAfter: null, ...over }],
+    });
+    const refused = /^Module-1 would not consent to this appointment: /;
+    await assert.rejects(appoint({ rights: 0 }), (e: Error) => refused.test(e.message) && /a Module-1 Responsible Party has the highest rights of its role/.test(e.message));
+    await assert.rejects(appoint({ role: 'Accountable', rights: 1 }), (e: Error) => refused.test(e.message) && /a Module-1 Accountable Party has the highest rights of its role/.test(e.message));
+    await assert.rejects(appoint({ notBefore: NOW + 3_600_000 }), (e: Error) => refused.test(e.message) && /its not_before must be at or before the start of the validity window/.test(e.message));
+    await assert.rejects(appoint({ notAfter: NOW + DAY }), (e: Error) => refused.test(e.message) && /it takes no not_after/.test(e.message));
+    await assert.rejects(appoint({ removalAfter: NOW + 30 * DAY }), (e: Error) => refused.test(e.message) && /it takes no removal_after/.test(e.message));
+    const r = await appoint({});
+    assert.equal(CML.Transaction.from_cbor_hex(r.txCbor).body().withdrawals()?.len(), 1, 'the consent withdrawal');
   });
 
   test('a record whose ledger minimum is above 10 AP3X locks its ledger minimum', async () => {

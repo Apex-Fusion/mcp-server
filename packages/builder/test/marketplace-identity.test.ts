@@ -5,8 +5,8 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML, credentialToAddress, getAddressDetails } from '@lucid-evolution/lucid';
-import type { UTxO } from '@lucid-evolution/lucid';
-import { DEPLOYMENT, NOW, DAY, LISTED, OTHER, OWN_ADDRESS, identityWorld, lucidOn, rootRecord, recordUtxo } from './fixtures/identity-world.ts';
+import type { Assets, UTxO } from '@lucid-evolution/lucid';
+import { DEPLOYMENT, NOW, DAY, LISTED, OTHER, OWN_ADDRESS, REF_UTXOS, identityWorld, lucidOn, rootRecord, recordUtxo } from './fixtures/identity-world.ts';
 import { lucidForAddress } from '../src/vector/build.ts';
 import {
   ADVERT_REF, AGENT_ID, AGENT_DID, CAPABILITY, CHAIN_TXS, CLAIM_TX, ESCROW_LOCK, ESCROW_REF, IDENTITY_ADVERT, OWN_PKH, PAYLOAD, POST_TX, SUBMIT_TX,
@@ -25,6 +25,7 @@ import { verifyReceipt } from '../src/vector/marketplace-verify.ts';
 import { encodeVaultDatum, plutusAddressFromBech32 } from '../src/vector/identity-codec.ts';
 import type { Status } from '../src/vector/identity-codec.ts';
 import { ensureSlotConfig } from '../src/vector/gov-build.ts';
+import { chainClock, windowAt } from '../src/vector/identity-chain.ts';
 import { FixtureProvider } from './fixtures/fixture-provider.ts';
 
 const KOIOS = 'https://koios.example';
@@ -204,6 +205,14 @@ describe('Accept, Reclaim, Release and RefundRevoked of an identity escrow (the 
     assert.deepEqual(redeemers(r.txCbor), ['d87e80']);
     assert.deepEqual([r.recordStatus, r.agentId], ['Revoked', AGENT_ID]);
   });
+  test('RefundRevoked carries every asset of the escrow input, a token too, to the refund address', async () => {
+    const record = tombstone(REVOKED);
+    const { world, k } = open(posted, [otherWallet, record], { assets: { lovelace: ESCROW_LOCK, [FIXTURE_TOKEN_UNIT]: 5n } });
+    const r = await buildRefundRevoked(await lucidForAddress(world, OTHER_ADDRESS), world, KOIOS, p(OTHER_ADDRESS), k.f);
+    const refund = outputsOf(r.txCbor).find((o) => o.address === OWN_ADDRESS)!;
+    assert.deepEqual([refund.lovelace, refund.assets[FIXTURE_TOKEN_UNIT], refund.datum], [ESCROW_LOCK, 5n, null]);
+    assert.deepEqual(redeemers(r.txCbor), ['d87e80']);
+  });
   test('RefundRevoked without a refund address pays the enterprise address of the buyer key; a Retired record allows it for an Open escrow', async () => {
     const plain = identityEscrow(NOW - 10 * 60_000, { refund: null });
     const { world, k } = open(plain, [otherWallet, tombstone({ type: 'Retired', at: NOW - DAY, successor: null })]);
@@ -222,6 +231,39 @@ describe('Accept, Reclaim, Release and RefundRevoked of an identity escrow (the 
   test('RefundRevoked refuses an agent that is still Active', async () => {
     const { world, k } = open(posted, [otherWallet, agentRecord()]);
     await assert.rejects(buildRefundRevoked(await lucidForAddress(world, OTHER_ADDRESS), world, KOIOS, p(OTHER_ADDRESS), k.f), /RefundRevoked is not allowed: the escrow is Open and the agent's record is Active/);
+  });
+});
+
+describe('the escrow script: a full refund returns every asset of the escrow input (Part 2 Section 6.1, rule 6)', () => {
+  // Reclaim with a refund address and RefundRevoked, assembled as buildReclaim and buildRefundRevoked assemble them, of an escrow that
+  // also holds a token. Another wallet builds them, so its change output never counts as a buyer payout. The escrow script of
+  // agents-marketplace 1643583 (full_refund) refuses refund outputs that do not carry the token.
+  const held: Assets = { lovelace: ESCROW_LOCK, [FIXTURE_TOKEN_UNIT]: 5n };
+  async function shape(redeemer: string, d: IdentityEscrowDatum, refund: Assets, refs: UTxO[] = []) {
+    const live = escrowUtxo(POST_TX, d, { assets: held });
+    const world = identityWorld([live, otherWallet, ...refs]);
+    const lucid = await lucidForAddress(world, OTHER_ADDRESS);
+    await chainClock(world);
+    const window = windowAt(NOW);
+    return lucid.newTx()
+      .readFrom([REF_UTXOS[4], ...refs])
+      .collectFrom([live], redeemer)
+      .pay.ToAddress(OWN_ADDRESS, refund)
+      .validFrom(window.lo)
+      .validTo(window.hi)
+      .complete();
+  }
+
+  test('Reclaim with a refund address: the AP3X without the token fails; the AP3X with the token passes', async () => {
+    const due = identityEscrow(NOW - 2 * 3_600_000);
+    await assert.rejects(shape('d87c80', due, { lovelace: ESCROW_LOCK }), /failed script execution Spend/);
+    await shape('d87c80', due, held);
+  });
+  test('RefundRevoked: the AP3X without the token fails; the AP3X with the token passes', async () => {
+    const record = tombstone(REVOKED);
+    const openEscrow = identityEscrow(NOW - 10 * 60_000);
+    await assert.rejects(shape('d87e80', openEscrow, { lovelace: ESCROW_LOCK }, [record]), /failed script execution Spend/);
+    await shape('d87e80', openEscrow, held, [record]);
   });
 });
 

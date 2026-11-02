@@ -400,7 +400,7 @@ export function registerIdentityRegistryTools(server: McpServer, checkRateLimit:
       did: zDid('the agent to revoke'),
       actor: zActor,
       reason: zReason(REVOKE_REASONS, 'Why the agent is revoked.'),
-      invalid_from: zTime('From when signatures by the keys of the record are invalid: between the creation of the record and the start of the validity window. A keyCompromise (1) needs it').optional(),
+      invalid_from: zTime('From when signatures by the keys of the record are invalid: from one hour before the record\'s created_at (the end of the validity window of its registration or adoption) up to the start of the validity window. A keyCompromise (1) needs it').optional(),
       successor: zDid('the successor: another live, independent agent whose controller signs too (controller only)').optional(),
       valid_minutes: zValidMinutes,
     },
