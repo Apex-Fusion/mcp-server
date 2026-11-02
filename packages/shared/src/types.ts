@@ -71,12 +71,6 @@ export interface VectorBuildAgentOpResult extends VectorUnsignedBuildResult {
   detail: string;
 }
 
-export interface VectorBuildMessageResult extends VectorUnsignedBuildResult {
-  agentId: string;
-  agentName: string;
-  recipientAddress: string;
-}
-
 // --- Agent Network ---
 
 export interface AgentProfile {
@@ -95,13 +89,6 @@ export interface AgentRegistrationResult {
   agentId: string;
   nftAssetName: string;
   txHash: string;
-  links: { explorer: string };
-}
-
-export interface AgentMessageResult {
-  txHash: string;
-  recipientAddress: string;
-  messageType: string;
   links: { explorer: string };
 }
 

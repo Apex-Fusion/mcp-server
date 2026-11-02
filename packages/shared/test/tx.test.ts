@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveNftAssetName, lovelaceToAda, formatAssetName, metadataStr, apexToLovelace } from '../src/tx.ts';
+import { deriveNftAssetName, lovelaceToAda, formatAssetName, apexToLovelace } from '../src/tx.ts';
 
 const VECTORS: Array<{ tx: string; idx: number; expected: string }> = [
   { tx: '00'.repeat(32), idx: 0, expected: 'a2e5e227858e84f1a8f9b0c1246e6cbc9336d707d43ba43d0e1cb7c51c45f4c9' },
@@ -29,15 +29,6 @@ describe('formatAssetName', () => {
   test('decodes hex to utf8', () => assert.equal(formatAssetName('74657374'), 'test'));
   test('passes through non-hex unchanged', () => assert.equal(formatAssetName('plain'), 'plain'));
   test('passes through empty string', () => assert.equal(formatAssetName(''), ''));
-});
-
-describe('metadataStr', () => {
-  test('leaves short strings intact', () => assert.equal(metadataStr('short'), 'short'));
-  test('chunks strings longer than 64 bytes', () => {
-    const out = metadataStr('a'.repeat(150));
-    assert.ok(Array.isArray(out));
-    assert.deepEqual((out as string[]).map(s => s.length), [64, 64, 22]);
-  });
 });
 
 describe('apexToLovelace', () => {

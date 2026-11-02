@@ -13,6 +13,11 @@ export interface SupplierRow {
   price_lovelace: bigint; supplier_bond_lovelace: bigint; buyer_bond_lovelace: bigint;
   endpoint_url: string; detail_uri: string; detail_hash: string; advertised_at: number;
   status: string; advert_status: string; current_escrow_ref: string | null; last_seen_iso: string | null; created_slot: number;
+  /**
+   * The identifier of the agent that the advert names (Part 2 Section 6.4): 64 lowercase hex, or null for a legacy advert. An
+   * indexer older than the identity release leaves it out. The indexer's word: check its shape before use.
+   */
+  agent_id?: string | null;
 }
 export interface KoiosUtxo {
   tx_hash: string; tx_index: number; address?: string; value: string; is_spent?: boolean; payment_cred?: string;

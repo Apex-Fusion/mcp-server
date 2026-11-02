@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Breaking
+
+- **`vector_build_message_agent` is retired** (Part 2 Section 10 of the identity registry plan). Its builder,
+  the label-674 constant and the `metadataStr` helper are removed.
+- **`vector_discover_agents` reads the marketplace indexer** (`/suppliers`, which applies the listing rule)
+  instead of scanning the legacy registry address. It lists agents that have a listed advert and names their
+  `did:vector:<id>` DID when the advert names one. The `framework` filter is removed: the indexer has no
+  framework field (use `vector_get_agent_profile` for the profile). `limit` is now an integer from 1 to 100.
+- **The legacy registry constants move to `legacy-registry.ts`** (`LEGACY_REGISTRY_SCRIPT_CBOR`,
+  `LEGACY_REGISTRY_POLICY_ID`, `LEGACY_REGISTRY_DEPOSIT`, `legacyRegistryScript()`, `legacyRegistryAddress()`,
+  `legacyDid()`). `gov-build.ts` no longer exports `AGENT_REGISTRY_POLICY` and no longer reads the
+  `AGENT_REGISTRY_POLICY` environment variable.
+
 ### Added
 
 - `vector_build_marketplace_post_advert` and `vector_build_marketplace_retire_advert`: the supplier side of the agents
@@ -18,7 +31,23 @@
   start, which must be Vector mainnet's. Mainnet only. The unit tests rebuild two stakes the SDK made on mainnet and
   have the deployed reputation validator evaluate them offline. **Held:** not for use on mainnet until the deployed
   Module-3 module is fixed and redeployed (the README's Reputation section says why).
+- `vector_resolve_did`: resolves a `did:vector` DID (canonical or legacy form, optional `versionId` or
+  `versionTime`) through the identity gateway (`GET /1.0/identifiers/{did}`, `Accept: application/did-resolution`)
+  and returns the HTTP status and the resolution result unchanged. Gateway: `VECTOR_IDENTITY_GATEWAY_URL`
+  (default `https://id.vector.apexfusion.org`).
+- Signer: `vector_signer_get_public_key` returns the Ed25519 public key and its key hash (not secret).
+- Signer: optional `VECTOR_SIGNER_OGMIOS_URL`. With it, the signer reads the outputs that a transaction spends
+  (one read-only `queryLedgerState/utxo` query, output references only) and counts only the value that its
+  own inputs fund. Without it, or when the lookup fails, it uses the previous rule and says so in the result.
 - 37 tools in all (was 33).
+
+### Changed
+
+- `vector_get_agent_profile` accepts both DID forms: a canonical DID resolves through the identity gateway
+  (profile, effective status, keys, record output); a legacy DID still reads the legacy registry.
+- Signer: `vector_signer_sign` and `vector_signer_decode_transaction` accept a partly signed transaction. The
+  witnesses of other keys stay byte for byte and in their order; this key gets exactly one witness.
+- Signer: the audit log records the outflow rule of each decision (`rule`: `own-inputs` or `all-outputs`).
 
 ## 2.0.0 - 2026-08-17
 

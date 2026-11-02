@@ -315,7 +315,7 @@ describe('Agent Network Tools', () => {
     }
     const text = await callTool(ctx.client, 'vector_discover_agents', {});
     console.log(text);
-    assertSuccessOrKnownError(text, /Agent Discovery|Found|No agents found/, 'vector_discover_agents');
+    assertSuccessOrKnownError(text, /Agent Discovery Results|No listed agents found/, 'vector_discover_agents');
   });
 
   test('vector_get_agent_profile', { timeout: 120_000 }, async () => {
@@ -356,21 +356,6 @@ describe('Agent Network Tools', () => {
       agent_id: agentDid,
       new_owner_address: walletAddress,
     }, /Agent DID:/);
-  });
-
-  test('vector_build_message_agent -> sign -> submit', { timeout: 120_000 }, async () => {
-    // Use a known DID format even if registration failed, to test the tool responds
-    const testDid = agentDid || `did:vector:agent:${ALWAYS_SUCCEEDS_V2}:${'a'.repeat(64)}`;
-    if (walletHasAda && agentDid) {
-      console.log('Waiting 10s for UTxOs to settle before message...');
-      await wait(10);
-    }
-    await buildSignSubmit('vector_build_message_agent', {
-      changeAddress: walletAddress,
-      agent_id: testDid,
-      message_type: 'inquiry',
-      payload: 'integration test ping',
-    }, /Unsigned Message Built/);
   });
 
   test('vector_build_deregister_agent -> sign -> submit', { timeout: 120_000 }, async () => {

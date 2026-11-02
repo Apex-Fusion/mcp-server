@@ -1,7 +1,7 @@
 import { describe, test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CML, getAddressDetails, Data, Constr, toText, fromText, credentialToAddress,
+  CML, getAddressDetails, Data, Constr, toText, fromText, credentialToAddress, validatorToScriptHash,
 } from '@lucid-evolution/lucid';
 import type { LucidEvolution } from '@lucid-evolution/lucid';
 import {
@@ -9,27 +9,28 @@ import {
 } from './fixtures/fixture-provider.ts';
 import { lucidForAddress } from '../src/vector/build.ts';
 import {
-  REGISTRY_POLICY_ID, MIN_AP3X_DEPOSIT, AGENT_MESSAGE_LABEL,
-  getRegistryAddress, parseDid, buildAgentDatum, parseAgentDatum, resolveAgentUtxo,
-  buildRegisterAgent, buildMessageAgent,
-  buildUpdateAgent, buildTransferAgent, buildDeregisterAgent, registryScript,
+  parseDid, buildAgentDatum, parseAgentDatum, resolveAgentUtxo,
+  buildRegisterAgent, buildUpdateAgent, buildTransferAgent, buildDeregisterAgent,
 } from '../src/vector/registry-build.ts';
+import {
+  LEGACY_REGISTRY_POLICY_ID, LEGACY_REGISTRY_DEPOSIT, legacyRegistryAddress, legacyRegistryScript, legacyDid,
+} from '../src/vector/legacy-registry.ts';
 
 // The REAL registry validator evaluates during .complete() (native UPLC, offline).
 // A passing build here is ground-truth phase-2 validity, minus signatures.
 
 const OWN_VKEY_HASH = getAddressDetails(OWN_ADDRESS).paymentCredential!.hash;
-// A registry UTxO owned by OWN_ADDRESS, for message-resolution tests.
+// A registry UTxO owned by OWN_ADDRESS, for resolution and build tests.
 const AGENT_NFT_NAME = 'ab'.repeat(32); // 64 hex chars
-const AGENT_UNIT = `${REGISTRY_POLICY_ID}${AGENT_NFT_NAME}`;
-const AGENT_DID = `did:vector:agent:${REGISTRY_POLICY_ID}:${AGENT_NFT_NAME}`;
+const AGENT_UNIT = `${LEGACY_REGISTRY_POLICY_ID}${AGENT_NFT_NAME}`;
+const AGENT_DID = `did:vector:agent:${LEGACY_REGISTRY_POLICY_ID}:${AGENT_NFT_NAME}`;
 let REGISTRY_UTXO: any;
 
 before(() => {
   REGISTRY_UTXO = {
     txHash: 'cd'.repeat(32), outputIndex: 0,
-    address: getRegistryAddress(),
-    assets: { lovelace: MIN_AP3X_DEPOSIT, [AGENT_UNIT]: 1n },
+    address: legacyRegistryAddress(),
+    assets: { lovelace: LEGACY_REGISTRY_DEPOSIT, [AGENT_UNIT]: 1n },
     datum: buildAgentDatum(OWN_VKEY_HASH, 'FixtureAgent', 'offline fixture agent', ['testing'], 'custom', '', 1750000000000),
   };
 });
@@ -58,32 +59,26 @@ function findAssetQuantity(ma: any, policyIdHex: string, assetNameHex: string): 
   return undefined;
 }
 
-// Decodes a TransactionMetadatum leaf as text, joining metadataStr()'s
-// chunked-list form (used for values over 64 chars) back into one string.
-function metadatumText(m: any): string | undefined {
-  const text = m.as_text();
-  if (text !== undefined) return text;
-  const list = m.as_list();
-  if (list) {
-    let joined = '';
-    for (let i = 0; i < list.len(); i++) joined += list.get(i).as_text() ?? '';
-    return joined;
-  }
-  return undefined;
-}
-
 describe('registry constants and helpers', () => {
-  test('registry address derives to the live testnet address', () => {
-    assert.equal(getRegistryAddress(), 'addr1wxlp5z3fztdpsp6ha57dvx6khw82kqvgcxwu8s8rjykjcqghprf42');
+  test('the legacy registry address is the one Part 1 Section 4 names', () => {
+    assert.equal(legacyRegistryAddress(), 'addr1wxlp5z3fztdpsp6ha57dvx6khw82kqvgcxwu8s8rjykjcqghprf42');
+  });
+
+  test('the legacy policy ID is the hash of the legacy script', () => {
+    assert.equal(validatorToScriptHash(legacyRegistryScript()), LEGACY_REGISTRY_POLICY_ID);
+  });
+
+  test('legacyDid writes the legacy DID form of an identifier', () => {
+    assert.equal(legacyDid(AGENT_NFT_NAME), AGENT_DID);
   });
 
   test('parseDid round-trips and rejects malformed DIDs', () => {
     const d = parseDid(AGENT_DID);
-    assert.equal(d.policyId, REGISTRY_POLICY_ID);
+    assert.equal(d.policyId, LEGACY_REGISTRY_POLICY_ID);
     assert.equal(d.assetName, AGENT_NFT_NAME);
     assert.equal(d.unit, AGENT_UNIT);
     assert.throws(() => parseDid('did:vector:wrong:x:y'), /Invalid agent DID/);
-    assert.throws(() => parseDid(`did:vector:agent:${REGISTRY_POLICY_ID}:NOTHEX`), /hex/);
+    assert.throws(() => parseDid(`did:vector:agent:${LEGACY_REGISTRY_POLICY_ID}:NOTHEX`), /hex/);
   });
 
   test('parseAgentDatum inverts buildAgentDatum exactly', () => {
@@ -108,8 +103,8 @@ describe('registry constants and helpers', () => {
     assert.equal(parseAgentDatum(sixFieldDatum, 'ref#0', {}), null);
   });
 
-  test('MIN_AP3X_DEPOSIT matches the protocol deposit floor exactly', () => {
-    assert.equal(MIN_AP3X_DEPOSIT, 10_000_000n, 'protocol deposit constant drifted');
+  test('the legacy deposit is the protocol deposit floor exactly', () => {
+    assert.equal(LEGACY_REGISTRY_DEPOSIT, 10_000_000n, 'protocol deposit constant drifted');
   });
 });
 
@@ -132,10 +127,10 @@ describe('buildRegisterAgent (real validator, offline)', () => {
     const mint = tx.body().mint()!;
     assert.ok(mint, 'no mint field');
     // DID binds to the consumed one-shot input
-    assert.match(r.agentId, new RegExp(`^did:vector:agent:${REGISTRY_POLICY_ID}:[0-9a-f]{64}$`));
+    assert.match(r.agentId, new RegExp(`^did:vector:agent:${LEGACY_REGISTRY_POLICY_ID}:[0-9a-f]{64}$`));
     assert.equal(r.nftAssetName.length, 64);
     assert.equal(
-      findAssetQuantity(mint.as_positive_multiasset(), REGISTRY_POLICY_ID, r.nftAssetName), 1n,
+      findAssetQuantity(mint.as_positive_multiasset(), LEGACY_REGISTRY_POLICY_ID, r.nftAssetName), 1n,
       'minted unit must be exactly +1 of policy:nftAssetName, not just any positive mint',
     );
     // one output to the registry address carrying deposit + NFT
@@ -143,20 +138,20 @@ describe('buildRegisterAgent (real validator, offline)', () => {
     let registryOut: any = null;
     for (let i = 0; i < outs.len(); i++) {
       const o = outs.get(i);
-      if (o.address().to_bech32() === getRegistryAddress()) registryOut = o;
+      if (o.address().to_bech32() === legacyRegistryAddress()) registryOut = o;
     }
     assert.ok(registryOut, 'no output to the registry address');
     // literal is the load-bearing assertion: comparing only to the constant
-    // under test is tautological (it would pass even if MIN_AP3X_DEPOSIT drifted
+    // under test is tautological (it would pass even if LEGACY_REGISTRY_DEPOSIT drifted
     // above the real on-chain floor - see the dedicated pin test above).
     assert.equal(registryOut.amount().coin(), 10_000_000n, 'registry deposit must equal the literal on-chain floor');
-    assert.equal(registryOut.amount().coin(), MIN_AP3X_DEPOSIT, 'MIN_AP3X_DEPOSIT should still equal the literal floor pinned above');
+    assert.equal(registryOut.amount().coin(), LEGACY_REGISTRY_DEPOSIT, 'LEGACY_REGISTRY_DEPOSIT should still equal the literal floor pinned above');
     assert.ok(registryOut.datum() && registryOut.datum()!.kind() === 1, 'registry output datum must be inline');
     // registry output must actually carry the NFT, not just the deposit
     const registryAssets = registryOut.amount().multi_asset();
     assert.ok(registryAssets, 'registry output carries no native assets');
     assert.equal(
-      findAssetQuantity(registryAssets, REGISTRY_POLICY_ID, r.nftAssetName), 1n,
+      findAssetQuantity(registryAssets, LEGACY_REGISTRY_POLICY_ID, r.nftAssetName), 1n,
       'registry output must hold exactly 1 of the derived NFT unit',
     );
     // required signer = owner
@@ -167,7 +162,7 @@ describe('buildRegisterAgent (real validator, offline)', () => {
       if (signers!.get(i).to_hex() === OWN_VKEY_HASH) found = true;
     }
     assert.ok(found, 'owner vkey hash missing from required_signers');
-    assert.equal(r.depositLovelace, MIN_AP3X_DEPOSIT.toString());
+    assert.equal(r.depositLovelace, LEGACY_REGISTRY_DEPOSIT.toString());
   });
 
   test('rejects invalid endpoint and empty capability before building', async () => {
@@ -186,48 +181,17 @@ describe('buildRegisterAgent (real validator, offline)', () => {
     // construct a lucid instance FOR the script address itself, so the
     // derived changeAddress (== lucid.wallet().address()) is the one that
     // paymentKeyHashOf rejects.
-    const scriptLucid = await lucidForAddress(new FixtureProvider([REGISTRY_UTXO]), getRegistryAddress());
+    const scriptLucid = await lucidForAddress(new FixtureProvider([REGISTRY_UTXO]), legacyRegistryAddress());
     await assert.rejects(buildRegisterAgent(scriptLucid, {
       name: 'X', description: '', capabilities: [], framework: 'c', endpoint: '',
     }), /verification key|payment key/i);
   });
 });
 
-describe('buildMessageAgent (resolves via fixture registry UTxO)', () => {
-  test('pays 2 AP3X to the owner-derived address with label-674 metadata', async () => {
-    const provider = new FixtureProvider([...FIXTURE_UTXOS, REGISTRY_UTXO]);
-    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
-    const r = await buildMessageAgent(lucid, provider, {
-      agentId: AGENT_DID, messageType: 'inquiry', payload: 'unit ping',
-    });
-    assert.equal(r.agentName, 'FixtureAgent');
-    const tx = decodeTx(r.txCbor);
-    // 2 AP3X output to the recipient (owner == OWN_ADDRESS's key, enterprise-derived)
-    const outs = tx.body().outputs();
-    let paid = 0;
-    for (let i = 0; i < outs.len(); i++) {
-      if (outs.get(i).address().to_bech32() === r.recipientAddress && outs.get(i).amount().coin() === 2_000_000n) paid++;
-    }
-    assert.ok(paid >= 1, 'no 2 AP3X output to the recipient address');
-    // metadata label present
-    const aux = tx.auxiliary_data();
-    assert.ok(aux && aux.metadata() && aux.metadata()!.get(BigInt(AGENT_MESSAGE_LABEL)), 'label-674 metadata missing');
-    // metadata content: from/to must be the real sender/recipient, not swapped
-    const metaMap = aux!.metadata()!.get(BigInt(AGENT_MESSAGE_LABEL))!.as_map()!;
-    const fromVal = metadatumText(metaMap.get(CML.TransactionMetadatum.new_text('from'))!);
-    const toVal = metadatumText(metaMap.get(CML.TransactionMetadatum.new_text('to'))!);
-    assert.equal(fromVal, OWN_ADDRESS, 'metadata "from" must be the sending changeAddress');
-    assert.equal(toVal, AGENT_DID, 'metadata "to" must be the recipient agent DID');
-    const vkeys = tx.witness_set().vkeywitnesses();
-    assert.ok(vkeys === undefined || vkeys.len() === 0, 'message build must be unsigned');
-  });
-
-  test('unknown agent DID fails with agent-not-found, not a network error', async () => {
+describe('resolveAgentUtxo (not found)', () => {
+  test('an unknown agent DID fails with agent-not-found, not a network error', async () => {
     const provider = new FixtureProvider(FIXTURE_UTXOS); // no registry UTxO
-    const lucid = await lucidForAddress(provider, OWN_ADDRESS);
-    await assert.rejects(buildMessageAgent(lucid, provider, {
-      agentId: AGENT_DID, messageType: 'inquiry', payload: 'x',
-    }), /Agent not found/);
+    await assert.rejects(resolveAgentUtxo(provider, AGENT_DID), /Agent not found/);
   });
 });
 
@@ -269,10 +233,10 @@ describe('registry owner ops (real validator, offline)', () => {
     const outs = tx.body().outputs();
     let registryOut: any = null;
     for (let i = 0; i < outs.len(); i++) {
-      if (outs.get(i).address().to_bech32() === getRegistryAddress()) registryOut = outs.get(i);
+      if (outs.get(i).address().to_bech32() === legacyRegistryAddress()) registryOut = outs.get(i);
     }
     assert.ok(registryOut, 'no continuing registry output');
-    assert.equal(registryOut.amount().coin(), MIN_AP3X_DEPOSIT);
+    assert.equal(registryOut.amount().coin(), LEGACY_REGISTRY_DEPOSIT);
     assert.ok(registryOut.datum() && registryOut.datum()!.kind() === 1, 'continuing datum must be inline');
     // decode the continuing inline datum and verify the merge
     const datumCbor = registryOut.datum()!.as_datum()!.to_cbor_hex();
@@ -323,7 +287,7 @@ describe('registry owner ops (real validator, offline)', () => {
     const outs = tx.body().outputs();
     let registryOut: any = null;
     for (let i = 0; i < outs.len(); i++) {
-      if (outs.get(i).address().to_bech32() === getRegistryAddress()) registryOut = outs.get(i);
+      if (outs.get(i).address().to_bech32() === legacyRegistryAddress()) registryOut = outs.get(i);
     }
     const datumCbor = registryOut.datum()!.as_datum()!.to_cbor_hex();
     const p = parseAgentDatum(datumCbor, 'x#0', { [AGENT_UNIT]: 1n })!;
@@ -331,7 +295,7 @@ describe('registry owner ops (real validator, offline)', () => {
     assert.equal(p.name, 'FixtureAgent'); // everything else preserved
     // script-credential new owner refused
     await assert.rejects(buildTransferAgent(lucid, provider, {
-      agentId: AGENT_DID, newOwnerAddress: getRegistryAddress(),
+      agentId: AGENT_DID, newOwnerAddress: legacyRegistryAddress(),
     }), /verification key/i);
   });
 
@@ -346,7 +310,7 @@ describe('registry owner ops (real validator, offline)', () => {
     const tx = decodeTx(r.txCbor);
     const outs = tx.body().outputs();
     for (let i = 0; i < outs.len(); i++) {
-      assert.notEqual(outs.get(i).address().to_bech32(), getRegistryAddress(),
+      assert.notEqual(outs.get(i).address().to_bech32(), legacyRegistryAddress(),
         'deregister must not leave an output at the registry');
       // every output is change to the owner
       assert.equal(outs.get(i).address().to_bech32(), OWN_ADDRESS);
@@ -383,7 +347,7 @@ describe('registry owner ops - value preservation & deregister floor (correction
   function overfundedRegistryUtxo(lovelace: bigint) {
     return {
       txHash: 'ce'.repeat(32), outputIndex: 0,
-      address: getRegistryAddress(),
+      address: legacyRegistryAddress(),
       assets: { lovelace, [AGENT_UNIT]: 1n },
       datum: buildAgentDatum(OWN_VKEY_HASH, 'FixtureAgent', 'offline fixture agent', ['testing'], 'custom', '', 1750000000000),
     };
@@ -401,7 +365,7 @@ describe('registry owner ops - value preservation & deregister floor (correction
     const outs = tx.body().outputs();
     let registryOut: any = null;
     for (let i = 0; i < outs.len(); i++) {
-      if (outs.get(i).address().to_bech32() === getRegistryAddress()) registryOut = outs.get(i);
+      if (outs.get(i).address().to_bech32() === legacyRegistryAddress()) registryOut = outs.get(i);
     }
     assert.ok(registryOut, 'no continuing registry output');
     assert.equal(registryOut.amount().coin(), 25_000_000n, 'continuing output must preserve the FULL input value, not the deposit floor');
@@ -421,7 +385,7 @@ describe('registry owner ops - value preservation & deregister floor (correction
     const outs = tx.body().outputs();
     let registryOut: any = null;
     for (let i = 0; i < outs.len(); i++) {
-      if (outs.get(i).address().to_bech32() === getRegistryAddress()) registryOut = outs.get(i);
+      if (outs.get(i).address().to_bech32() === legacyRegistryAddress()) registryOut = outs.get(i);
     }
     assert.ok(registryOut, 'no continuing registry output');
     assert.equal(registryOut.amount().coin(), 25_000_000n, 'continuing output must preserve the FULL input value on transfer too');
@@ -432,7 +396,7 @@ describe('registry owner ops - value preservation & deregister floor (correction
     // unconditionally requires a fee UTxO whenever the wallet has one) -
     // pins the underlying chain fact that motivates that requirement: the
     // deployed validator's returned-change floor is cleared by the registry
-    // deposit alone once it's well above MIN_AP3X_DEPOSIT. Confirms this is
+    // deposit alone once it's well above LEGACY_REGISTRY_DEPOSIT. Confirms this is
     // a genuine value floor on the validator side, not "any sole-input
     // deregister fails" (which was the earlier, wrong diagnosis).
     const overfunded = overfundedRegistryUtxo(25_000_000n);
@@ -442,16 +406,16 @@ describe('registry owner ops - value preservation & deregister floor (correction
     const mintRedeemer = Data.to(new Constr(1, []));
     const completed = await lucid.newTx()
       .collectFrom([overfunded], spendRedeemer)
-      .attach.SpendingValidator(registryScript())
+      .attach.SpendingValidator(legacyRegistryScript())
       .mintAssets({ [AGENT_UNIT]: -1n }, mintRedeemer)
-      .attach.MintingPolicy(registryScript())
+      .attach.MintingPolicy(legacyRegistryScript())
       .addSigner(OWN_ADDRESS)
       .complete();
     const tx = decodeTx(completed.toCBOR());
     assert.equal(tx.body().inputs().len(), 1, 'sole input - Lucid should not need to pull in any extra wallet UTxO here');
 
     // Pin: buildDeregisterAgent's returned `detail` is the ACTUAL spent
-    // registry UTxO lovelace (25 AP3X here), not the MIN_AP3X_DEPOSIT
+    // registry UTxO lovelace (25 AP3X here), not the LEGACY_REGISTRY_DEPOSIT
     // constant. Goes through buildDeregisterAgent itself (unlike the direct
     // build above), which is safe here because the provider also carries
     // FIXTURE_UTXOS, so the extra fee UTxO that path unconditionally pulls in

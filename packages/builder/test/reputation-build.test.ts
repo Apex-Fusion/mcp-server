@@ -16,7 +16,7 @@ import type { UTxO } from '@lucid-evolution/lucid';
 import { blake2b } from '@noble/hashes/blake2b';
 import { lucidForAddress } from '../src/vector/build.ts';
 import { ensureSlotConfig } from '../src/vector/gov-build.ts';
-import { REGISTRY_POLICY_ID, getRegistryAddress } from '../src/vector/registry-build.ts';
+import { LEGACY_REGISTRY_POLICY_ID, legacyRegistryAddress } from '../src/vector/legacy-registry.ts';
 import { decodeAdvertDatum } from '../src/vector/marketplace-datum.ts';
 import {
   REPUTATION_SCRIPT_HASH, REPUTATION_ADDRESS, REPUTATION_REF_SCRIPT_UTXO, REPUTATION_PARAMS_UTXO, REPUTATION_PARAMS_HOLDER_HASH,
@@ -168,11 +168,11 @@ describe('readRegistryRecord and stakedCapabilities', () => {
       assert.equal(record.utxo.txHash, c.registry.txHash);
       assert.equal(record.ownerPkh, ownerOf(c));
       assert.deepEqual(record.capabilityHex.map(capabilityText), c.capabilities);
-      assert.equal(c.registry.address, getRegistryAddress());
+      assert.equal(c.registry.address, legacyRegistryAddress());
     }
   });
   test('refuses a DID of another policy, and one with no record', async () => {
-    await assert.rejects(readRegistryRecord(nodeFor(STAKE_A), STAKE_A.agentId.replace(REGISTRY_POLICY_ID, 'ab'.repeat(28))), /is not a DID of the agent registry/);
+    await assert.rejects(readRegistryRecord(nodeFor(STAKE_A), STAKE_A.agentId.replace(LEGACY_REGISTRY_POLICY_ID, 'ab'.repeat(28))), /is not a DID of the agent registry/);
     await assert.rejects(readRegistryRecord(nodeFor(STAKE_A), STAKE_B.agentId), /Agent not found/);
     await assert.rejects(readRegistryRecord(nodeFor(STAKE_A), STAKE_A.agentId.slice(0, -2)), /asset name must be 64 hex characters/);
   });

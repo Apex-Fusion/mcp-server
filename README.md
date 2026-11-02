@@ -69,10 +69,12 @@ Self-hosting instructions are below.
 ## Local signer (non-custodial path)
 
 `packages/signer` is a local MCP server that holds your key and signs transactions locally
-instead of handing your mnemonic to a shared host. It has **no network access at all**:
+instead of handing your mnemonic to a shared host. It has **no network access by default**:
 stdio transport only, no Provider, no egress, so a key given to it never reaches a shared server
-or your model provider. Four tools: `vector_signer_get_address`, `vector_signer_decode_transaction`,
-`vector_signer_sign`, `vector_signer_get_spend_limits`.
+or your model provider. One optional, read-only setting (`VECTOR_SIGNER_OGMIOS_URL`) lets it look
+up the inputs a transaction spends, so that its spend limit counts only what its own inputs fund.
+Five tools: `vector_signer_get_address`, `vector_signer_get_public_key`, `vector_signer_decode_transaction`,
+`vector_signer_sign` (also for a transaction that other keys signed first), `vector_signer_get_spend_limits`.
 
 **In this codebase, this signer is the single signing point for every family the builder
 exposes.** The full non-custodial flow is live in this release for all of them:
@@ -94,8 +96,7 @@ limitations.
 - **Wallet & queries** - balances, UTxOs, and transaction history for any address (no key material)
 - **Keyless transaction building** - build unsigned AP3X/token/multi-output transactions and contract interactions; sign locally, broadcast via submit
 - **Smart contracts** - deploy Plutus/Aiken validators, lock and spend UTxOs at script addresses (keyless)
-- **Agent registry** - register, discover, update, transfer, and deregister on-chain AI agent identities via soulbound NFTs (keyless - build, sign locally, broadcast)
-- **Agent messaging** - send on-chain messages between agents via TX metadata (keyless)
+- **Agent identity** - resolve `did:vector` DIDs through the identity gateway, read an agent's profile by DID (canonical or legacy form), and discover agents with listed adverts through the marketplace indexer; the legacy registry tools (register, update, transfer, deregister) stay keyless - build, sign locally, broadcast
 - **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals; the on-chain module is live on Vector mainnet, and every write tool is keyless in this codebase
 - **Agents marketplace, both sides** - hire a supplier (escrow post, accept, reclaim, send a job, check its receipt) and list one (advert post and retire), keyless
 - **Reputation self-stake** - lock an agent's Module-3 self-stake behind the capabilities its registry record lists (keyless, two steps, mainnet; held until the deployed module is fixed, see [Reputation](#reputation-2))
@@ -130,17 +131,17 @@ limitations.
 | `vector_build_deploy_contract` | Build an unsigned deployment of a Plutus V1/V2/V3 or Aiken validator (keyless) |
 | `vector_build_interact_contract` | Build an unsigned lock or spend at a script address, with a redeemer (keyless) |
 
-### Agent Registry
+### Agent Identity
 
 | Tool | Description |
 |------|-------------|
-| `vector_build_register_agent` | Build an unsigned agent registration - mints a soulbound identity NFT and locks a 10 AP3X deposit (keyless) |
-| `vector_discover_agents` | Discover registered agents, filter by capability or framework (no wallet needed) |
-| `vector_get_agent_profile` | Get an agent's full profile by DID (no wallet needed) |
-| `vector_build_update_agent` | Build an unsigned update to an agent's name, description, capabilities, framework, or endpoint (keyless) |
-| `vector_build_transfer_agent` | Build an unsigned transfer of agent ownership to a new address (keyless) |
-| `vector_build_deregister_agent` | Build an unsigned deregistration - burns the identity NFT and returns the 10 AP3X deposit (keyless) |
-| `vector_build_message_agent` | Build an unsigned on-chain message to an agent via TX metadata (label 674) (keyless) |
+| `vector_resolve_did` | Resolve a `did:vector` DID (canonical or legacy form, optional `versionId`/`versionTime`) through the identity gateway; returns the HTTP status and the DID resolution result unchanged (no wallet needed) |
+| `vector_get_agent_profile` | Get an agent's profile by DID: a canonical DID through the identity gateway (profile, effective status, keys, record output), a legacy DID from the legacy registry (no wallet needed) |
+| `vector_discover_agents` | Discover agents with a listed advert, from the marketplace indexer; filter by capability (no wallet needed) |
+| `vector_build_register_agent` | Build an unsigned legacy-registry registration - mints a soulbound identity NFT and locks a 10 AP3X deposit (keyless) |
+| `vector_build_update_agent` | Build an unsigned update to a legacy agent's name, description, capabilities, framework, or endpoint (keyless) |
+| `vector_build_transfer_agent` | Build an unsigned transfer of legacy agent ownership to a new address (keyless) |
+| `vector_build_deregister_agent` | Build an unsigned deregistration of a legacy record - burns the identity NFT and returns the 10 AP3X deposit (keyless) |
 
 ### Self-Improvement Module
 
@@ -169,7 +170,7 @@ limitations.
 | `vector_build_marketplace_post_advert` | Build an unsigned advert Post that lists your supplier agent: the key of `changeAddress` becomes the supplier key, and the advert names the capability, model, price, bonds, processing window (from 60,001 ms, the shortest a supplier template can serve, 180,000 ms with its default `SERVICE_TIMEOUT_MS`, to 24 h, the longest `vector_build_marketplace_post_escrow` will hire), https endpoint (no whitespace, query or fragment, since jobs go to `<endpoint_url>/v1/job`) and manifest. Locks a deposit (the supplier bond, at least 2 AP3X, raised to the ledger minimum for the datum) that returns on Retire. A `detail_uri` needs the caller's `detail_hash` (the server does not fetch it); without one the hash is that of no bytes. The datum is byte-identical to the supplier template's; fleet capability ids and fields over 64 bytes are refused. Once it confirms, set the supplier runtime's `ADVERT_REF` to the new advert ref (the template serves only that advert) (keyless) |
 | `vector_build_marketplace_retire_advert` | Build an unsigned advert Retire: only the advert's supplier key can retire it, and the deposit returns to `changeAddress`. A buyer whose escrow against the advert is posted but whose job is not yet sent can no longer send it, so retire when no job is in flight. To list the supplier again, post a new advert and set the runtime's `ADVERT_REF` to it (keyless) |
 
-Agent DIDs follow the format: `did:vector:agent:{policyId}:{nftAssetName}`
+Agent DIDs have two forms: the canonical `did:vector:<64 hex>` and the legacy `did:vector:agent:{policyId}:{nftAssetName}`. The legacy build tools take the legacy form.
 
 Example non-custodial flow for a registry op: `vector_build_register_agent` →
 `vector_signer_sign` → `vector_submit_transaction` → `vector_await_transaction`.
@@ -299,6 +300,7 @@ If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` firs
 | `VECTOR_SUBMIT_URL` | Transaction submit API | `https://submit.vector.testnet.apexfusion.org/api/submit/tx` |
 | `VECTOR_EXPLORER_URL` | Block explorer base URL | `https://vector.testnet.apexscan.org` |
 | `VECTOR_MARKETPLACE_INDEXER_URL` | Marketplace indexer behind the `vector_marketplace_*` tools. Read at startup, before any `.env` file is loaded, so it must be set as a real environment variable. Trailing slashes are ignored. A testnet-configured instance reads the mainnet indexer with testnet Koios, so either set this variable there or treat the marketplace tools as mainnet-only | `https://mp-indexer.vector.apexfusion.org` |
+| `VECTOR_IDENTITY_GATEWAY_URL` | Identity gateway behind `vector_resolve_did` and the canonical-DID path of `vector_get_agent_profile` (`GET /1.0/identifiers/{did}`). Trailing slashes are ignored | `https://id.vector.apexfusion.org` |
 | `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute, per identity (min `1`) | `60` |
 | `VECTOR_MCP_SESSION_IDLE_MS` | `/mcp` session idle timeout before the reaper closes it, in ms (min `100`) | `600000` (10 min) |
 | `VECTOR_MCP_SESSION_SWEEP_MS` | How often the `/mcp` idle reaper sweeps, in ms (min `100`) | `60000` (1 min) |
@@ -391,14 +393,15 @@ echo "your mnemonic words here" > packages/builder/mnemonic.txt
 npm run test:integration
 ```
 
-Requires `mnemonic.txt` in `packages/builder/` containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full agent lifecycle: register, discover, profile, update, transfer, message, and deregister (all keyless now: build → sign → submit → await per step). Also runs `keyless-build.test.ts`, `registry-keyless.test.ts`, and `self-improvement-keyless.test.ts` - tier-1 suites needing no mnemonic at all, each building unsigned transactions against live public data only (`vector_build_send_tokens` is covered offline, by unit tests and the legacy suite above; `self-improvement-keyless.test.ts` covers critique, endorse, and proposal-lock builds, plus a not-found rejection path on proposal-spend). Set `VECTOR_E2E_SUBMIT=1` to additionally run each family's gated end-to-end suite, fully on-chain: `keyless-e2e.test.ts` lands one real self-send (~0.16 AP3X fee); `registry-e2e.test.ts` runs a full register → update → deregister agent lifecycle (the 10 AP3X deposit round-tripped exactly, fees only as net cost); `self-improvement-e2e.test.ts` locks and spends a real improvement proposal through the deployed module validator, then critiques and endorses it (≈48 AP3X in stakes and module minimums, plus six transaction fees, one-way - the stakes are locked by the module's own design, not lost). Set `LEGACY_FULL=1` to additionally exercise the same self-improvement lock → spend sequence inside `run.test.ts` itself (off by default, since `self-improvement-e2e.test.ts` already proves that exact path). Never runs in CI.
+Requires `mnemonic.txt` in `packages/builder/` containing a **funded Vector testnet** mnemonic. Covers the core tools end-to-end against Vector testnet, including the full legacy agent lifecycle: register, discover, profile, update, transfer, and deregister (all keyless now: build → sign → submit → await per step). Also runs `keyless-build.test.ts`, `registry-keyless.test.ts`, and `self-improvement-keyless.test.ts` - tier-1 suites needing no mnemonic at all, each building unsigned transactions against live public data only (`vector_build_send_tokens` is covered offline, by unit tests and the legacy suite above; `self-improvement-keyless.test.ts` covers critique, endorse, and proposal-lock builds, plus a not-found rejection path on proposal-spend). Set `VECTOR_E2E_SUBMIT=1` to additionally run each family's gated end-to-end suite, fully on-chain: `keyless-e2e.test.ts` lands one real self-send (~0.16 AP3X fee); `registry-e2e.test.ts` runs a full register → update → deregister agent lifecycle (the 10 AP3X deposit round-tripped exactly, fees only as net cost); `self-improvement-e2e.test.ts` locks and spends a real improvement proposal through the deployed module validator, then critiques and endorses it (≈48 AP3X in stakes and module minimums, plus six transaction fees, one-way - the stakes are locked by the module's own design, not lost). Set `LEGACY_FULL=1` to additionally exercise the same self-improvement lock → spend sequence inside `run.test.ts` itself (off by default, since `self-improvement-e2e.test.ts` already proves that exact path). Never runs in CI.
 
 ```bash
 npm run test:smoke:signer
 ```
 
-Builds the local signer (`packages/signer`), boots it over stdio, and exercises all four of
-its tools, including the fail-closed audit-write-failure path. No wallet, no network. CI runs
+Builds the local signer (`packages/signer`), boots it over stdio, and exercises all five of
+its tools, including the fail-closed audit-write-failure path and input resolution against a
+local Ogmios stand-in. No wallet, no external network. CI runs
 this on every PR alongside the two smoke tests above.
 
 ```bash

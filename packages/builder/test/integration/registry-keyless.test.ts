@@ -2,6 +2,7 @@ import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML } from '@lucid-evolution/lucid';
 import { startServer, stopServer, callTool, ServerContext } from '../setup.ts';
+import { liveLegacyAgentDid } from './legacy-agent.ts';
 
 // Tier-1 registry integration: LIVE testnet, ZERO secrets. Build-only - nothing
 // is signed, nothing is submitted, no funds move. The register build runs the
@@ -25,11 +26,14 @@ function assertBuildNotSubmitted(text: string) {
 describe('registry keyless tier-1 (live testnet, no secrets)', () => {
   let liveDid: string | null = null;
 
-  test('discover returns live agents and yields a DID to work with', { timeout: 120_000 }, async () => {
+  test('discover reads the marketplace indexer', { timeout: 120_000 }, async () => {
     const text = await callTool(ctx.client, 'vector_discover_agents', { limit: 3 });
-    const m = text.match(/(did:vector:agent:[a-f0-9]+:[a-f0-9]+)/);
-    assert.ok(m, 'no DID found in discovery output - is the testnet registry empty?');
-    liveDid = m![1];
+    assert.match(text, /Agent Discovery Results|No listed agents found/);
+  });
+
+  test('a live legacy agent DID to work with, from the legacy registry', { timeout: 120_000 }, async () => {
+    liveDid = await liveLegacyAgentDid();
+    assert.ok(liveDid, 'no legacy record at the legacy registry address - is the testnet registry empty?');
   });
 
   test('build_register_agent builds an evaluable unsigned registration', { timeout: 120_000 }, async () => {
@@ -49,17 +53,6 @@ describe('registry keyless tier-1 (live testnet, no secrets)', () => {
     const vkeys = tx.witness_set().vkeywitnesses();
     assert.ok(vkeys === undefined || vkeys.len() === 0, 'register build must be unsigned');
     assert.ok(tx.body().mint(), 'register tx has no mint field');
-  });
-
-  test('build_message_agent builds against a live agent', { timeout: 120_000 }, async () => {
-    assert.ok(liveDid, 'needs the DID from discovery');
-    const text = await callTool(ctx.client, 'vector_build_message_agent', {
-      changeAddress: OWN_ADDRESS, agent_id: liveDid!, message_type: 'inquiry', payload: 'tier-1 build-only ping',
-    });
-    assertBuildNotSubmitted(text);
-    const tx = CML.Transaction.from_cbor_hex(extractCbor(text));
-    const aux = tx.auxiliary_data();
-    assert.ok(aux && aux.metadata() && aux.metadata()!.get(674n), 'label-674 metadata missing');
   });
 
   test('get_agent_profile resolves the live agent', { timeout: 120_000 }, async () => {

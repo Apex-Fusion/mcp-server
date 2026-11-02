@@ -25,7 +25,8 @@ import { blake2b } from '@noble/hashes/blake2b';
 import type { VectorUnsignedBuildResult } from '@apexfusion/vector-mcp-shared/types';
 import { toBuildResult } from './build.js';
 import { ensureSlotConfig, paymentKeyHashOf, ChainClockError } from './gov-build.js';
-import { REGISTRY_POLICY_ID, getRegistryAddress, parseDid, resolveAgentUtxo } from './registry-build.js';
+import { parseDid, resolveAgentUtxo } from './registry-build.js';
+import { LEGACY_REGISTRY_POLICY_ID, legacyRegistryAddress } from './legacy-registry.js';
 import { formatOutRef, parseOutRef } from './marketplace-datum.js';
 import { nodeFailure } from './marketplace-lineage.js';
 import { reserveCollateralInputs, assertCollateral, assertWalletIs } from './marketplace-build.js';
@@ -164,10 +165,10 @@ export interface RegistryRecord { utxo: UTxO; agentDidHex: string; ownerPkh: str
 /** The registry record of a DID, from the registry address, with the owner a verification key and the capabilities as the bytes the record holds. */
 export async function readRegistryRecord(provider: Provider, agentId: string): Promise<RegistryRecord> {
   const { policyId, assetName } = parseDid(agentId);
-  if (policyId !== REGISTRY_POLICY_ID) throw new Error(`${cell(agentId)} is not a DID of the agent registry (its policy is not ${REGISTRY_POLICY_ID}).`);
+  if (policyId !== LEGACY_REGISTRY_POLICY_ID) throw new Error(`${cell(agentId)} is not a DID of the agent registry (its policy is not ${LEGACY_REGISTRY_POLICY_ID}).`);
   if (assetName.length !== 64) throw new Error('The DID\'s asset name must be 64 hex characters.');
   const { utxo, profile } = await resolveAgentUtxo(provider as unknown as Parameters<typeof resolveAgentUtxo>[0], agentId);
-  if (utxo.address !== getRegistryAddress()) throw new Error(`The registry token of ${agentId} is not at the registry address; nothing was built.`);
+  if (utxo.address !== legacyRegistryAddress()) throw new Error(`The registry token of ${agentId} is not at the registry address; nothing was built.`);
   const c = Data.from(utxo.datum!);
   const owner = c instanceof Constr ? c.fields[0] : undefined;
   const caps = c instanceof Constr ? c.fields[3] : undefined;

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { CML } from '@lucid-evolution/lucid';
 import { startServer, stopServer, callTool, ServerContext } from '../setup.ts';
+import { liveLegacyAgentDid } from './legacy-agent.ts';
 import {
   scriptHashToAddress, GOV_CRITIQUE_SPEND_HASH, GOV_ENDORSEMENT_SPEND_HASH, GOV_PROPOSAL_SPEND_HASH,
   parseProposalDatum,
@@ -53,7 +54,7 @@ describe('self-improvement keyless tier-1 (live testnet, no secrets)', () => {
   // hex asset-name segment (schema description: "Agent DID (hex) - the asset
   // name from Agent Registry NFT"; confirmed in gov-build.ts's
   // buildProposalSpend, which concatenates it directly onto
-  // AGENT_REGISTRY_POLICY to form an asset unit). This is pre-existing,
+  // LEGACY_REGISTRY_POLICY_ID to form an asset unit). This is pre-existing,
   // inherited verbatim from the custodial code (verified against commit
   // 8162673, before Task 5's keyless rewrite) - not something introduced or
   // fixable in this task. Passing the FULL DID string here throws
@@ -66,11 +67,10 @@ describe('self-improvement keyless tier-1 (live testnet, no secrets)', () => {
   let liveProposalTxHash: string | null = null;
   let liveProposalOutputIndex = 0;
 
-  test('discover a live agent DID to reference in builds', { timeout: 120_000 }, async () => {
-    const text = await callTool(ctx.client, 'vector_discover_agents', { limit: 3 });
-    const m = text.match(/did:vector:agent:([a-f0-9]+):([a-f0-9]+)/);
-    assert.ok(m, `no DID found in discovery output - is the testnet registry empty?\n${text.slice(0, 500)}`);
-    liveAgentAssetName = m![2];
+  test('a live legacy agent DID to reference in builds, from the legacy registry', { timeout: 120_000 }, async () => {
+    const did = await liveLegacyAgentDid();
+    assert.ok(did, 'no legacy record at the legacy registry address - is the testnet registry empty?');
+    liveAgentAssetName = did!.split(':')[4];
   });
 
   test('vector_self_improvement_browse (proposals) returns live proposals and yields a real UTxO ref', { timeout: 120_000 }, async () => {

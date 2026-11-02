@@ -6,10 +6,11 @@ import { CML, Data, Constr, toText, getAddressDetails } from '@lucid-evolution/l
 import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
 import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS } from './fixtures/fixture-provider.ts';
 import { lucidForAddress } from '../src/vector/build.ts';
-import { getRegistryAddress, buildAgentDatum, MIN_AP3X_DEPOSIT } from '../src/vector/registry-build.ts';
+import { buildAgentDatum } from '../src/vector/registry-build.ts';
+import { LEGACY_REGISTRY_POLICY_ID, LEGACY_REGISTRY_DEPOSIT, legacyRegistryAddress } from '../src/vector/legacy-registry.ts';
 import {
   GOV_PROPOSAL_SPEND_HASH, GOV_CRITIQUE_SPEND_HASH, GOV_ENDORSEMENT_SPEND_HASH,
-  GOV_PROPOSAL_MINT_HASH, AGENT_REGISTRY_POLICY,
+  GOV_PROPOSAL_MINT_HASH,
   MIN_CRITIQUE_STAKE_APEX, MIN_ENDORSE_STAKE_APEX, MIN_PROPOSAL_STAKE_APEX,
   scriptHashToAddress, deriveProposalTokenName, deriveActivityTokenName,
   parseProposalDatum, parseCritiqueDatum, parseEndorsementDatum,
@@ -572,7 +573,7 @@ describe('buildProposalSpend (offline, FixtureProvider)', () => {
   const LOCK_TX_HASH = 'aa'.repeat(32);
   const PRESERVE_LOCK_TX_HASH = 'bb'.repeat(32);
   const NFT_TX_HASH = 'cc'.repeat(32);
-  const NFT_UNIT = AGENT_REGISTRY_POLICY + AGENT_DID;
+  const NFT_UNIT = LEGACY_REGISTRY_POLICY_ID + AGENT_DID;
 
   let proposalSpendAddress: string;
   let lockDatumCbor: string;
@@ -583,8 +584,8 @@ describe('buildProposalSpend (offline, FixtureProvider)', () => {
 
   function nftFixtureUtxo(): UTxO {
     return {
-      txHash: NFT_TX_HASH, outputIndex: 0, address: getRegistryAddress(),
-      assets: { lovelace: MIN_AP3X_DEPOSIT, [NFT_UNIT]: 1n },
+      txHash: NFT_TX_HASH, outputIndex: 0, address: legacyRegistryAddress(),
+      assets: { lovelace: LEGACY_REGISTRY_DEPOSIT, [NFT_UNIT]: 1n },
       datum: buildAgentDatum(OWN_VKEY_HASH, 'FixtureAgent', 'offline fixture agent', ['testing'], 'custom', ''),
     };
   }

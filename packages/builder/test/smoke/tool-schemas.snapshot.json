@@ -333,43 +333,6 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_build_message_agent": {
-    "description": "Build an UNSIGNED transaction that sends an on-chain message to a registered agent via TX metadata (label 674), delivering 2 AP3X to the agent's owner address. Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "changeAddress": {
-          "description": "Your wallet address (covers the 2 AP3X delivery and fee; recorded as the sender). Get it from vector_signer_get_address.",
-          "type": "string"
-        },
-        "agent_id": {
-          "description": "Recipient agent DID: did:vector:agent:{policyId}:{nftAssetName}",
-          "type": "string"
-        },
-        "message_type": {
-          "description": "Type of message",
-          "type": "string",
-          "enum": [
-            "inquiry",
-            "proposal",
-            "result"
-          ]
-        },
-        "payload": {
-          "description": "Message payload (string, max 512 chars)",
-          "type": "string",
-          "maxLength": 512
-        }
-      },
-      "required": [
-        "changeAddress",
-        "agent_id",
-        "message_type",
-        "payload"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
   "vector_build_register_agent": {
     "description": "Build an UNSIGNED transaction that registers an agent in the Vector on-chain registry (mints a soulbound identity NFT, locks a 10 AP3X deposit). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
     "inputSchema": {
@@ -896,22 +859,20 @@
     }
   },
   "vector_discover_agents": {
-    "description": "Discover registered agents in the Vector on-chain registry, optionally filtered by capability or framework",
+    "description": "Discover agents that have a listed advert on the Vector agents marketplace, read from the marketplace indexer (which applies the listing rule), optionally filtered by capability. Each result names the agent's DID (did:vector:<64 hex>) when its adverts name one; a legacy advert names none. Read-only, no wallet needed. For an agent's profile, call vector_get_agent_profile with its DID.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "capability": {
-          "description": "Filter by capability tag (e.g. 'research', 'data-extraction')",
-          "type": "string"
-        },
-        "framework": {
-          "description": "Filter by framework (e.g. 'OpenClaw', 'LangChain', 'CrewAI')",
+          "description": "Filter by capability id, case-insensitive substring (e.g. 'llm.chat', 'identity.history')",
           "type": "string"
         },
         "limit": {
           "description": "Maximum number of agents to return (default: 20)",
           "default": 20,
-          "type": "number"
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
         }
       },
       "$schema": "http://json-schema.org/draft-07/schema#"
@@ -969,12 +930,12 @@
     }
   },
   "vector_get_agent_profile": {
-    "description": "Get a registered agent's profile from the on-chain registry by DID (did:vector:agent:...)",
+    "description": "Get an agent's profile by DID. A canonical DID (did:vector:<64 hex>) is resolved through the identity gateway: profile, effective status, keys and record output. A legacy DID (did:vector:agent:<policyId>:<nftAssetName>) is read from the legacy registry on-chain. Read-only, no wallet needed.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "agent_id": {
-          "description": "Agent DID: did:vector:agent:{policyId}:{nftAssetName}",
+          "description": "Agent DID: did:vector:<64 hex> (canonical) or did:vector:agent:<policyId>:<nftAssetName> (legacy)",
           "type": "string"
         }
       },
@@ -1190,6 +1151,34 @@
         "escrow_ref",
         "receipt",
         "receipt_signature"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_resolve_did": {
+    "description": "Resolve a did:vector DID through the identity gateway (DID Resolution v1.0: GET /1.0/identifiers/{did}). Accepts the canonical form did:vector:<64 hex> and the legacy form did:vector:agent:<policyId>:<64 hex>. Returns the HTTP status and the DID resolution result unchanged: the DID document and its metadata (effective status, keys, parties, profile, record output). Optional versionId or versionTime resolve an earlier version. Read-only, no wallet needed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "did": {
+          "description": "The DID to resolve: did:vector:<64 hex> (canonical) or did:vector:agent:<policyId>:<nftAssetName> (legacy)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "versionId": {
+          "description": "Resolve this version: '0', or a decimal number without leading zeros. Do not combine with versionTime.",
+          "type": "string",
+          "maxLength": 32
+        },
+        "versionTime": {
+          "description": "Resolve the DID as it was at this time: YYYY-MM-DDThh:mm:ssZ (UTC, whole seconds). Do not combine with versionId.",
+          "type": "string",
+          "maxLength": 32
+        }
+      },
+      "required": [
+        "did"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }

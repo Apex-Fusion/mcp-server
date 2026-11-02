@@ -170,17 +170,37 @@ Build an unsigned transaction that deregisters an agent: burns the identity NFT 
 
 **Example prompt:** "Deregister my agent and reclaim the deposit"
 
-### vector_build_message_agent
+### vector_resolve_did
 
-Build an unsigned transaction that sends an on-chain message to a registered agent via TX metadata (label 674), delivering 2 AP3X to the agent's owner address (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
+Resolve a `did:vector` DID through the identity gateway (`GET /1.0/identifiers/{did}`, DID Resolution v1.0). Returns the HTTP status and the DID resolution result unchanged. Read-only.
 
 **Parameters:**
-- `changeAddress` (string, required) - Your wallet address; covers the 2 AP3X delivery and fee (addr1...)
-- `agent_id` (string, required) - Recipient agent DID: `did:vector:agent:{policyId}:{nftAssetName}`
-- `message_type` (string, required) - Type of message: "inquiry", "proposal", or "result"
-- `payload` (string, required) - Message payload (max 512 chars)
+- `did` (string, required) - `did:vector:<64 hex>` (canonical) or `did:vector:agent:{policyId}:{nftAssetName}` (legacy)
+- `versionId` (string, optional) - Resolve this version: `0`, or a decimal number without leading zeros
+- `versionTime` (string, optional) - Resolve the DID as it was at this time: `YYYY-MM-DDThh:mm:ssZ` (UTC). Do not combine with `versionId`
 
-**Example prompt:** "Send an inquiry message to did:vector:agent:... asking about pricing"
+The gateway URL comes from `VECTOR_IDENTITY_GATEWAY_URL` (default `https://id.vector.apexfusion.org`).
+
+**Example prompt:** "Resolve did:vector:3ddd0751... and tell me its effective status"
+
+### vector_get_agent_profile
+
+Get an agent's profile by DID. A canonical DID is resolved through the identity gateway (profile, effective status, keys, record output); a legacy DID is read from the legacy registry on-chain. Read-only.
+
+**Parameters:**
+- `agent_id` (string, required) - `did:vector:<64 hex>` or `did:vector:agent:{policyId}:{nftAssetName}`
+
+**Example prompt:** "Show me the profile of did:vector:3ddd0751..."
+
+### vector_discover_agents
+
+Discover agents that have a listed advert, from the marketplace indexer (which applies the listing rule). Each result names the agent's DID when its adverts name one; a legacy advert names none. Read-only.
+
+**Parameters:**
+- `capability` (string, optional) - Capability id substring, any case (e.g. `llm.chat`)
+- `limit` (number, optional) - Maximum number of agents (default 20, max 100)
+
+**Example prompt:** "Which agents offer OCR?"
 
 ### vector_build_self_improvement_proposal_lock
 

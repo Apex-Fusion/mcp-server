@@ -19,14 +19,9 @@ import type {
   VectorBuildStakeResult, VectorBuildProposalLockResult, VectorBuildProposalSpendResult,
 } from '@apexfusion/vector-mcp-shared/types';
 import { toBuildResult } from './build.js';
-import { getRegistryAddress } from './registry-build.js';
+import { LEGACY_REGISTRY_POLICY_ID, legacyRegistryAddress } from './legacy-registry.js';
 
 // ─── Module constants (env-overridable exactly as the custodial module) ────
-
-// Agent Registry policy ID - this module's own copy (self-improvement.ts has
-// always declared this independently of registry-build.ts's REGISTRY_POLICY_ID;
-// preserved as-is, not unified, since that's a separate, out-of-scope change).
-export const AGENT_REGISTRY_POLICY = process.env.AGENT_REGISTRY_POLICY || 'be1a0a2912da180757ed3cd61b56bb8eab0188c19dc3c0e3912d2c01';
 
 // Module contract hashes (from deploy_state.json). GOV_* names are pre-existing
 // deployed config keys - kept as-is (renaming them is a separate, out-of-scope
@@ -154,13 +149,12 @@ export function parseUtxoRef(ref: string): { txHash: string; outputIndex: number
 // on a sibling family file; see task-3-report.md for the reasoning).
 //
 // Deliberate exception to that rule (Task 4): buildProposalSpend below DOES
-// import getRegistryAddress from registry-build.ts - the self-improvement
-// family's NFT-resolution fallback needs the registry's own script address
-// to scan, and that address is derived from registry-build.ts's own
-// REGISTRY_SCRIPT_CBOR constant, not something this file could reasonably
-// duplicate without risking the two copies drifting apart. One-directional
-// (gov-build.ts -> registry-build.ts only, never the reverse), so it does
-// not introduce a cycle.
+// import the legacy registry's policy and address from legacy-registry.ts -
+// the self-improvement family's NFT-resolution fallback needs the registry's
+// own script address to scan, and that address is derived from the one copy
+// of the legacy registry script, not something this file could reasonably
+// duplicate without risking the two copies drifting apart. The module agent
+// identity is the legacy one until Module-6 moves to its new deployment.
 export function paymentKeyHashOf(address: string): string {
   let details;
   try {
@@ -742,7 +736,7 @@ export async function buildProposalSpend(
   // registry-build.ts's resolveAgentUtxo: getUtxoByUnit needs a live indexer
   // (FixtureProvider always throws), so offline building depends on the
   // scan fallback actually running.
-  const nftUnit = AGENT_REGISTRY_POLICY + p.agentDid;
+  const nftUnit = LEGACY_REGISTRY_POLICY_ID + p.agentDid;
   let nftUtxo: UTxO | undefined;
   try {
     nftUtxo = await provider.getUtxoByUnit(nftUnit);
@@ -750,12 +744,12 @@ export async function buildProposalSpend(
     // Koios unavailable, asset not found, or an offline provider - fall through to the address scan.
   }
   if (!nftUtxo) {
-    const registryUtxos = await provider.getUtxos(getRegistryAddress());
+    const registryUtxos = await provider.getUtxos(legacyRegistryAddress());
     nftUtxo = registryUtxos.find((u) => u.assets[nftUnit] && u.assets[nftUnit] > 0n);
   }
   if (!nftUtxo) {
     throw new Error(
-      `Agent registry NFT not found on-chain. Expected token: ${AGENT_REGISTRY_POLICY.slice(0, 12)}...${p.agentDid.slice(0, 12)}... ` +
+      `Agent registry NFT not found on-chain. Expected token: ${LEGACY_REGISTRY_POLICY_ID.slice(0, 12)}...${p.agentDid.slice(0, 12)}... ` +
       `The agent may need to re-register with vector_build_register_agent.`,
     );
   }
