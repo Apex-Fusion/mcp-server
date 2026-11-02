@@ -26,7 +26,8 @@ import { startServer, stopServer, ServerContext } from '../setup.ts';
  * this never needs a mnemonic.
  */
 // The identity registry slice (did:vector, Part 2 Section 10) took the list from 37 to 62: it removed the legacy register, update
-// and transfer tools and added 14 identity registry, 4 attestation, 2 delegation, 3 vault and 5 marketplace build tools.
+// and transfer tools and added 14 identity registry, 4 attestation, 2 delegation, 3 vault and 5 marketplace build tools. The Module-6
+// deployment on the identity registry took it to 64: a critique and an endorsement each take a lock and a creation step.
 const EXPECTED_TOOLS = [
   'vector_await_transaction',
   'vector_build_attestation_attest',
@@ -65,7 +66,9 @@ const EXPECTED_TOOLS = [
   'vector_build_reputation_stake',
   'vector_build_reputation_stake_open',
   'vector_build_self_improvement_critique',
+  'vector_build_self_improvement_critique_spend',
   'vector_build_self_improvement_endorse',
+  'vector_build_self_improvement_endorse_spend',
   'vector_build_self_improvement_proposal_lock',
   'vector_build_self_improvement_proposal_spend',
   'vector_build_send_apex',

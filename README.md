@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks. The 62 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
+Hosted instances run on both networks. The 64 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
 
 | Network | Endpoint |
 |---------|----------|
@@ -98,13 +98,13 @@ limitations.
 - **Smart contracts** - deploy Plutus/Aiken validators, lock and spend UTxOs at script addresses (keyless)
 - **Agent identity** - resolve `did:vector` DIDs through the identity gateway, read an agent's profile by DID (canonical or legacy form), and discover agents with listed adverts through the marketplace indexer
 - **Identity registry** (`did:vector`) - keyless builders for every record action (register, also subagents; adopt a legacy record; update; change controller; suspend and unsuspend; revoke; retire; reclaim; successor; recovery; end subagents), attestations, delegations and vaults; every build returns the unsigned transaction and the key hashes that must sign it, and each key holder signs in turn. The legacy registry writes (register, update, transfer) are retired; a legacy record that does not adopt can still deregister
-- **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals; the on-chain module is live on Vector mainnet, and every write tool is keyless in this codebase
+- **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals on the Module-6 deployment of the identity registry (the agent is a `did:vector` agent whose record is Active); every write tool is keyless
 - **Agents marketplace, both sides** - hire a supplier (escrow post, accept, reclaim, send a job, check its receipt) and list one (advert post and retire), keyless
 - **Reputation self-stake** - lock an agent's Module-3 self-stake behind the capabilities its registry record lists (keyless, two steps, mainnet; held until the deployed module is fixed, see [Reputation](#reputation-2))
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
 - **Streamable HTTP transport** - the modern MCP transport at `/mcp`, with any-origin CORS for browser clients and an unauthenticated `GET /health` probe (the legacy SSE pair was removed in 2.0.0)
 
-## MCP Tools (62)
+## MCP Tools (64)
 
 ### Wallet & Queries
 
@@ -180,12 +180,14 @@ Every tool below is keyless: it builds an unsigned transaction and lists every k
 
 | Tool | Description |
 |------|-------------|
-| `vector_self_improvement_browse` | Browse improvement proposals, critiques, and endorsements |
-| `vector_self_improvement_analyze_metrics` | Proposal metrics: activity, adoption rate, treasury health, engagement |
-| `vector_build_self_improvement_proposal_lock` | Build an unsigned proposal-stake lock (step 1 of 2, keyless) |
-| `vector_build_self_improvement_proposal_spend` | Build an unsigned proposal submission - spends the lock and mints the proposal and activity tokens (step 2 of 2, keyless). Two transactions, agent-orchestrated. |
-| `vector_build_self_improvement_critique` | Build an unsigned critique on a proposal - support, oppose, or propose amendments (keyless) |
-| `vector_build_self_improvement_endorse` | Build an unsigned endorsement of a proposal by staking AP3X (keyless) |
+| `vector_self_improvement_browse` | Browse improvement proposals, critiques, endorsements and the treasury; `deployment: 'previous'` reads the deployment before the identity registry, whose positions stay until their owners exit |
+| `vector_self_improvement_analyze_metrics` | Proposal metrics: activity, adoption rate, treasury health, engagement (current or previous deployment) |
+| `vector_build_self_improvement_proposal_lock` | Build an unsigned proposal lock with its stake (step 1 of 2, keyless). It checks every submission rule first: the identity record, the declared credential, the module parameters, the rate limit and the activity list |
+| `vector_build_self_improvement_proposal_spend` | Build an unsigned proposal submission (step 2 of 2, keyless): spends the lock, mints the proposal token, and inserts the agent's node into the activity list on its first proposal. The record and its ancestors are reference inputs; the declared credential signs |
+| `vector_build_self_improvement_critique` | Build an unsigned critique lock - support, oppose, or propose amendments (step 1 of 2, keyless). The critique names the proposal by its seed |
+| `vector_build_self_improvement_critique_spend` | Build an unsigned critique creation (step 2 of 2, keyless): spends the lock and mints the critique token |
+| `vector_build_self_improvement_endorse` | Build an unsigned endorsement lock by staking AP3X (step 1 of 2, keyless). The endorsement names the proposal by its seed |
+| `vector_build_self_improvement_endorse_spend` | Build an unsigned endorsement creation (step 2 of 2, keyless): spends the lock and mints the endorsement token (`gend_`) |
 
 ### Marketplace (16)
 
@@ -345,6 +347,10 @@ If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` firs
 | `VECTOR_IDENTITY_REF_UTXO`, `VECTOR_IDENTITY_ATTESTATION_REF_UTXO`, `VECTOR_IDENTITY_DELEGATION_REF_UTXO`, `VECTOR_IDENTITY_VAULT_REF_UTXO`, `VECTOR_IDENTITY_ESCROW_REF_UTXO`, `VECTOR_IDENTITY_ADVERT_REF_UTXO` | The reference-script UTxOs (`<txid>#<index>`) of the identity, attestation, delegation, vault, new escrow and new advert scripts. A tool that needs one that is not set names the variable; the builder checks that the UTxO holds the expected script | unset |
 | `VECTOR_IDENTITY_MODULE1_REF_UTXO` | The reference-script UTxO of Module-1's `identity_party`, needed only when a record appoints Module-1 as a party (its consent withdrawal) | unset |
 | `VECTOR_IDENTITY_ALLOWLIST_URL` | Optional https URL of the published adoption allowlist (JSON list of identifiers); `vector_build_identity_adopt` computes the Merkle proof from it when the caller gives none | unset |
+| `GOV_PROPOSAL_SPEND_HASH`, `GOV_PROPOSAL_MINT_HASH`, `GOV_CRITIQUE_SPEND_HASH`, `GOV_CRITIQUE_MINT_HASH`, `GOV_ENDORSEMENT_SPEND_HASH` | Module-6 deployment on the identity registry: the hashes of the applied validators (its deploy state). Set every required `GOV_*` value or none; a malformed value, or a value of the previous deployment, stops the start. The build tools also need the identity deployment | unset (Module-6 build tools answer "not configured") |
+| `GOV_RECORD_TOKEN_POLICY`, `GOV_REFS_TOKEN_POLICY` | The record token policy (GovernanceParams record and the head of the activity list) and the CrossRefs token policy of the Module-6 deployment | unset |
+| `GOV_PARAMS_ADDRESS`, `GOV_CROSSREFS_ADDRESS`, `GOV_TREASURY_ADDRESS` | The params holder address, the CrossRefs address (the oracle holder) and the treasury holder address. The builders find the params record, the CrossRefs output and the activity list by their tokens | unset |
+| `GOV_PROPOSAL_SPEND_REF`, `GOV_PROPOSAL_MINT_REF`, `GOV_CRITIQUE_SPEND_REF`, `GOV_CRITIQUE_MINT_REF`, `GOV_ENDORSEMENT_SPEND_REF` | The reference-script UTxOs (`<txid>#<index>`) of the five validators; a tool that needs one that is not set names the variable | unset |
 | `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute, per identity (min `1`) | `60` |
 | `VECTOR_MCP_SESSION_IDLE_MS` | `/mcp` session idle timeout before the reaper closes it, in ms (min `100`) | `600000` (10 min) |
 | `VECTOR_MCP_SESSION_SWEEP_MS` | How often the `/mcp` idle reaper sweeps, in ms (min `100`) | `60000` (1 min) |

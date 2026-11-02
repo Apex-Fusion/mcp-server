@@ -1,981 +1,722 @@
-import { describe, test, before } from 'node:test';
+// packages/builder/test/gov-build.test.ts
+// The Module-6 (self-improvement) builders on the identity registry (Part 2 Section 7): the blueprint and the test deployment, the
+// token names and codecs (pinned against the reference client of the module, governance_identity.py at vector-agent-modules 91e3823),
+// the GOV_* configuration, the outputs that the validators read, and every builder. Every creation (step 2) completes against the
+// applied Module-6 validators of gov-world.ts (Lucid's local evaluation), and the test decodes the transaction. Offline: no network.
+import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { CML, Data, Constr, toText, getAddressDetails } from '@lucid-evolution/lucid';
-import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
-import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS } from './fixtures/fixture-provider.ts';
-import { lucidForAddress } from '../src/vector/build.ts';
-import { legacyAgentDatum } from './fixtures/legacy-datum.ts';
-import { LEGACY_REGISTRY_POLICY_ID, LEGACY_REGISTRY_DEPOSIT, legacyRegistryAddress } from '../src/vector/legacy-registry.ts';
+import { CML, validatorToScriptHash } from '@lucid-evolution/lucid';
+import type { UTxO } from '@lucid-evolution/lucid';
 import {
-  GOV_PROPOSAL_SPEND_HASH, GOV_CRITIQUE_SPEND_HASH, GOV_ENDORSEMENT_SPEND_HASH,
-  GOV_PROPOSAL_MINT_HASH,
-  MIN_CRITIQUE_STAKE_APEX, MIN_ENDORSE_STAKE_APEX, MIN_PROPOSAL_STAKE_APEX,
-  scriptHashToAddress, deriveProposalTokenName, deriveActivityTokenName,
-  parseProposalDatum, parseCritiqueDatum, parseEndorsementDatum,
-  buildCritique, buildEndorse, buildProposalLock, buildProposalSpend,
-} from '../src/vector/gov-build.ts';
+  DEPLOYMENT, NOW, WINDOW, DAY, CONTROLLER, LISTED, OTHER, OWN_ADDRESS, lucidOn, recordUtxo, rootRecord, testKey,
+} from './fixtures/identity-world.ts';
+import {
+  BLUEPRINT_PATH, CONFIG, CRITIC_CONTROLLER, CRITIC_ID, CROSS_REFS_UTXO, ENDORSER_CONTROLLER, ENDORSER_ID, GOV, GOV_REF_UTXOS,
+  PARAMS, PROPOSER_ID, SCRIPTS, TITLES, AGENT_RECORDS, appliedScript, criticRecord, endorserRecord, governanceConfigCbor, govWorld, headUtxo,
+  lockUtxo, nodeUtxo, paramsUtxo, proposalUtxo,
+} from './fixtures/gov-world.ts';
+import {
+  ACTIVITY_HEAD_TOKEN, MINT_ENDORSEMENT_TOKEN_REDEEMER, SPEND_ACTIVITY_REDEEMER, SUBMIT_PROPOSAL_REDEEMER, decodeActivityDatum, decodeCritiqueDatum,
+  decodeCrossRefs, decodeEndorsementDatum, decodeGovernanceParams, decodeProposalDatum, deriveActivityTokenName, deriveCritiqueTokenName,
+  deriveEndorsementTokenName, deriveProposalTokenName, encodeActivityDatum, encodeCritiqueDatum, encodeCrossRefs, encodeEndorsementDatum,
+  encodeGovernanceParams, encodeProposalDatum,
+} from '../src/vector/gov-codec.ts';
+import type { ActivityDatum, CritiqueDatum, EndorsementDatum, ProposalDatum } from '../src/vector/gov-codec.ts';
+import {
+  GOV_ENV, GOV_NOT_CONFIGURED, GOV_REF_ENV, GovConfigError, PREVIOUS_GOV_DEPLOYMENT, activityListFrom, activityNode, activityPredecessor,
+  describeGovDeployment, expectedCrossRefs, findCrossRefs, findParamsRecord, govDeploymentFrom, makeGovDeployment, readGovRefScript,
+  resolveProposal, scriptAddress,
+} from '../src/vector/gov-deployment.ts';
+import type { GovRefName, KoiosAccess } from '../src/vector/gov-deployment.ts';
+import {
+  DEFAULT_REVIEW_WINDOW_MS, buildCritiqueLock, buildCritiqueSpend, buildEndorseLock, buildEndorseSpend, buildProposalLock, buildProposalSpend,
+  proposalTypeFrom,
+} from '../src/vector/gov-tx.ts';
+import type { GovContext } from '../src/vector/gov-tx.ts';
+import { utf8Hex } from '../src/vector/identity-codec.ts';
+import { DAYS_7_MS } from '../src/vector/identity-rules.ts';
+import { WALLET_ROLE } from '../src/vector/identity-chain.ts';
+import { FixtureProvider } from './fixtures/fixture-provider.ts';
 
-// Deployed-state fixture, captured live from Vector testnet by
-// scripts/capture-gov-state.mjs (2026-07-30) - see that file for the capture
-// and validation logic. `sampleProposal.datumCbor` is a REAL chain datum;
-// `goldenTokenPin` is the audit-#10 evidence (recomputed at capture time from
-// the sample's own producing transaction).
-const FIXTURE_PATH = resolve(import.meta.dirname!, 'fixtures/gov-state.fixture.json');
-const fixture = JSON.parse(readFileSync(FIXTURE_PATH, 'utf-8')) as {
-  asOf: string;
-  refScripts: Array<{ name: string; txHash: string; index: number; scriptCborHex: string; hash: string }>;
-  infra: Array<{ name: string; txHash: string; index: number; address: string; valueLovelace: string; datumCbor: string | null }>;
-  sampleProposal: { txHash: string; index: number; datumCbor: string; tokenUnit: string };
-  goldenTokenPin: { lockTxHash: string; lockOutputIndex: number; expectedTokenName: string };
-};
+const { lo, hi } = WINDOW;
+const common = { changeAddress: OWN_ADDRESS, nowMs: NOW };
+const OWN_KEY_HASH = CML.Address.from_bech32(OWN_ADDRESS).payment_cred()!.as_pub_key()!.to_hex();
+const refOf = (u: UTxO): string => `${u.txHash}#${u.outputIndex}`;
 
-// A FixtureProvider extended with the 2 chain-clock methods OgmiosProvider
-// carries but the base Provider interface (and FixtureProvider) do not:
-// gov-build's ensureSlotConfig/slotClockOf need getSystemStartMs and
-// getNetworkTip. Object.assign onto a real FixtureProvider instance keeps
-// every other method (getUtxos, getUtxosByOutRef, ...) working normally -
-// only these two are stand-ins. Same zeroTime in every call site so
-// ensureSlotConfig's module-level cache can't make test order matter.
-const ZERO_TIME_MS = 1_700_000_000_000;
-const TIP_SLOT = 1_000_000;
-function chainClockProvider(utxos: typeof FIXTURE_UTXOS) {
-  return Object.assign(new FixtureProvider(utxos), {
-    getSystemStartMs: async () => ZERO_TIME_MS,
-    getNetworkTip: async () => ({ slot: TIP_SLOT }),
-  });
-}
+/** Koios is not part of a test unless it names one: a call fails loudly. */
+const NO_KOIOS: KoiosAccess = { url: 'https://koios.example', fetchImpl: (async () => { throw new Error('Koios is not part of this test'); }) as unknown as typeof fetch };
 
-const AGENT_DID = 'ab'.repeat(32);
-const PROPOSAL_TX = '11'.repeat(32);
-const OWN_VKEY_HASH = getAddressDetails(OWN_ADDRESS).paymentCredential!.hash!;
-
-function decodeTx(cborHex: string) {
-  return CML.Transaction.from_cbor_hex(cborHex);
-}
-
-function findOutputTo(tx: ReturnType<typeof decodeTx>, address: string) {
-  const outs = tx.body().outputs();
-  for (let i = 0; i < outs.len(); i++) {
-    const o = outs.get(i);
-    if (o.address().to_bech32() === address) return o;
-  }
-  return null;
-}
-
-// Shared by the mint-content and continuing-output-asset checks below (same
-// helper as registry-build.test.ts - Mint's as_positive_multiasset() and
-// Value's multi_asset() both return the same MultiAsset type).
-function findAssetQuantity(ma: any, policyIdHex: string, assetNameHex: string): bigint | undefined {
-  const policies = ma.keys();
-  for (let i = 0; i < policies.len(); i++) {
-    const policy = policies.get(i);
-    if (policy.to_hex() !== policyIdHex) continue;
-    const assets = ma.get_assets(policy);
-    if (!assets) continue;
-    const names = assets.keys();
-    for (let n = 0; n < names.len(); n++) {
-      const name = names.get(n);
-      if (name.to_hex() === assetNameHex) return assets.get(name);
-    }
-  }
-  return undefined;
-}
-
-let lucid: LucidEvolution;
-before(async () => {
-  lucid = await lucidForAddress(chainClockProvider(FIXTURE_UTXOS), OWN_ADDRESS);
-});
-
-describe('gov-build constants and helpers', () => {
-  test('family spend addresses derive to the recon-verified bech32 values', () => {
-    assert.equal(
-      scriptHashToAddress(GOV_PROPOSAL_SPEND_HASH),
-      'addr1w8uptag6wcqz665h86planmq73288czq4nhgt333ln8pxngfzg955',
-    );
-    assert.equal(
-      scriptHashToAddress(GOV_CRITIQUE_SPEND_HASH),
-      'addr1w88d2gr5scd0jh3qsgqy6crpkr7yhvc0mmtpl9s9hlpqu4gra6s0g',
-    );
-    assert.equal(
-      scriptHashToAddress(GOV_ENDORSEMENT_SPEND_HASH),
-      'addr1w90ugjvy3kzlxq58uk7qh54na9wcwthe003879yqcyh348gvfdvx4',
-    );
-  });
-
-  // Audit #10 (closed 2026-07-30): deriveProposalTokenName - flat
-  // Constr(0, [txHash, idx]) through Lucid's own Data.to - reproduces a token
-  // name actually minted on deployed bytecode. Literals below are the full
-  // hex captured live by scripts/capture-gov-state.mjs from the producing
-  // transaction of a real submitted proposal (spend tx
-  // 01ac86ca226e1824762dec15a405bed9a67f99419f7ef283c3424964a23d2fb8, lock
-  // input 0b4015bd69ef...#0). Hardcoded (not read from the fixture) so this
-  // pin catches drift even if the fixture is ever regenerated incorrectly;
-  // the second half of the test cross-checks fixture/pin agreement.
-  test('deriveProposalTokenName golden pin matches deployed bytecode (audit #10)', () => {
-    const LOCK_TX_HASH = '0b4015bd69ef9e93a7eafdc778433ea1d1acb4f8ab7b2efaa52990b65415e919';
-    const LOCK_OUTPUT_INDEX = 0;
-    const EXPECTED_TOKEN_NAME = '70726f705f1a38676b49274bb694b9677f8b17af728bb4fca74bfd3572049bfe';
-
-    assert.equal(deriveProposalTokenName(LOCK_TX_HASH, LOCK_OUTPUT_INDEX), EXPECTED_TOKEN_NAME);
-
-    // fixture/pin agreement: the checked-in capture must still say the same thing.
-    assert.equal(fixture.goldenTokenPin.lockTxHash, LOCK_TX_HASH);
-    assert.equal(fixture.goldenTokenPin.lockOutputIndex, LOCK_OUTPUT_INDEX);
-    assert.equal(fixture.goldenTokenPin.expectedTokenName, EXPECTED_TOKEN_NAME);
-  });
-
-  test('parseProposalDatum parses the captured REAL chain datum into a populated object', () => {
-    const parsed = parseProposalDatum(fixture.sampleProposal.datumCbor);
-    assert.ok(parsed, 'fixture sample proposal datum failed to parse');
-    assert.ok(
-      ['Open', 'Amended', 'Adopted', 'Rejected', 'Expired', 'Withdrawn'].includes(parsed!.state),
-      `unexpected state: ${parsed!.state}`,
-    );
-    assert.ok(
-      ['ParameterChange', 'TreasurySpend', 'ProtocolUpgrade', 'GameActivation', 'GeneralSuggestion'].includes(parsed!.proposalType),
-      `unexpected proposalType: ${parsed!.proposalType}`,
-    );
-    assert.equal(typeof parsed!.proposerDid, 'string');
-    assert.ok(parsed!.proposerDid.length > 0);
-    assert.ok(parsed!.storageUri.startsWith('ipfs://') || parsed!.storageUri.length > 0);
-    assert.ok(parsed!.stakeAmount > 0);
-  });
-
-  test('parseProposalDatum returns null on garbage, never throws', () => {
-    assert.equal(parseProposalDatum('deadbeef'), null);
-  });
-
-  test('MIN_CRITIQUE_STAKE_APEX, MIN_ENDORSE_STAKE_APEX, and MIN_PROPOSAL_STAKE_APEX match the wire minimums', () => {
-    assert.equal(MIN_CRITIQUE_STAKE_APEX, 10);
-    assert.equal(MIN_ENDORSE_STAKE_APEX, 5);
-    assert.equal(MIN_PROPOSAL_STAKE_APEX, 25);
-  });
-});
-
-describe('buildCritique (offline, FixtureProvider)', () => {
-  test('builds an unsigned lock tx: stake+2 AP3X to the critique address, datum round-trips', async () => {
-    const r = await buildCritique(lucid, {
-      agentDid: AGENT_DID,
-      proposalTxHash: PROPOSAL_TX,
-      proposalOutputIndex: 0,
-      critiqueType: 'Supportive',
-      stakeApex: 12,
-      critiqueHash: 'cd'.repeat(32),
-      storageUri: 'ipfs://test-critique-doc',
-    });
-
-    assert.equal(r.op, 'critique');
-    assert.equal(r.stakeLovelace, '12000000');
-    assert.equal(r.scriptAddress, scriptHashToAddress(GOV_CRITIQUE_SPEND_HASH));
-    assert.equal(r.proposalRef, `${PROPOSAL_TX}#0`);
-    assert.equal(r.ipfsCid, undefined, 'no document was given - no upload should have happened');
-
-    const tx = decodeTx(r.txCbor);
-    const vkeys = tx.witness_set().vkeywitnesses();
-    assert.ok(vkeys === undefined || vkeys.len() === 0, 'critique build must be unsigned');
-    assert.equal(CML.hash_transaction(tx.body()).to_hex(), r.txHash);
-
-    const critiqueOut = findOutputTo(tx, r.scriptAddress);
-    assert.ok(critiqueOut, 'no output to the critique address');
-    assert.equal(critiqueOut!.amount().coin(), 14_000_000n, 'output must be stake (12 AP3X) + 2 AP3X');
-    assert.ok(critiqueOut!.datum() && critiqueOut!.datum()!.kind() === 1, 'continuing datum must be inline');
-
-    const datumCbor = critiqueOut!.datum()!.as_datum()!.to_cbor_hex();
-    const parsed = parseCritiqueDatum(datumCbor);
-    assert.ok(parsed, 'built critique datum failed to parse back');
-    assert.equal(parsed!.criticDid, AGENT_DID);
-    assert.equal(parsed!.critiqueType, 'Supportive');
-    assert.equal(parsed!.critiqueHash, 'cd'.repeat(32));
-    assert.equal(parsed!.storageUri, 'ipfs://test-critique-doc');
-    assert.equal(parsed!.stakeAmount, 12_000_000);
-    assert.equal(parsed!.incorporated, false);
-    assert.equal(parsed!.proposalRef.fields[0], PROPOSAL_TX);
-    assert.equal(Number(parsed!.proposalRef.fields[1]), 0);
-  });
-
-  test('Amendment critiqueType embeds the critique hash in the type datum too', async () => {
-    const hash = 'ef'.repeat(32);
-    const r = await buildCritique(lucid, {
-      agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 2,
-      critiqueType: 'Amendment', stakeApex: 10, critiqueHash: hash, storageUri: 'ipfs://amend',
-    });
-    const tx = decodeTx(r.txCbor);
-    const critiqueOut = findOutputTo(tx, r.scriptAddress)!;
-    const datumCbor = critiqueOut.datum()!.as_datum()!.to_cbor_hex();
-    const parsed = parseCritiqueDatum(datumCbor)!;
-    assert.equal(parsed.critiqueType, 'Amendment');
-    // the parser only surfaces critique_type's constructor index (matches the
-    // custodial parser exactly) - decode the raw datum directly to confirm
-    // the hash is actually embedded in field 5's payload, not just labeled.
-    const raw = Data.from(datumCbor) as Constr<Data>;
-    const critiqueTypeField = raw.fields[5] as Constr<Data>;
-    assert.equal(critiqueTypeField.index, 2);
-    assert.equal(critiqueTypeField.fields[0], hash);
-  });
-
-  test('attempts a Filebase upload when critiqueDocument is given (fails clean - not configured in tests)', async () => {
-    // No FILEBASE_* env vars are set in this test environment, so a genuine
-    // upload attempt must surface the "not configured" error - proving the
-    // document path is actually wired up without needing to mock the AWS SDK.
-    await assert.rejects(
-      buildCritique(lucid, {
-        agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 0,
-        critiqueType: 'Supportive', stakeApex: 12, critiqueDocument: '{"finding":"test"}',
-      }),
-      /Filebase not configured/,
-    );
-  });
-
-  test('stake minimum is validated BEFORE any Filebase upload attempt', async () => {
-    // If validation order were wrong, this would fail with the Filebase
-    // error instead (critiqueDocument is provided, stake is not).
-    await assert.rejects(
-      buildCritique(lucid, {
-        agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 0,
-        critiqueType: 'Supportive', stakeApex: 1, critiqueDocument: '{"finding":"test"}',
-      }),
-      /at least 10/i,
-    );
-  });
-
-  test('succeeds at exactly the minimum stake (10 AP3X) - the boundary is inclusive', async () => {
-    const r = await buildCritique(lucid, {
-      agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 0,
-      critiqueType: 'Supportive', stakeApex: 10,
-      critiqueHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
-    });
-    assert.equal(r.stakeLovelace, '10000000');
-    const tx = decodeTx(r.txCbor);
-    const critiqueOut = findOutputTo(tx, r.scriptAddress);
-    assert.ok(critiqueOut, 'no output to the critique address');
-    assert.equal(critiqueOut!.amount().coin(), 12_000_000n, 'exactly-minimum stake (10 AP3X) must still build: 10 + 2 AP3X');
-  });
-
-  test('rejects a stake below the minimum', async () => {
-    await assert.rejects(
-      buildCritique(lucid, {
-        agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 0,
-        critiqueType: 'Supportive', stakeApex: 9,
-        critiqueHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
-      }),
-      /at least 10/i,
-    );
-  });
-
-  test('rejects when neither critiqueDocument nor critiqueHash/storageUri is provided', async () => {
-    await assert.rejects(
-      buildCritique(lucid, {
-        agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 0,
-        critiqueType: 'Supportive', stakeApex: 10,
-      }),
-      /critiqueHash|critiqueDocument/,
-    );
-  });
-
-  test('rejects a malformed critiqueHash (not 64 hex chars)', async () => {
-    await assert.rejects(
-      buildCritique(lucid, {
-        agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 0,
-        critiqueType: 'Supportive', stakeApex: 10,
-        critiqueHash: 'nothex', storageUri: 'ipfs://x',
-      }),
-      /64 hex/,
-    );
-  });
-});
-
-describe('buildEndorse (offline, FixtureProvider)', () => {
-  test('builds an unsigned lock tx: stake+2 AP3X to the endorsement address, datum round-trips', async () => {
-    const r = await buildEndorse(lucid, {
-      agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 1, stakeApex: 7,
-    });
-
-    assert.equal(r.op, 'endorse');
-    assert.equal(r.stakeLovelace, '7000000');
-    assert.equal(r.scriptAddress, scriptHashToAddress(GOV_ENDORSEMENT_SPEND_HASH));
-    assert.equal(r.proposalRef, `${PROPOSAL_TX}#1`);
-
-    const tx = decodeTx(r.txCbor);
-    const vkeys = tx.witness_set().vkeywitnesses();
-    assert.ok(vkeys === undefined || vkeys.len() === 0, 'endorse build must be unsigned');
-    assert.equal(CML.hash_transaction(tx.body()).to_hex(), r.txHash);
-
-    const endorseOut = findOutputTo(tx, r.scriptAddress);
-    assert.ok(endorseOut, 'no output to the endorsement address');
-    assert.equal(endorseOut!.amount().coin(), 9_000_000n, 'output must be stake (7 AP3X) + 2 AP3X');
-    assert.ok(endorseOut!.datum() && endorseOut!.datum()!.kind() === 1, 'continuing datum must be inline');
-
-    const datumCbor = endorseOut!.datum()!.as_datum()!.to_cbor_hex();
-    const parsed = parseEndorsementDatum(datumCbor);
-    assert.ok(parsed, 'built endorsement datum failed to parse back');
-    assert.equal(parsed!.endorserDid, AGENT_DID);
-    assert.equal(parsed!.stakeAmount, 7_000_000);
-    assert.equal(parsed!.proposalRef.fields[0], PROPOSAL_TX);
-    assert.equal(Number(parsed!.proposalRef.fields[1]), 1);
-  });
-
-  test('succeeds at exactly the minimum stake (5 AP3X) - the boundary is inclusive', async () => {
-    const r = await buildEndorse(lucid, {
-      agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 0, stakeApex: 5,
-    });
-    assert.equal(r.stakeLovelace, '5000000');
-    const tx = decodeTx(r.txCbor);
-    const endorseOut = findOutputTo(tx, r.scriptAddress);
-    assert.ok(endorseOut, 'no output to the endorsement address');
-    assert.equal(endorseOut!.amount().coin(), 7_000_000n, 'exactly-minimum stake (5 AP3X) must still build: 5 + 2 AP3X');
-  });
-
-  test('pins exact lovelace at the call site for a fractional stake float math gets wrong', async () => {
-    // 10.005 and 5.005 (the "obvious" values at each family's minimum) both
-    // happen to be bit-exact under Math.floor(x * 1e6) on this Node/V8 build
-    // (verified: node -e "console.log(Math.floor(10.005*1e6), Math.floor(5.005*1e6))"
-    // -> 10005000 5005000, both correct - neither reproduces the defect).
-    // Scanned upward from the 5 AP3X endorse minimum
-    // for a real loser instead: 8.03 * 1_000_000 === 8029999.999999999 in
-    // IEEE-754 (node -e "console.log(Math.floor(8.03*1e6))" -> 8029999, one
-    // lovelace short of the correct 8030000). This pins buildEndorse's OWN
-    // call site - apexToLovelace itself is already proven exact in
-    // packages/shared/test/tx.test.ts; this test instead catches a future
-    // revert of THIS call site back to Math.floor(stakeApex * 1_000_000).
-    const r = await buildEndorse(lucid, {
-      agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 3, stakeApex: 8.03,
-    });
-    assert.equal(r.stakeLovelace, '8030000');
-    const tx = decodeTx(r.txCbor);
-    const endorseOut = findOutputTo(tx, r.scriptAddress);
-    assert.ok(endorseOut, 'no output to the endorsement address');
-    assert.equal(
-      endorseOut!.amount().coin(), 10_030_000n,
-      'lost a lovelace - buildEndorse must call apexToLovelace, not Math.floor(stakeApex * 1_000_000): stake (8.03 AP3X = 8,030,000 lovelace) + 2 AP3X rider (2,000,000) = 10,030,000',
-    );
-  });
-
-  test('rejects a stake below the minimum', async () => {
-    await assert.rejects(
-      buildEndorse(lucid, {
-        agentDid: AGENT_DID, proposalTxHash: PROPOSAL_TX, proposalOutputIndex: 0, stakeApex: 4,
-      }),
-      /at least 5/i,
-    );
-  });
-});
-
-describe('buildProposalLock (offline, FixtureProvider)', () => {
-  test('builds an unsigned lock tx: stake+2 AP3X to the proposal address, datum round-trips (GeneralSuggestion)', async () => {
-    const r = await buildProposalLock(lucid, {
-      agentDid: AGENT_DID,
-      proposalType: 'GeneralSuggestion',
-      stakeApex: 25,
-      proposalHash: '22'.repeat(32),
-      storageUri: 'ipfs://test-proposal-doc',
-    });
-
-    assert.equal(r.stakeLovelace, '25000000');
-    assert.equal(r.scriptAddress, scriptHashToAddress(GOV_PROPOSAL_SPEND_HASH));
-    assert.equal(r.proposalHash, '22'.repeat(32));
-    assert.equal(r.storageUri, 'ipfs://test-proposal-doc');
-    assert.equal(r.ipfsCid, undefined, 'no document was given - no upload should have happened');
-
-    const tx = decodeTx(r.txCbor);
-    const vkeys = tx.witness_set().vkeywitnesses();
-    assert.ok(vkeys === undefined || vkeys.len() === 0, 'lock build must be unsigned');
-    assert.equal(CML.hash_transaction(tx.body()).to_hex(), r.txHash);
-
-    const lockOut = findOutputTo(tx, r.scriptAddress);
-    assert.ok(lockOut, 'no output to the proposal address');
-    assert.equal(lockOut!.amount().coin(), 27_000_000n, 'output must be stake (25 AP3X) + 2 AP3X');
-    assert.ok(lockOut!.datum() && lockOut!.datum()!.kind() === 1, 'continuing datum must be inline');
-
-    const datumCbor = lockOut!.datum()!.as_datum()!.to_cbor_hex();
-    const parsed = parseProposalDatum(datumCbor);
-    assert.ok(parsed, 'built proposal datum failed to parse back');
-    assert.equal(parsed!.proposerDid, AGENT_DID);
-    assert.equal(parsed!.proposalType, 'GeneralSuggestion');
-    assert.equal(parsed!.stakeAmount, 25_000_000);
-    assert.equal(parsed!.storageUri, 'ipfs://test-proposal-doc');
-    assert.equal(parsed!.proposalHash, '22'.repeat(32));
-    assert.equal(parsed!.state, 'Open');
-    assert.equal(parsed!.priority, 'Standard');
-    assert.equal(parsed!.amendmentCount, 0);
-    assert.equal(parsed!.reviewWindow, 604_800_000);
-  });
-
-  test('succeeds at exactly the minimum stake (25 AP3X) - the boundary is inclusive', async () => {
-    const r = await buildProposalLock(lucid, {
-      agentDid: AGENT_DID, proposalType: 'GeneralSuggestion', stakeApex: 25,
-      proposalHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
-    });
-    assert.equal(r.stakeLovelace, '25000000');
-    const tx = decodeTx(r.txCbor);
-    const lockOut = findOutputTo(tx, r.scriptAddress);
-    assert.equal(lockOut!.amount().coin(), 27_000_000n, 'exactly-minimum stake (25 AP3X) must still build: 25 + 2 AP3X');
-  });
-
-  test('rejects a stake below the minimum (24 AP3X)', async () => {
-    await assert.rejects(
-      buildProposalLock(lucid, {
-        agentDid: AGENT_DID, proposalType: 'GeneralSuggestion', stakeApex: 24,
-        proposalHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
-      }),
-      /at least 25/i,
-    );
-  });
-
-  test('ParameterChange without typeParams rejects', async () => {
-    await assert.rejects(
-      buildProposalLock(lucid, {
-        agentDid: AGENT_DID, proposalType: 'ParameterChange', stakeApex: 25,
-        proposalHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
-      }),
-      /ParameterChange requires/,
-    );
-  });
-
-  test('ParameterChange with typeParams embeds paramName/currentValue/proposedValue in the type datum', async () => {
-    const r = await buildProposalLock(lucid, {
-      agentDid: AGENT_DID, proposalType: 'ParameterChange', stakeApex: 25,
-      typeParams: { paramName: 'MIN_PROPOSAL_STAKE', currentValue: 25, proposedValue: 30 },
-      proposalHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
-    });
-    const tx = decodeTx(r.txCbor);
-    const lockOut = findOutputTo(tx, r.scriptAddress)!;
-    const datumCbor = lockOut.datum()!.as_datum()!.to_cbor_hex();
-    const raw = Data.from(datumCbor) as Constr<Data>;
-    const typeField = raw.fields[3] as Constr<Data>;
-    assert.equal(typeField.index, 0);
-    assert.equal(toText(typeField.fields[0] as string), 'MIN_PROPOSAL_STAKE');
-    assert.equal(Number(typeField.fields[1]), 25);
-    assert.equal(Number(typeField.fields[2]), 30);
-  });
-
-  test('TreasurySpend without typeParams rejects', async () => {
-    await assert.rejects(
-      buildProposalLock(lucid, {
-        agentDid: AGENT_DID, proposalType: 'TreasurySpend', stakeApex: 25,
-        proposalHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
-      }),
-      /TreasurySpend requires/,
-    );
-  });
-
-  // The three Constr indices below are the on-chain contract's own layout
-  // (0=ParameterChange, 1=TreasurySpend, 2=ProtocolUpgrade, 3=GameActivation,
-  // 4=GeneralSuggestion - see the custodial switch this was transcribed
-  // from) - an index swap between any two of these builds a datum the
-  // deployed validator would parse as the WRONG proposal type. Each test
-  // decodes the raw type-datum Constr directly (not through the parser,
-  // which only round-trips the type NAME back from the index) to pin the
-  // literal on-wire index.
-
-  test('TreasurySpend with typeParams builds with type datum index 1 (amount + recipientDescription)', async () => {
-    const r = await buildProposalLock(lucid, {
-      agentDid: AGENT_DID, proposalType: 'TreasurySpend', stakeApex: 25,
-      typeParams: { amount: 500, recipientDescription: 'research grant pool' },
-      proposalHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
-    });
-    const tx = decodeTx(r.txCbor);
-    const lockOut = findOutputTo(tx, r.scriptAddress)!;
-    const datumCbor = lockOut.datum()!.as_datum()!.to_cbor_hex();
-    const raw = Data.from(datumCbor) as Constr<Data>;
-    const typeField = raw.fields[3] as Constr<Data>;
-    assert.equal(typeField.index, 1, "TreasurySpend must encode as Constr index 1 - the on-chain contract's layout, not renumbered");
-    assert.equal(Number(typeField.fields[0]), 500);
-    assert.equal(toText(typeField.fields[1] as string), 'research grant pool');
-  });
-
-  test('ProtocolUpgrade builds with type datum index 2 (upgradeHash embedded)', async () => {
-    const r = await buildProposalLock(lucid, {
-      agentDid: AGENT_DID, proposalType: 'ProtocolUpgrade', stakeApex: 25,
-      typeParams: { upgradeHash: 'cc'.repeat(32) },
-      proposalHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
-    });
-    const tx = decodeTx(r.txCbor);
-    const lockOut = findOutputTo(tx, r.scriptAddress)!;
-    const datumCbor = lockOut.datum()!.as_datum()!.to_cbor_hex();
-    const raw = Data.from(datumCbor) as Constr<Data>;
-    const typeField = raw.fields[3] as Constr<Data>;
-    assert.equal(typeField.index, 2, "ProtocolUpgrade must encode as Constr index 2 - the on-chain contract's layout, not renumbered");
-    assert.equal(typeField.fields[0], 'cc'.repeat(32));
-  });
-
-  test('GameActivation builds with type datum index 3 (gameId embedded)', async () => {
-    const r = await buildProposalLock(lucid, {
-      agentDid: AGENT_DID, proposalType: 'GameActivation', stakeApex: 25,
-      typeParams: { gameId: 6 },
-      proposalHash: 'aa'.repeat(32), storageUri: 'ipfs://x',
-    });
-    const tx = decodeTx(r.txCbor);
-    const lockOut = findOutputTo(tx, r.scriptAddress)!;
-    const datumCbor = lockOut.datum()!.as_datum()!.to_cbor_hex();
-    const raw = Data.from(datumCbor) as Constr<Data>;
-    const typeField = raw.fields[3] as Constr<Data>;
-    assert.equal(typeField.index, 3, "GameActivation must encode as Constr index 3 - the on-chain contract's layout, not renumbered");
-    assert.equal(Number(typeField.fields[0]), 6);
-  });
-
-  test('manual proposalHash + storageUri path works without a document', async () => {
-    const r = await buildProposalLock(lucid, {
-      agentDid: AGENT_DID, proposalType: 'GeneralSuggestion', stakeApex: 25,
-      proposalHash: 'bb'.repeat(32), storageUri: 'ipfs://manual',
-    });
-    assert.equal(r.proposalHash, 'bb'.repeat(32));
-    assert.equal(r.storageUri, 'ipfs://manual');
-  });
-
-  test('rejects a malformed proposalHash (not 64 hex chars)', async () => {
-    await assert.rejects(
-      buildProposalLock(lucid, {
-        agentDid: AGENT_DID, proposalType: 'GeneralSuggestion', stakeApex: 25,
-        proposalHash: 'nothex', storageUri: 'ipfs://x',
-      }),
-      /64 hex/,
-    );
-  });
-
-  test('rejects when neither proposalDocument nor proposalHash/storageUri is provided', async () => {
-    await assert.rejects(
-      buildProposalLock(lucid, {
-        agentDid: AGENT_DID, proposalType: 'GeneralSuggestion', stakeApex: 25,
-      }),
-      /proposalHash|proposalDocument/,
-    );
-  });
-
-  test('stake minimum is validated BEFORE any Filebase upload attempt', async () => {
-    // If validation order were wrong, this would fail with the Filebase
-    // error instead (proposalDocument is provided, stake is not).
-    await assert.rejects(
-      buildProposalLock(lucid, {
-        agentDid: AGENT_DID, proposalType: 'GeneralSuggestion', stakeApex: 1,
-        proposalDocument: '{"proposal":"test"}',
-      }),
-      /at least 25/i,
-    );
-  });
-
-  test('attempts a Filebase upload when proposalDocument is given (fails clean - not configured in tests)', async () => {
-    // No FILEBASE_* env vars are set in this test environment, so a genuine
-    // upload attempt must surface the "not configured" error - proving the
-    // document path is actually wired up without needing to mock the AWS SDK.
-    await assert.rejects(
-      buildProposalLock(lucid, {
-        agentDid: AGENT_DID, proposalType: 'GeneralSuggestion', stakeApex: 25,
-        proposalDocument: '{"proposal":"test"}',
-      }),
-      /Filebase not configured/,
-    );
-  });
-});
-
-describe('buildProposalSpend (offline, FixtureProvider)', () => {
-  const LOCK_TX_HASH = 'aa'.repeat(32);
-  const PRESERVE_LOCK_TX_HASH = 'bb'.repeat(32);
-  const NFT_TX_HASH = 'cc'.repeat(32);
-  const NFT_UNIT = LEGACY_REGISTRY_POLICY_ID + AGENT_DID;
-
-  let proposalSpendAddress: string;
-  let lockDatumCbor: string;
-  let lockedUtxoFixture: UTxO;
-  let preserveLockedUtxoFixture: UTxO;
-  let spendLucid: LucidEvolution;
-  let spendProvider: ReturnType<typeof chainClockProvider>;
-
-  function nftFixtureUtxo(): UTxO {
-    return {
-      txHash: NFT_TX_HASH, outputIndex: 0, address: legacyRegistryAddress(),
-      assets: { lovelace: LEGACY_REGISTRY_DEPOSIT, [NFT_UNIT]: 1n },
-      datum: legacyAgentDatum(OWN_VKEY_HASH, 'FixtureAgent', 'offline fixture agent', ['testing'], 'custom', ''),
-    };
-  }
-  function refScriptFixtureUtxos(): UTxO[] {
-    return fixture.refScripts.map((s) => ({
-      txHash: s.txHash, outputIndex: s.index, address: proposalSpendAddress,
-      assets: { lovelace: 2_000_000n },
-      scriptRef: { type: 'PlutusV3', script: s.scriptCborHex },
+/** A fake Koios that answers tx_info for `txs`: each transaction with the outputs it spent, as [ref, payment credential]. */
+function koiosWith(txs: Record<string, Array<[string, string]>>): KoiosAccess & { calls: string[][] } {
+  const calls: string[][] = [];
+  const fetchImpl = (async (url: string, init: { body: string }) => {
+    assert.ok(String(url).endsWith('/api/v1/tx_info'), String(url));
+    const hashes = JSON.parse(init.body)._tx_hashes as string[];
+    calls.push(hashes);
+    const rows = hashes.filter((h) => txs[h]).map((h) => ({
+      tx_hash: h, inputs: txs[h].map(([ref, cred]) => ({ tx_hash: ref.slice(0, 64), tx_index: Number(ref.slice(65)), payment_addr: { bech32: 'addr1', cred } })),
     }));
+    return new Response(JSON.stringify(rows), { status: 200 });
+  }) as unknown as typeof fetch;
+  return { url: 'https://koios.example', fetchImpl, calls };
+}
+
+async function ctxOn(extra: UTxO[], opts: { koios?: KoiosAccess; records?: UTxO[]; params?: typeof PARAMS } = {}): Promise<GovContext> {
+  const provider = govWorld(extra, opts);
+  return { lucid: await lucidOn(provider), provider, identity: DEPLOYMENT, gov: GOV, koios: opts.koios ?? NO_KOIOS };
+}
+
+const proposalDatum = (o: Partial<ProposalDatum> = {}): ProposalDatum => ({
+  proposerDid: PROPOSER_ID, proposerCredential: { type: 'VerificationKey', hash: CONTROLLER.keyHash }, proposalHash: 'ab'.repeat(32),
+  proposalType: { type: 'GeneralSuggestion' }, storageUri: utf8Hex('ipfs://proposal'), stakeAmount: 25_000_000n, submittedAt: lo,
+  reviewWindow: DEFAULT_REVIEW_WINDOW_MS, priority: 'Standard', amendmentCount: 0, incorporatedCritiques: [], state: { type: 'Open' }, ...o,
+});
+const proposalLock = (d: ProposalDatum = proposalDatum()): UTxO => lockUtxo(GOV.proposalAddress, encodeProposalDatum(d), d.stakeAmount + 2_000_000n);
+
+/** A submitted proposal of PROPOSER_ID with its seed. */
+function submitted(o: Partial<ProposalDatum> = {}): { seed: { txHash: string; outputIndex: number }; utxo: UTxO; datum: ProposalDatum } {
+  const seed = { txHash: '5e'.repeat(32), outputIndex: 0 };
+  const datum = proposalDatum({ submittedAt: NOW - DAY, ...o });
+  return { seed, utxo: proposalUtxo(seed, datum, { txHash: 'f1'.repeat(32), outputIndex: 0 }), datum };
+}
+
+/** What a test reads back from a built transaction. */
+function inspect(txCbor: string) {
+  const tx = CML.Transaction.from_cbor_hex(txCbor);
+  const body = tx.body();
+  const inputs: string[] = [];
+  for (let i = 0; i < body.inputs().len(); i++) inputs.push(`${body.inputs().get(i).transaction_id().to_hex()}#${body.inputs().get(i).index()}`);
+  const refs: string[] = [];
+  const refInputs = body.reference_inputs();
+  for (let i = 0; refInputs && i < refInputs.len(); i++) refs.push(`${refInputs.get(i).transaction_id().to_hex()}#${refInputs.get(i).index()}`);
+  const signers: string[] = [];
+  const required = body.required_signers();
+  for (let i = 0; required && i < required.len(); i++) signers.push(required.get(i).to_hex());
+  const mint: Record<string, bigint> = {};
+  const m = body.mint();
+  if (m) {
+    const policies = m.keys();
+    for (let i = 0; i < policies.len(); i++) {
+      const policy = policies.get(i);
+      const names = m.get_assets(policy)!;
+      for (let j = 0; j < names.keys().len(); j++) mint[`${policy.to_hex()}${names.keys().get(j).to_hex()}`] = BigInt(names.get(names.keys().get(j))!.toString());
+    }
   }
-  function infraFixtureUtxos(): UTxO[] {
-    return fixture.infra.map((i) => ({
-      txHash: i.txHash, outputIndex: i.index, address: i.address,
-      assets: { lovelace: BigInt(i.valueLovelace) },
-      datum: i.datumCbor,
+  const outputs = [];
+  for (let i = 0; i < body.outputs().len(); i++) {
+    const o = body.outputs().get(i);
+    const assets: Record<string, bigint> = { lovelace: o.amount().coin() };
+    const ma = o.amount().multi_asset();
+    for (let j = 0; j < ma.keys().len(); j++) {
+      const policy = ma.keys().get(j);
+      const names = ma.get_assets(policy)!;
+      for (let k = 0; k < names.keys().len(); k++) assets[`${policy.to_hex()}${names.keys().get(k).to_hex()}`] = names.get(names.keys().get(k))!;
+    }
+    outputs.push({ address: o.address().to_bech32(), assets, datum: o.datum()?.as_datum()?.to_cbor_hex() });
+  }
+  const redeemers = tx.witness_set().redeemers()?.to_flat_format();
+  const scripts: Array<{ tag: number; index: number; data: string; mem: bigint; steps: bigint }> = [];
+  for (let i = 0; redeemers && i < redeemers.len(); i++) {
+    const r = redeemers.get(i);
+    scripts.push({ tag: r.tag(), index: Number(r.index()), data: r.data().to_cbor_hex(), mem: r.ex_units().mem(), steps: r.ex_units().steps() });
+  }
+  return { inputs, refs, signers, mint, outputs, scripts, start: body.validity_interval_start(), ttl: body.ttl() };
+}
+
+// ─── Blueprint and test deployment ──────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('the Module-6 blueprint and the test deployment', () => {
+  test('the copied blueprint is vector-agent-modules 91e3823 (sha256 pinned), and each unapplied script has its stated hash', () => {
+    const text = readFileSync(BLUEPRINT_PATH, 'utf8');
+    assert.equal(createHash('sha256').update(text, 'utf8').digest('hex'), '6560ff0c79fc5205cf54c2a76b58322d0ed7eb9aea6d6b5e3b324c46f2e88be1');
+    const blueprint = JSON.parse(text) as { validators: Array<{ title: string; compiledCode: string; hash: string; parameters?: unknown[] }> };
+    for (const title of Object.values(TITLES)) {
+      const v = blueprint.validators.find((x) => x.title === title)!;
+      assert.equal(validatorToScriptHash({ type: 'PlutusV3', script: v.compiledCode }), v.hash, title);
+      assert.equal(v.parameters?.length, 1, `${title} takes the GovernanceConfig only`);
+    }
+  });
+
+  test('the test GovernanceConfig is the CBOR that the Module-6 deploy script writes (deploy_common.build_governance_config_cbor)', () => {
+    assert.equal(governanceConfigCbor(), `d8798b581c${'7b'.repeat(28)}581c${'00'.repeat(28)}581c${'00'.repeat(28)}581c${'00'.repeat(28)}581c${'4b'.repeat(28)}581c${'4a'.repeat(28)}581c${'4c'.repeat(28)}581c${'00'.repeat(28)}581c${'00'.repeat(28)}581c${'7a'.repeat(28)}581c${DEPLOYMENT.identity.hash}`);
+  });
+
+  test('the applied validators have the hashes and sizes that `aiken blueprint apply` gives for that config (aiken v1.1.21)', () => {
+    const expected: Record<GovRefName, [string, number]> = {
+      proposalSpend: ['4082a2102e097b0f66b8b99e424e1e8b952dec6cdf5e4f7ead2086f1', 13_699],
+      proposalMint: ['e386de52b661f9468de6c7182685ea3aee3cc352aff3f1f845eab89f', 1_484],
+      critiqueSpend: ['a699b4dccd4debf3f0a5314c2b0b7cb16b362d373e1596479a8c690d', 9_018],
+      critiqueMint: ['09e0b2763187f4b5212e4ed8ee31b21a39ee1e31db850e8c976da0d3', 2_140],
+      endorsementSpend: ['726a9ec406a52023f833bfa44106fa423c7da4833b7a5259f225e6d1', 7_547],
+    };
+    assert.equal(DEPLOYMENT.identity.hash, '97cb4743670c9781d8d5cd7ce4474c4ff50d33a362c68e39aa49872f', 'the config names the identity hash of identity-world');
+    for (const [name, [hash, size]] of Object.entries(expected) as Array<[GovRefName, [string, number]]>) {
+      assert.equal(GOV[name], hash, name);
+      assert.equal(SCRIPTS[name].script.length / 2, size, name);
+    }
+    assert.notEqual(validatorToScriptHash(appliedScript(TITLES.proposalSpend, governanceConfigCbor({ ...CONFIG, identityHash: 'ee'.repeat(28) }))), GOV.proposalSpend, 'the identity hash is part of the script');
+  });
+});
+
+// ─── Token names and codecs ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('token names follow utils.ak', () => {
+  const golden = JSON.parse(readFileSync(resolve(import.meta.dirname!, 'fixtures/gov-state.fixture.json'), 'utf8')).goldenTokenPin;
+  const seed = { txHash: golden.lockTxHash as string, outputIndex: golden.lockOutputIndex as number };
+
+  test('prop_: the token name that the proposal policy of the previous deployment minted for this seed (captured live 2026-07-30)', () => {
+    assert.equal(deriveProposalTokenName(seed.txHash, seed.outputIndex), golden.expectedTokenName);
+  });
+
+  test('crit_, gend_ and pact_ equal the names of the reference client (governance_identity.py)', () => {
+    assert.equal(deriveCritiqueTokenName(seed.txHash, seed.outputIndex), '637269745f1a38676b49274bb694b9677f8b17af728bb4fca74bfd3572049bfe');
+    assert.equal(deriveEndorsementTokenName('a3'.repeat(32), seed), '67656e645f476a5dee08c598b49ad026da95d25186a0360ab551f46a1c687588');
+    assert.equal(deriveActivityTokenName('a1'.repeat(32)), '706163745ff65ecdfc7dc414d7816eb3b9248488094e00fb6b69e67da0509cb6');
+  });
+});
+
+describe('codecs write the bytes of the reference client', () => {
+  const credential = { type: 'VerificationKey' as const, hash: '2c'.repeat(28) };
+  const seed = { txHash: '0b4015bd69ef9e93a7eafdc778433ea1d1acb4f8ab7b2efaa52990b65415e919', outputIndex: 0 };
+  const at = 1_763_207_940_000;
+
+  test('ProposalDatum (12 fields; a ParameterChange, amended, with an incorporated critique)', () => {
+    const d: ProposalDatum = {
+      proposerDid: 'a1'.repeat(32), proposerCredential: credential, proposalHash: 'ab'.repeat(32),
+      proposalType: { type: 'ParameterChange', paramName: utf8Hex('MIN_PROPOSAL_STAKE'), currentValue: 25_000_000n, proposedValue: 30_000_000n },
+      storageUri: utf8Hex('ipfs://doc'), stakeAmount: 25_000_000n, submittedAt: at, reviewWindow: 604_800_000, priority: 'Standard', amendmentCount: 1,
+      incorporatedCritiques: [{ txHash: 'c1'.repeat(32), outputIndex: 3 }], state: { type: 'Amended', hash: 'cd'.repeat(32) },
+    };
+    const hex = 'd8799f5820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1d8799f581c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2cff5820ababababababababababababababababababababababababababababababababd8799f524d494e5f50524f504f53414c5f5354414b451a017d78401a01c9c380ff4a697066733a2f2f646f631a017d78401b0000019a876207a01a240c8400d87980019fd8799f5820c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c103ffffd87a9f5820cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdffff';
+    assert.equal(encodeProposalDatum(d), hex);
+    assert.deepEqual(decodeProposalDatum(hex), d);
+  });
+
+  test('CritiqueDatum (9 fields; an incorporated Amendment critique that names the seed)', () => {
+    const d: CritiqueDatum = {
+      criticDid: 'a2'.repeat(32), criticCredential: credential, proposalRef: seed, critiqueHash: 'ef'.repeat(32), storageUri: utf8Hex('ipfs://crit'),
+      critiqueType: { type: 'Amendment', suggestedChangeHash: 'ef'.repeat(32) }, stakeAmount: 10_000_000n, submittedAt: at, incorporated: true,
+    };
+    const hex = 'd8799f5820a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2d8799f581c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2cffd8799f58200b4015bd69ef9e93a7eafdc778433ea1d1acb4f8ab7b2efaa52990b65415e91900ff5820efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef4b697066733a2f2f63726974d87b9f5820efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefff1a009896801b0000019a876207a0d87a80ff';
+    assert.equal(encodeCritiqueDatum(d), hex);
+    assert.deepEqual(decodeCritiqueDatum(hex), d);
+  });
+
+  test('GovernanceEndorsementDatum (5 fields) and ProposerActivityDatum (5 fields, next_did last; the head has empty identifiers)', () => {
+    const e: EndorsementDatum = { endorserDid: 'a3'.repeat(32), endorserCredential: credential, proposalRef: seed, stakeAmount: 5_000_000n, createdAt: at };
+    const eHex = 'd8799f5820a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3d8799f581c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2cffd8799f58200b4015bd69ef9e93a7eafdc778433ea1d1acb4f8ab7b2efaa52990b65415e91900ff1a004c4b401b0000019a876207a0ff';
+    assert.equal(encodeEndorsementDatum(e), eHex);
+    assert.deepEqual(decodeEndorsementDatum(eHex), e);
+    const a: ActivityDatum = { agentDid: 'a1'.repeat(32), agentCredential: credential, activeProposalCount: 2, lastProposalSlot: at, nextDid: 'a9'.repeat(32) };
+    const aHex = 'd8799f5820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1d8799f581c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2cff021b0000019a876207a05820a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9ff';
+    assert.equal(encodeActivityDatum(a), aHex);
+    assert.deepEqual(decodeActivityDatum(aHex), a);
+    assert.equal(decodeActivityDatum(headUtxo().datum!).agentDid, '');
+    assert.equal(encodeActivityDatum({ agentDid: '', agentCredential: { type: 'VerificationKey', hash: '4d'.repeat(28) }, activeProposalCount: 0, lastProposalSlot: 0, nextDid: '' }),
+      'd8799f40d8799f581c4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4dff000040ff');
+  });
+
+  test('GovernanceParams (21 fields) and GovernanceCrossRefs (5 fields; a 4-field datum of an older deployment is refused)', () => {
+    const pHex = 'd8799f1a017d78401a004c4b401a004c4b401a0f7314001a9032100005031a05265c00191b581907d01903e81a02faf0801a1dcd6500051b00000002540be4001913881a02932e001a240c84001a05f5e1001a1dcd65001a0bebc200ff';
+    assert.equal(encodeGovernanceParams(PARAMS), pHex);
+    assert.deepEqual(decodeGovernanceParams(pHex), PARAMS);
+    const r = { proposalValidatorHash: '11'.repeat(28), critiqueValidatorHash: '22'.repeat(28), proposalMintHash: '33'.repeat(28), critiqueMintHash: '44'.repeat(28), endorsementValidatorHash: '55'.repeat(28) };
+    const rHex = `d8799f581c${'11'.repeat(28)}581c${'22'.repeat(28)}581c${'33'.repeat(28)}581c${'44'.repeat(28)}581c${'55'.repeat(28)}ff`;
+    assert.equal(encodeCrossRefs(r), rHex);
+    assert.deepEqual(decodeCrossRefs(rHex), r);
+    assert.throws(() => decodeCrossRefs(`d8799f581c${'11'.repeat(28)}581c${'22'.repeat(28)}581c${'33'.repeat(28)}581c${'44'.repeat(28)}ff`), /expected 5 fields, got 4/);
+  });
+
+  test('a proposal datum of the previous deployment (captured live) decodes, so the read tools can list old positions', () => {
+    const sample = JSON.parse(readFileSync(resolve(import.meta.dirname!, 'fixtures/gov-state.fixture.json'), 'utf8')).sampleProposal;
+    const d = decodeProposalDatum(sample.datumCbor);
+    assert.equal(d.state.type, 'Open');
+    assert.equal(d.proposalType.type, 'GeneralSuggestion');
+    assert.equal(d.stakeAmount, 25_000_000n);
+    assert.equal(d.proposerDid.length, 64);
+  });
+});
+
+// ─── Configuration ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('the Module-6 deployment from GOV_* (no defaults)', () => {
+  const env = (): Record<string, string> => ({
+    GOV_PROPOSAL_SPEND_HASH: GOV.proposalSpend, GOV_PROPOSAL_MINT_HASH: GOV.proposalMint, GOV_CRITIQUE_SPEND_HASH: GOV.critiqueSpend,
+    GOV_CRITIQUE_MINT_HASH: GOV.critiqueMint, GOV_ENDORSEMENT_SPEND_HASH: GOV.endorsementSpend, GOV_RECORD_TOKEN_POLICY: GOV.recordTokenPolicy,
+    GOV_REFS_TOKEN_POLICY: GOV.refsTokenPolicy, GOV_PARAMS_ADDRESS: GOV.paramsAddress, GOV_CROSSREFS_ADDRESS: GOV.crossRefsAddress,
+    GOV_TREASURY_ADDRESS: GOV.treasuryAddress,
+  });
+
+  test('no GOV_* variable: no deployment, and the startup line says so', () => {
+    assert.equal(govDeploymentFrom({}), null);
+    assert.equal(govDeploymentFrom({ GOV_PROPOSAL_SPEND_HASH: '  ' }), null);
+    assert.match(describeGovDeployment(null), /^not configured/);
+    assert.match(GOV_NOT_CONFIGURED, /GOV_PROPOSAL_SPEND_HASH, .*GOV_TREASURY_ADDRESS to the values of its deploy state/);
+  });
+
+  test('every value: the deployment with its script addresses and the reference UTxOs that are set', () => {
+    const d = govDeploymentFrom({ ...env(), GOV_PROPOSAL_SPEND_REF: `${'E6'.repeat(32)}#0`, GOV_CRITIQUE_MINT_REF: `${'e6'.repeat(32)}#3` })!;
+    assert.equal(d.proposalAddress, scriptAddress(GOV.proposalSpend));
+    assert.equal(d.critiqueAddress, scriptAddress(GOV.critiqueSpend));
+    assert.equal(d.endorsementAddress, scriptAddress(GOV.endorsementSpend));
+    assert.deepEqual(d.refs, { proposalSpend: { txHash: 'e6'.repeat(32), outputIndex: 0 }, critiqueMint: { txHash: 'e6'.repeat(32), outputIndex: 3 } });
+    assert.match(describeGovDeployment(d), new RegExp(`proposal validator ${GOV.proposalSpend}.*proposalSpend set, proposalMint unset`));
+  });
+
+  test('a partial set names the missing variables; a malformed value names its variable', () => {
+    const partial = env();
+    delete partial.GOV_RECORD_TOKEN_POLICY;
+    delete partial.GOV_TREASURY_ADDRESS;
+    assert.throws(() => govDeploymentFrom(partial), (e: unknown) => e instanceof GovConfigError && /but GOV_RECORD_TOKEN_POLICY, GOV_TREASURY_ADDRESS are not/.test(e.message));
+    assert.throws(() => govDeploymentFrom({ GOV_PROPOSAL_SPEND_REF: `${'e6'.repeat(32)}#0` }), /set every value of the Module-6 deployment/);
+    assert.throws(() => govDeploymentFrom({ ...env(), GOV_CRITIQUE_MINT_HASH: 'xyz' }), /GOV_CRITIQUE_MINT_HASH must be 56 hex characters/);
+    assert.throws(() => govDeploymentFrom({ ...env(), GOV_REFS_TOKEN_POLICY: '00'.repeat(28) }), /GOV_REFS_TOKEN_POLICY is all zero/);
+    assert.throws(() => govDeploymentFrom({ ...env(), GOV_PARAMS_ADDRESS: OWN_ADDRESS }), /GOV_PARAMS_ADDRESS must be a script address/);
+    assert.throws(() => govDeploymentFrom({ ...env(), GOV_CROSSREFS_ADDRESS: 'not-an-address' }), /GOV_CROSSREFS_ADDRESS is not a valid address/);
+    assert.throws(() => govDeploymentFrom({ ...env(), GOV_ENDORSEMENT_SPEND_REF: 'abc#0' }), /GOV_ENDORSEMENT_SPEND_REF must be <64 hex characters>#<output index>/);
+  });
+
+  test('the values of the previous deployment are refused: they read the legacy agent registry', () => {
+    assert.throws(() => govDeploymentFrom({ ...env(), GOV_PROPOSAL_SPEND_HASH: PREVIOUS_GOV_DEPLOYMENT.proposalSpend }), /GOV_PROPOSAL_SPEND_HASH is a hash of the previous Module-6 deployment/);
+    assert.throws(() => govDeploymentFrom({ ...env(), GOV_CRITIQUE_MINT_HASH: PREVIOUS_GOV_DEPLOYMENT.critiqueMint }), /previous Module-6 deployment/);
+    assert.throws(() => govDeploymentFrom({ ...env(), GOV_TREASURY_ADDRESS: PREVIOUS_GOV_DEPLOYMENT.treasuryAddress }), /GOV_TREASURY_ADDRESS is the treasury of the previous Module-6 deployment/);
+  });
+
+  test('readGovRefScript names the variable of a reference script that is unset, gone, empty or another script', async () => {
+    const world = govWorld();
+    assert.equal(validatorToScriptHash((await readGovRefScript(world, GOV, 'critiqueMint')).scriptRef!), GOV.critiqueMint);
+    const unset = makeGovDeployment({ ...GOV, refs: {} });
+    await assert.rejects(readGovRefScript(world, unset, 'proposalSpend'), (e: unknown) => e instanceof GovConfigError && /GOV_PROPOSAL_SPEND_REF is not set/.test(e.message));
+    const swapped = makeGovDeployment({ ...GOV, refs: { ...GOV.refs, proposalMint: GOV.refs.critiqueMint } });
+    await assert.rejects(readGovRefScript(world, swapped, 'proposalMint'), new RegExp(`\\(GOV_PROPOSAL_MINT_REF\\) holds script ${GOV.critiqueMint}, not ${GOV.proposalMint}`));
+    await assert.rejects(readGovRefScript(new FixtureProvider([]), GOV, 'endorsementSpend'), /\(GOV_ENDORSEMENT_SPEND_REF\) is not an unspent output on the node/);
+    const empty = new FixtureProvider(GOV_REF_UTXOS.map((u) => ({ ...u, scriptRef: undefined })));
+    await assert.rejects(readGovRefScript(empty, GOV, 'critiqueSpend'), /\(GOV_CRITIQUE_SPEND_REF\) holds no script/);
+    assert.equal(GOV_REF_ENV.endorsementSpend, 'GOV_ENDORSEMENT_SPEND_REF');
+    assert.equal(GOV_ENV.paramsAddress, 'GOV_PARAMS_ADDRESS');
+  });
+});
+
+// ─── Records that the validators read ───────────────────────────────────────────────────────────────────────────────────────────
+
+describe('the params record, CrossRefs and the activity list', () => {
+  test('the params record is the output with the `params` record token; another output at the holder is ignored', async () => {
+    const r = await findParamsRecord(govWorld(), GOV);
+    assert.deepEqual(r.params, PARAMS);
+    const fake = { ...paramsUtxo({ ...PARAMS, minProposalStake: 1n }), assets: { lovelace: 3_000_000n } };
+    const world = govWorld([]);
+    const onlyFake = { ...world, getUtxos: async (a: string) => (a === GOV.paramsAddress ? [fake] : world.getUtxos(a)) };
+    await assert.rejects(findParamsRecord(onlyFake, GOV), /No GovernanceParams record at .* record token (7a){28}\.params \(GOV_RECORD_TOKEN_POLICY\)/);
+  });
+
+  test('CrossRefs: the 5-field datum that names the five validators; a 4-field or foreign datum never matches', async () => {
+    assert.deepEqual((await findCrossRefs(govWorld(), GOV)).refs, expectedCrossRefs(GOV));
+    const old = { ...CROSS_REFS_UTXO, datum: `d8799f581c${GOV.proposalSpend}581c${GOV.critiqueSpend}581c${GOV.proposalMint}581c${GOV.critiqueMint}ff` };
+    const other = { ...CROSS_REFS_UTXO, txHash: 'c6'.repeat(32), datum: encodeCrossRefs({ ...expectedCrossRefs(GOV), endorsementValidatorHash: '55'.repeat(28) }) };
+    const world = govWorld();
+    const stale = { ...world, getUtxos: async (a: string) => (a === GOV.crossRefsAddress ? [old, other] : world.getUtxos(a)) };
+    await assert.rejects(findCrossRefs(stale, GOV), /No CrossRefs output of this deployment .* endorsement_spend [0-9a-f]{56} \(the 5-field GovernanceCrossRefs\)/);
+  });
+
+  test('the list walks from the head in ascending order; the predecessor of a new agent and the node of a known one', () => {
+    const [x, y] = ['90'.repeat(32), 'b0'.repeat(32)];
+    const list = activityListFrom([nodeUtxo(y), headUtxo(x), nodeUtxo(x, { nextDid: y }), proposalLock()], GOV);
+    assert.deepEqual(list.nodes.map((n) => n.datum.agentDid), [x, y]);
+    assert.equal(activityPredecessor(list, PROPOSER_ID).datum.agentDid, x, 'x < a1.. < y');
+    assert.equal(activityPredecessor(list, '10'.repeat(32)), list.head, 'below every node: after the head');
+    assert.equal(activityPredecessor(list, 'f0'.repeat(32)).datum.agentDid, y, 'above every node: after the last');
+    assert.equal(activityNode(list, y)?.datum.agentDid, y);
+    assert.throws(() => activityPredecessor(list, x), /already has a node in the activity list; its next submission spends that node/);
+  });
+
+  test('a list that the contract cannot produce is refused', () => {
+    const [x, y] = ['90'.repeat(32), 'b0'.repeat(32)];
+    assert.throws(() => activityListFrom([nodeUtxo(x)], GOV), /No head of the activity list at .*record token (7a){28}\.activity/);
+    assert.throws(() => activityListFrom([headUtxo(), { ...headUtxo(), txHash: 'ae'.repeat(32) }], GOV), /Several outputs hold the activity record token/);
+    assert.throws(() => activityListFrom([headUtxo(x)], GOV), /names did:vector:9090.*, which has no node/);
+    assert.throws(() => activityListFrom([headUtxo(y), nodeUtxo(y, { nextDid: x }), nodeUtxo(x)], GOV), /not in ascending order/);
+    assert.throws(() => activityListFrom([headUtxo(), nodeUtxo(x)], GOV), /not in the list that starts at the head/);
+    const wrongToken = { ...nodeUtxo(x), assets: { lovelace: 2_000_000n, [`${GOV.proposalMint}${deriveActivityTokenName(y)}`]: 1n } };
+    assert.throws(() => activityListFrom([headUtxo(x), wrongToken], GOV), /holds an activity token but is not the node of its agent/);
+    const headWithToken = { ...headUtxo(), assets: { ...headUtxo().assets, [`${GOV.proposalMint}${deriveActivityTokenName(x)}`]: 1n } };
+    assert.throws(() => activityListFrom([headWithToken], GOV), /not a valid head of the activity list/);
+  });
+});
+
+describe('a critique or an endorsement names its proposal by the seed', () => {
+  const { seed, utxo, datum } = submitted();
+  const SPEND = GOV.proposalSpend;
+
+  test('the seed itself: the proposal that holds its token, without Koios', async () => {
+    const t = await resolveProposal(govWorld([utxo]), GOV, seed, NO_KOIOS);
+    assert.deepEqual(t.seed, seed);
+    assert.equal(refOf(t.utxo), refOf(utxo));
+    assert.deepEqual(t.datum, datum);
+  });
+
+  test('the current output: the seed is the input of its submission whose token name matches (one tx_info call)', async () => {
+    const koios = koiosWith({ [utxo.txHash]: [[`${'ad'.repeat(32)}#0`, SPEND], [refOf({ ...utxo, ...seed }), SPEND], [`${'77'.repeat(32)}#1`, OWN_KEY_HASH]] });
+    const t = await resolveProposal(govWorld([utxo]), GOV, { txHash: utxo.txHash, outputIndex: 0 }, koios);
+    assert.deepEqual(t.seed, seed);
+    assert.deepEqual(koios.calls, [[utxo.txHash]]);
+  });
+
+  test('an amended proposal: back through the amendment to the submission (two calls)', async () => {
+    const amended = proposalUtxo(seed, proposalDatum({ amendmentCount: 1, state: { type: 'Amended', hash: 'ab'.repeat(32) } }), { txHash: 'f2'.repeat(32), outputIndex: 0 });
+    const koios = koiosWith({
+      [amended.txHash]: [[refOf(utxo), SPEND], [`${'c9'.repeat(32)}#0`, GOV.critiqueSpend]],
+      [utxo.txHash]: [[`${seed.txHash}#${seed.outputIndex}`, SPEND], [`${'ad'.repeat(32)}#0`, SPEND]],
+    });
+    const t = await resolveProposal(govWorld([amended]), GOV, { txHash: amended.txHash, outputIndex: 0 }, koios);
+    assert.deepEqual(t.seed, seed);
+    assert.deepEqual(koios.calls, [[amended.txHash], [utxo.txHash]]);
+  });
+
+  test('a lock, an unknown output and a Koios that does not know the transaction are refused', async () => {
+    const lock = proposalLock();
+    await assert.rejects(resolveProposal(govWorld([lock]), GOV, { txHash: lock.txHash, outputIndex: 0 }, NO_KOIOS), /holds no proposal token: it is a proposal lock/);
+    await assert.rejects(resolveProposal(govWorld([]), GOV, { txHash: '99'.repeat(32), outputIndex: 0 }, NO_KOIOS), /is neither a proposal of this Module-6 deployment nor the seed of one/);
+    await assert.rejects(resolveProposal(govWorld([utxo]), GOV, { txHash: utxo.txHash, outputIndex: 0 }, koiosWith({})), /Koios does not know the transaction f1f1.* yet/);
+  });
+});
+
+// ─── Proposal ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('buildProposalLock (step 1): every submission rule before the lock', () => {
+  const lock = (o: Partial<Parameters<typeof buildProposalLock>[1]> = {}, extra: UTxO[] = [headUtxo()], opts = {}) => ctxOn(extra, opts).then((ctx) => buildProposalLock(ctx, {
+    ...common, agentDid: `did:vector:${PROPOSER_ID}`, credentialKeyHash: CONTROLLER.keyHash, proposalType: 'GeneralSuggestion', stakeApex: 25,
+    proposalHash: 'ab'.repeat(32), storageUri: 'ipfs://proposal', ...o,
+  }));
+
+  test('locks the datum with stake + 2 AP3X at the proposal validator; only the wallet signs; a first proposal', async () => {
+    const r = await lock();
+    const tx = inspect(r.txCbor);
+    const out = tx.outputs[r.lockOutputIndex];
+    assert.equal(out.address, GOV.proposalAddress);
+    assert.deepEqual(out.assets, { lovelace: 27_000_000n });
+    assert.deepEqual(decodeProposalDatum(out.datum!), {
+      ...proposalDatum(), proposerCredential: { type: 'VerificationKey', hash: CONTROLLER.keyHash }, submittedAt: lo,
+    });
+    assert.deepEqual(r.requiredSigners, [{ keyHash: OWN_KEY_HASH, roles: [WALLET_ROLE] }]);
+    assert.equal(tx.signers.length, 0);
+    assert.equal(tx.scripts.length, 0, 'a lock runs no script');
+    assert.equal(r.firstProposal, true);
+    assert.equal(r.reviewWindow, DAYS_7_MS);
+    assert.equal(r.credentialRole, `controller key of did:vector:${PROPOSER_ID}`);
+    assert.equal(r.validFrom, lo);
+    assert.equal(r.validTo, hi);
+  });
+
+  test('every DID form names the agent; a listed transaction key is a declared credential', async () => {
+    for (const agentDid of [PROPOSER_ID, `did:vector:agent:be1a0a2912da180757ed3cd61b56bb8eab0188c19dc3c0e3912d2c01:${PROPOSER_ID}`]) {
+      assert.equal((await lock({ agentDid })).id, PROPOSER_ID, agentDid);
+    }
+    const r = await lock({ credentialKeyHash: LISTED.keyHash });
+    assert.equal(r.credentialRole, `listed transaction key of did:vector:${PROPOSER_ID}`);
+    assert.equal(r.datum.proposerCredential.hash, LISTED.keyHash);
+  });
+
+  test('the type parameters follow the contract; an Emergency proposal takes the emergency window and stake', async () => {
+    const change = await lock({ proposalType: 'ParameterChange', typeParams: { paramName: 'MIN_CRITIQUE_STAKE', currentValue: 5_000_000, proposedValue: 4_000_000 } });
+    assert.deepEqual(change.datum.proposalType, { type: 'ParameterChange', paramName: utf8Hex('MIN_CRITIQUE_STAKE'), currentValue: 5_000_000n, proposedValue: 4_000_000n });
+    await assert.rejects(lock({ proposalType: 'ParameterChange', typeParams: { paramName: 'NOT_A_PARAM', currentValue: 1, proposedValue: 2 } }), /"NOT_A_PARAM" is not a governable parameter/);
+    await assert.rejects(lock({ proposalType: 'TreasurySpend', typeParams: { amount: 10_000_000_001, recipientDescription: 'x' } }), /the treasury amount must be more than 0 and at most 10000000000 lovelace/);
+    await assert.rejects(lock({ proposalType: 'ProtocolUpgrade', typeParams: { upgradeHash: 'ab' } }), /ProtocolUpgrade requires upgradeHash/);
+    await assert.rejects(lock({ proposalType: 'GameActivation', typeParams: { gameId: 0 } }), /the game id must be positive/);
+    const emergency = await lock({ proposalType: 'ProtocolUpgrade', typeParams: { upgradeHash: 'ee'.repeat(32) }, priority: 'Emergency', stakeApex: 125 });
+    assert.equal(emergency.reviewWindow, 43_200_000);
+    assert.equal(emergency.datum.priority, 'Emergency');
+    await assert.rejects(lock({ priority: 'Emergency', stakeApex: 125 }), /an Emergency proposal must be a ParameterChange or a ProtocolUpgrade/);
+    await assert.rejects(lock({ proposalType: 'ProtocolUpgrade', typeParams: { upgradeHash: 'ee'.repeat(32) }, priority: 'Emergency', stakeApex: 124 }), /stake of an Emergency proposal is below the minimum of 125\.000000 AP3X/);
+  });
+
+  test('refuses an agent that is not Active, a key that is not declared, and an agent without a record', async () => {
+    const suspended = rootRecord({ status: { type: 'Suspended', holds: [{ by: { type: 'ControllerSet' }, reason: 6, since: NOW - DAY, until: NOW + DAY }] } });
+    await assert.rejects(lock({}, [headUtxo()], { records: [recordUtxo(PROPOSER_ID, suspended)] }), /The proposer did:vector:a1a1.* is Suspended over the validity window/);
+    await assert.rejects(lock({ credentialKeyHash: OTHER.keyHash }), new RegExp(`The key hash ${OTHER.keyHash} is not a declared credential of did:vector:${PROPOSER_ID}`));
+    await assert.rejects(lock({ credentialKeyHash: undefined }), new RegExp(`The key hash ${OWN_KEY_HASH} is not a declared credential`), 'the default credential is the wallet key');
+    await assert.rejects(lock({ agentDid: 'cd'.repeat(32) }), /No identity record of the proposer for did:vector:cdcd.* in the identity registry/);
+    const noTransaction = rootRecord({ keys: [{ keyType: 'Ed25519', key: LISTED.publicKey, purposes: 1 + 2, pop: null }] });
+    await assert.rejects(lock({ credentialKeyHash: LISTED.keyHash }, [headUtxo()], { records: [recordUtxo(PROPOSER_ID, noTransaction)] }), /is not a declared credential/);
+  });
+
+  test('refuses a broken rate limit and a missing activity list; the stake and document rules come first', async () => {
+    await assert.rejects(lock({}, [headUtxo(PROPOSER_ID), nodeUtxo(PROPOSER_ID, { activeProposalCount: 3 })]), /has 3 active proposals; the limit is 3/);
+    await assert.rejects(lock({}, [headUtxo(PROPOSER_ID), nodeUtxo(PROPOSER_ID, { lastProposalSlot: NOW - 3_600_000 })]), /the proposal cooldown of did:vector:a1a1.* ends at/);
+    const later = await lock({}, [headUtxo(PROPOSER_ID), nodeUtxo(PROPOSER_ID)]);
+    assert.equal(later.firstProposal, false);
+    await assert.rejects(lock({}, []), /No head of the activity list/);
+    await assert.rejects(lock({ stakeApex: 24 }), /Proposal stake must be at least 25 AP3X/);
+    await assert.rejects(lock({ proposalHash: 'ab' }), /proposalHash must be 64 hex characters/);
+    await assert.rejects(lock({ storageUri: undefined }), /storageUri is required/);
+    await assert.rejects(lock({}, [headUtxo()], { params: { ...PARAMS, minProposalStake: 30_000_000n } }), /the stake is below the minimum of 30\.000000 AP3X/);
+  });
+
+  test('a document is uploaded only after every check passes (Filebase is not configured in the tests)', async () => {
+    await assert.rejects(lock({ proposalDocument: '{"title":"x"}', proposalHash: undefined, storageUri: undefined }), /Filebase not configured/);
+    await assert.rejects(lock({ proposalDocument: '{"title":"x"}', credentialKeyHash: OTHER.keyHash }), /is not a declared credential/);
+  });
+
+  test('proposalTypeFrom refuses parameters that are not whole numbers', () => {
+    assert.throws(() => proposalTypeFrom('ParameterChange', { paramName: 'JURY_SIZE', currentValue: 1.5, proposedValue: 2 }), /whole numbers/);
+    assert.throws(() => proposalTypeFrom('TreasurySpend', { amount: 1 }), /TreasurySpend requires amount/);
+  });
+});
+
+describe('buildProposalSpend (step 2), evaluated by the applied validators', () => {
+  const spend = async (extra: UTxO[], lockUtxoOf: UTxO, o: { agentDid?: string; records?: UTxO[]; validMinutes?: number } = {}) => {
+    const ctx = await ctxOn([lockUtxoOf, ...extra], { records: o.records });
+    return buildProposalSpend(ctx, { ...common, agentDid: o.agentDid ?? PROPOSER_ID, lockTxHash: lockUtxoOf.txHash, lockOutputIndex: 0, validMinutes: o.validMinutes });
+  };
+
+  test('a first submission after the head: the proposal, the new node and the head with next_did = the agent', async () => {
+    const locked = proposalLock(proposalDatum({ submittedAt: NOW - DAY }));
+    const head = headUtxo();
+    const r = await spend([head], locked);
+    const tx = inspect(r.txCbor);
+    const propUnit = `${GOV.proposalMint}${deriveProposalTokenName(locked.txHash, 0)}`;
+    const actUnit = `${GOV.proposalMint}${deriveActivityTokenName(PROPOSER_ID)}`;
+    assert.deepEqual(tx.mint, { [actUnit]: 1n, [propUnit]: 1n });
+    assert.deepEqual(new Set(tx.inputs.filter((i) => i === refOf(locked) || i === refOf(head))), new Set([refOf(locked), refOf(head)]));
+    const proposal = tx.outputs.find((o) => o.assets[propUnit] === 1n)!;
+    assert.equal(r.position, `${r.txHash}#${tx.outputs.indexOf(proposal)}`);
+    assert.deepEqual(proposal.assets, { lovelace: 27_000_000n, [propUnit]: 1n });
+    assert.deepEqual(decodeProposalDatum(proposal.datum!), proposalDatum({ submittedAt: lo }), 'submitted_at = lo of the creation');
+    const node = tx.outputs.find((o) => o.assets[actUnit] === 1n)!;
+    assert.equal(node.address, GOV.proposalAddress);
+    assert.deepEqual(decodeActivityDatum(node.datum!), { agentDid: PROPOSER_ID, agentCredential: { type: 'VerificationKey', hash: CONTROLLER.keyHash }, activeProposalCount: 1, lastProposalSlot: lo, nextDid: '' });
+    const continued = tx.outputs.find((o) => o.assets[`${CONFIG.recordTokenPolicy}${ACTIVITY_HEAD_TOKEN}`] === 1n)!;
+    assert.deepEqual(decodeActivityDatum(continued.datum!), { ...decodeActivityDatum(head.datum!), nextDid: PROPOSER_ID });
+    assert.ok(continued.assets.lovelace >= head.assets.lovelace);
+    assert.deepEqual(new Set(tx.refs), new Set([...GOV_REF_UTXOS.slice(0, 2).map(refOf), refOf(AGENT_RECORDS[0]), refOf(paramsUtxo()), refOf(CROSS_REFS_UTXO)]));
+    assert.deepEqual(tx.signers, [CONTROLLER.keyHash]);
+    assert.deepEqual(r.requiredSigners, [
+      { keyHash: CONTROLLER.keyHash, roles: [`proposer credential (controller key of did:vector:${PROPOSER_ID})`] },
+      { keyHash: OWN_KEY_HASH, roles: [WALLET_ROLE] },
+    ]);
+    assert.equal(tx.scripts.length, 3, 'two spends and one mint');
+    assert.ok(tx.scripts.every((s) => s.mem > 0n && s.steps > 0n), 'the scripts ran (local evaluation)');
+    assert.equal(r.seed, refOf(locked));
+    assert.equal(r.inserted, true);
+    assert.equal(r.predecessor, 'head');
+    assert.equal(r.validTo - r.validFrom, 31 * 60_000);
+  });
+
+  test('an insertion between two nodes spends the predecessor node and keeps its value and tokens', async () => {
+    const [x, y] = ['90'.repeat(32), 'b0'.repeat(32)];
+    const nx = nodeUtxo(x, { nextDid: y });
+    const r = await spend([headUtxo(x), nx, nodeUtxo(y)], proposalLock());
+    const tx = inspect(r.txCbor);
+    assert.equal(r.predecessor, `did:vector:${x}`);
+    const continued = tx.outputs.find((o) => o.assets[`${GOV.proposalMint}${deriveActivityTokenName(x)}`] === 1n)!;
+    assert.deepEqual(decodeActivityDatum(continued.datum!), { ...decodeActivityDatum(nx.datum!), nextDid: PROPOSER_ID });
+    const fresh = tx.outputs.find((o) => o.assets[`${GOV.proposalMint}${deriveActivityTokenName(PROPOSER_ID)}`] === 1n)!;
+    assert.equal(decodeActivityDatum(fresh.datum!).nextDid, y, 'the new node takes the next_did of its predecessor');
+    assert.ok(tx.inputs.includes(refOf(nx)));
+  });
+
+  test('a later submission spends the agent\'s node: count plus one, last_proposal_slot = lo, only the proposal token', async () => {
+    const node = nodeUtxo(PROPOSER_ID, { activeProposalCount: 2, agentCredential: { type: 'VerificationKey', hash: CONTROLLER.keyHash } });
+    const locked = proposalLock();
+    const r = await spend([headUtxo(PROPOSER_ID), node], locked);
+    const tx = inspect(r.txCbor);
+    assert.deepEqual(tx.mint, { [`${GOV.proposalMint}${deriveProposalTokenName(locked.txHash, 0)}`]: 1n });
+    const continued = tx.outputs.find((o) => o.assets[`${GOV.proposalMint}${deriveActivityTokenName(PROPOSER_ID)}`] === 1n)!;
+    assert.deepEqual(decodeActivityDatum(continued.datum!), { ...decodeActivityDatum(node.datum!), activeProposalCount: 3, lastProposalSlot: lo });
+    assert.equal(r.inserted, false);
+    assert.equal(r.activeProposals, 3);
+  });
+
+  test('a subagent: its parent record is a reference input too', async () => {
+    const SUB = 'a5'.repeat(32);
+    const sub = rootRecord({ controller: testKey(14).publicKey, keys: [], endpoint: '', lineage: { type: 'Subagent', parent: PROPOSER_ID, parentEpoch: 0, depth: 1 } });
+    const records = [recordUtxo(SUB, sub), AGENT_RECORDS[0]];
+    const locked = proposalLock(proposalDatum({ proposerDid: SUB, proposerCredential: { type: 'VerificationKey', hash: testKey(14).keyHash } }));
+    const r = await spend([headUtxo()], locked, { agentDid: SUB, records });
+    const tx = inspect(r.txCbor);
+    assert.ok(tx.refs.includes(refOf(records[0])) && tx.refs.includes(refOf(records[1])), 'the record and its parent');
+    await assert.rejects(spend([headUtxo()], locked, { agentDid: SUB, records: [records[0]] }), /No parent record for did:vector:a1a1/);
+  });
+
+  test('refuses a lock that is gone, elsewhere or holds tokens, another agent, and a credential that the record no longer declares', async () => {
+    const locked = proposalLock();
+    const ctx = await ctxOn([headUtxo()]);
+    await assert.rejects(buildProposalSpend(ctx, { ...common, agentDid: PROPOSER_ID, lockTxHash: locked.txHash }), /The proposal lock .* is not an unspent output: has the lock transaction confirmed\?/);
+    const elsewhere = lockUtxo(GOV.critiqueAddress, locked.datum!, 27_000_000n);
+    await assert.rejects(spend([headUtxo()], elsewhere), /is not at the proposal validator address/);
+    const withToken = { ...locked, assets: { ...locked.assets, [`${GOV.proposalMint}${deriveProposalTokenName('11'.repeat(32), 0)}`]: 1n } };
+    await assert.rejects(spend([headUtxo()], withToken), /holds tokens: it is not a proposal lock/);
+    await assert.rejects(spend([headUtxo()], locked, { agentDid: CRITIC_ID }), /Proposer DID mismatch: the lock belongs to did:vector:a1a1.*, not did:vector:a2a2/);
+    const rotated = [recordUtxo(PROPOSER_ID, rootRecord({ controller: OTHER.publicKey, keys: [] }))];
+    await assert.rejects(spend([headUtxo()], locked, { records: rotated }), /is not a declared credential of did:vector:a1a1/);
+    await assert.rejects(spend([headUtxo(PROPOSER_ID), nodeUtxo(PROPOSER_ID, { lastProposalSlot: NOW - 3_600_000 })], locked), /The submission breaks the rate limit: the proposal cooldown/);
+    const script = lockUtxo(GOV.proposalAddress, encodeProposalDatum(proposalDatum({ proposerCredential: { type: 'Script', hash: GOV.proposalSpend } })), 27_000_000n);
+    await assert.rejects(spend([headUtxo()], script), /The proposer credential of the lock is a script credential/);
+  });
+
+  test('the scripts decide: the same transaction with submitted_at other than lo fails in the proposal validator', async () => {
+    const locked = proposalLock();
+    const head = headUtxo();
+    const ctx = await ctxOn([locked, head]);
+    const build = (submittedAt: number) => {
+      const propUnit = `${GOV.proposalMint}${deriveProposalTokenName(locked.txHash, 0)}`;
+      const actUnit = `${GOV.proposalMint}${deriveActivityTokenName(PROPOSER_ID)}`;
+      const node = encodeActivityDatum({ agentDid: PROPOSER_ID, agentCredential: { type: 'VerificationKey', hash: CONTROLLER.keyHash }, activeProposalCount: 1, lastProposalSlot: lo, nextDid: '' });
+      const predecessor = encodeActivityDatum({ ...decodeActivityDatum(head.datum!), nextDid: PROPOSER_ID });
+      return ctx.lucid.newTx()
+        .collectFrom([locked], SUBMIT_PROPOSAL_REDEEMER)
+        .collectFrom([head], SPEND_ACTIVITY_REDEEMER)
+        .mintAssets({ [actUnit]: 1n, [propUnit]: 1n }, SUBMIT_PROPOSAL_REDEEMER)
+        .pay.ToContract(GOV.proposalAddress, { kind: 'inline', value: encodeProposalDatum(proposalDatum({ submittedAt })) }, { lovelace: 27_000_000n, [propUnit]: 1n })
+        .pay.ToContract(GOV.proposalAddress, { kind: 'inline', value: node }, { lovelace: 2_000_000n, [actUnit]: 1n })
+        .pay.ToContract(GOV.proposalAddress, { kind: 'inline', value: predecessor }, head.assets)
+        .readFrom([...GOV_REF_UTXOS.slice(0, 2), AGENT_RECORDS[0], paramsUtxo(), CROSS_REFS_UTXO])
+        .addSignerKey(CONTROLLER.keyHash)
+        .validFrom(lo).validTo(hi)
+        .complete();
+    };
+    await build(lo);
+    await assert.rejects(build(lo + 1000), /failed script execution/);
+  });
+});
+
+// ─── Critique ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('critiques: the lock names the seed, the creation mints crit_', () => {
+  const { seed, utxo: proposal, datum } = submitted();
+  const lock = (o: Partial<Parameters<typeof buildCritiqueLock>[1]> = {}, extra: UTxO[] = [proposal], opts: { koios?: KoiosAccess; records?: UTxO[]; params?: typeof PARAMS } = {}) =>
+    ctxOn(extra, opts).then((ctx) => buildCritiqueLock(ctx, {
+      ...common, agentDid: CRITIC_ID, credentialKeyHash: CRITIC_CONTROLLER.keyHash, proposalTxHash: seed.txHash, proposalOutputIndex: seed.outputIndex,
+      critiqueType: 'Opposing', stakeApex: 10, critiqueHash: 'cd'.repeat(32), storageUri: 'ipfs://critique', ...o,
     }));
-  }
-  // Assembles the offline chain state buildProposalSpend needs, with the
-  // ability to omit one category per negative test (missing-NFT,
-  // missing-ref-scripts).
-  function baseSpendUtxos(opts?: { skipNft?: boolean; skipRefScripts?: boolean }): UTxO[] {
-    return [
-      ...FIXTURE_UTXOS, lockedUtxoFixture, preserveLockedUtxoFixture,
-      ...(opts?.skipNft ? [] : [nftFixtureUtxo()]),
-      ...(opts?.skipRefScripts ? [] : refScriptFixtureUtxos()),
-      ...infraFixtureUtxos(),
-    ];
-  }
-
-  // buildProposalSpend's PRODUCTION path (opts omitted - same as Task 5's
-  // callers) completes with `localUPLCEval: false`, which asks the PROVIDER
-  // to evaluate the transaction's script redeemers (see gov-build.ts's
-  // module doc). FixtureProvider deliberately has no evaluateTx (offline
-  // only - see fixture-provider.ts), and the REAL deployed validators
-  // legitimately reject this test's synthetic chain state - captured
-  // honestly, verbatim, in the dedicated native-eval-attempt describe block
-  // below, not swept under the rug here.
-  //
-  // This wrapper stubs evaluateTx with generous-but-harmless execution units
-  // (well inside the fixture protocol params' per-tx maximum) purely so
-  // Lucid can finish ASSEMBLING a well-formed, decodable transaction for the
-  // structural assertions in this describe block. It does NOT assert or
-  // imply the deployed validator would accept the result - that question is
-  // answered separately, honestly, by the native-eval-attempt test (which
-  // never calls evaluateTx at all, so this stub is simply unused there).
-  //
-  // Two things this stub deliberately does NOT cover, each carried by a
-  // different test instead: (1) it fabricates canned ex-units, not real
-  // ones, so the structural tests' fees are fictitious - nothing here or
-  // elsewhere asserts on `fee`/`feeAda`; (2) it never inspects or
-  // constrains REDEEMER CONTENT (only the units Lucid attaches to whichever
-  // redeemers already exist in the draft tx) - the structural test's
-  // literal 'd87980' redeemer-data pin, the native-eval-attempt test, and
-  // the (manual, gated) E2E integration test are what actually exercise
-  // redeemer correctness; a corrupted redeemer would sail through this stub
-  // unnoticed.
-  function stubEvalProvider(utxos: UTxO[]) {
-    const provider = chainClockProvider(utxos);
-    return Object.assign(provider, {
-      evaluateTx: async (txCborHex: string) => {
-        const draft = CML.Transaction.from_cbor_hex(txCborHex);
-        const legacy = draft.witness_set().redeemers()?.as_arr_legacy_redeemer();
-        const tagMap: Record<number, 'spend' | 'mint' | 'publish' | 'withdraw' | 'vote' | 'propose'> = {
-          0: 'spend', 1: 'mint', 2: 'publish', 3: 'withdraw', 4: 'vote', 5: 'propose',
-        };
-        const out: { ex_units: { mem: number; steps: number }; redeemer_index: number; redeemer_tag: typeof tagMap[number] }[] = [];
-        if (legacy) {
-          for (let i = 0; i < legacy.len(); i++) {
-            const r = legacy.get(i);
-            out.push({
-              ex_units: { mem: 2_000_000, steps: 500_000_000 },
-              redeemer_index: Number(r.index()),
-              redeemer_tag: tagMap[r.tag()] ?? 'spend',
-            });
-          }
-        }
-        return out;
-      },
-    });
-  }
-
-  before(async () => {
-    proposalSpendAddress = scriptHashToAddress(GOV_PROPOSAL_SPEND_HASH);
-
-    // Build a lock offline, then decode ITS OWN output to extract the real
-    // inline datum bytes - buildProposalSpend must reuse these verbatim, not
-    // reconstruct them, so the fixture has to carry genuine built-datum CBOR.
-    const lockResult = await buildProposalLock(lucid, {
-      agentDid: AGENT_DID, proposalType: 'GeneralSuggestion', stakeApex: 25,
-      proposalHash: '33'.repeat(32), storageUri: 'ipfs://spend-fixture-doc',
-    });
-    const lockTx = decodeTx(lockResult.txCbor);
-    const lockOut = findOutputTo(lockTx, proposalSpendAddress)!;
-    lockDatumCbor = lockOut.datum()!.as_datum()!.to_cbor_hex();
-
-    lockedUtxoFixture = {
-      txHash: LOCK_TX_HASH, outputIndex: 0, address: proposalSpendAddress,
-      assets: { lovelace: 27_000_000n }, datum: lockDatumCbor,
-    };
-    // A second locked UTxO with an off-constant lovelace amount, used ONLY by
-    // the value-preservation test below: if buildProposalSpend recomputed
-    // stake+2 AP3X instead of carrying the locked input's own coin through,
-    // 27_000_001n (not 27_000_000n) could never appear in the continuing
-    // output.
-    preserveLockedUtxoFixture = {
-      txHash: PRESERVE_LOCK_TX_HASH, outputIndex: 0, address: proposalSpendAddress,
-      assets: { lovelace: 27_000_001n }, datum: lockDatumCbor,
-    };
-
-    spendProvider = stubEvalProvider(baseSpendUtxos());
-    spendLucid = await lucidForAddress(spendProvider, OWN_ADDRESS);
+  const critiqueLock = (d: CritiqueDatum): UTxO => lockUtxo(GOV.critiqueAddress, encodeCritiqueDatum(d), d.stakeAmount + 2_000_000n);
+  const critiqueDatum = (o: Partial<CritiqueDatum> = {}): CritiqueDatum => ({
+    criticDid: CRITIC_ID, criticCredential: { type: 'VerificationKey', hash: CRITIC_CONTROLLER.keyHash }, proposalRef: seed, critiqueHash: 'cd'.repeat(32),
+    storageUri: utf8Hex('ipfs://critique'), critiqueType: { type: 'Opposing' }, stakeAmount: 10_000_000n, submittedAt: lo, incorporated: false, ...o,
   });
 
-  test('spends the locked UTxO, mints prop_+pact_ tokens, preserves the locked datum byte-identically', async () => {
-    // No opts: this is the PRODUCTION path (localUPLCEval: false internally)
-    // - see stubEvalProvider's comment above for why that still completes
-    // offline. Structural assertions only; the honesty-gate test below is
-    // what actually asks the real validators anything.
-    const r = await buildProposalSpend(spendLucid, spendProvider, {
-      agentDid: AGENT_DID, lockTxHash: LOCK_TX_HASH, lockOutputIndex: 0,
-    });
-
-    const expectedPropName = deriveProposalTokenName(LOCK_TX_HASH, 0);
-    const expectedActName = deriveActivityTokenName(AGENT_DID);
-    assert.equal(r.proposalTokenName, expectedPropName);
-    assert.equal(r.activityTokenName, expectedActName);
-    // THE PIN (Task 3 review mandate): the activity token name must come
-    // from deriveActivityTokenName's 'pact_' prefix - a 'pact_' -> 'act_'
-    // mutation in the implementation must fail this assertion by name.
-    assert.equal(
-      r.activityTokenName.slice(0, 10), Buffer.from('pact_', 'utf-8').toString('hex'),
-      "activityTokenName must be derived via deriveActivityTokenName's 'pact_' prefix",
-    );
-    assert.equal(r.scriptAddress, proposalSpendAddress);
-
-    const tx = decodeTx(r.txCbor);
-
-    // unsigned
-    const vkeys = tx.witness_set().vkeywitnesses();
-    assert.ok(vkeys === undefined || vkeys.len() === 0, 'spend build must be unsigned');
-    assert.equal(CML.hash_transaction(tx.body()).to_hex(), r.txHash);
-
-    // the locked UTxO is actually spent
-    const ins = tx.body().inputs();
-    let sawLockedInput = false;
-    for (let i = 0; i < ins.len(); i++) {
-      if (ins.get(i).transaction_id().to_hex() === LOCK_TX_HASH) sawLockedInput = true;
-    }
-    assert.ok(sawLockedInput, 'the locked UTxO must be a spent input');
-
-    // mints exactly prop:1 + act:1, with the exact derived unit names
-    const mint = tx.body().mint()!;
-    assert.ok(mint, 'no mint field');
-    const ma = mint.as_positive_multiasset();
-    assert.equal(findAssetQuantity(ma, GOV_PROPOSAL_MINT_HASH, expectedPropName), 1n, 'must mint exactly 1 prop_ token of the derived name');
-    assert.equal(findAssetQuantity(ma, GOV_PROPOSAL_MINT_HASH, expectedActName), 1n, 'must mint exactly 1 pact_ token of the derived name');
-
-    // Redeemer content, not just mint/output shape - stubEvalProvider only
-    // fabricates execution UNITS, it never inspects or constrains redeemer
-    // DATA, so nothing above this point would catch a corrupted or
-    // mismatched redeemer. Both the Spend and Mint redeemers must be
-    // SubmitRedeemer = Data.to(new Constr(0, [])), which CBOR-encodes to the
-    // fixed 3-byte 'd87980' (tag 121 = alternative 0, empty field array) -
-    // pinned as a literal, not by re-deriving from Constr, so a redeemer
-    // corruption can't hide behind a mutated encoder agreeing with itself.
-    const legacyRedeemers = tx.witness_set().redeemers()?.as_arr_legacy_redeemer();
-    assert.ok(legacyRedeemers, 'no redeemers in the witness set');
-    assert.equal(legacyRedeemers!.len(), 2, 'must carry exactly 2 redeemers (Spend + Mint)');
-    for (let i = 0; i < legacyRedeemers!.len(); i++) {
-      const redeemer = legacyRedeemers!.get(i);
-      assert.equal(
-        redeemer.data().to_cbor_hex(), 'd87980',
-        `redeemer ${i} (tag ${redeemer.tag()}) must be the empty SubmitRedeemer Constr(0, [])`,
-      );
-    }
-
-    // exactly two continuing outputs at the proposal address
-    const outs = tx.body().outputs();
-    const atSpendAddr: any[] = [];
-    for (let i = 0; i < outs.len(); i++) {
-      const o = outs.get(i);
-      if (o.address().to_bech32() === proposalSpendAddress) atSpendAddr.push(o);
-    }
-    assert.equal(atSpendAddr.length, 2, 'must produce exactly 2 continuing outputs at the proposal address');
-
-    // Positional pin, matching the mainnet-proven custodial output order
-    // exactly (the proposal-continuing pay.ToAddressWithData call comes
-    // before the activity one in both the custodial module and this build):
-    // output 0 = the proposal-datum continuing output (prop token), output
-    // 1 = the activity output (act token). Verified empirically against a
-    // real decoded build before pinning this, not assumed - output 2 (not
-    // asserted here) is Lucid's own wallet-change output from fee coin
-    // selection, which is incidental to this build's own logic.
-    const output0Assets = outs.get(0).amount().multi_asset();
-    const output1Assets = outs.get(1).amount().multi_asset();
-    assert.equal(
-      output0Assets && findAssetQuantity(output0Assets, GOV_PROPOSAL_MINT_HASH, expectedPropName), 1n,
-      'output 0 must be the proposal-continuing output (carries the prop_ token)',
-    );
-    assert.equal(
-      output1Assets && findAssetQuantity(output1Assets, GOV_PROPOSAL_MINT_HASH, expectedActName), 1n,
-      'output 1 must be the activity output (carries the pact_ token)',
-    );
-
-    const propOut = atSpendAddr.find((o) => findAssetQuantity(o.amount().multi_asset()!, GOV_PROPOSAL_MINT_HASH, expectedPropName) === 1n);
-    assert.ok(propOut, 'no continuing output carries the prop_ token');
-    assert.equal(
-      propOut.datum()!.as_datum()!.to_cbor_hex(), lockDatumCbor,
-      'the continuing proposal datum must be byte-identical to the locked input datum',
-    );
-    assert.equal(propOut.amount().coin(), 27_000_000n, 'the continuing proposal output must preserve the locked UTxO coin');
-
-    const actOut = atSpendAddr.find((o) => findAssetQuantity(o.amount().multi_asset()!, GOV_PROPOSAL_MINT_HASH, expectedActName) === 1n);
-    assert.ok(actOut, 'no continuing output carries the pact_ token');
-    assert.equal(actOut.amount().coin(), 2_000_000n);
-    const activityRaw = Data.from(actOut.datum()!.as_datum()!.to_cbor_hex()) as Constr<Data>;
-    assert.equal(activityRaw.fields[0], AGENT_DID, 'activity datum agent_did must match');
-    assert.equal(Number(activityRaw.fields[2]), 1, 'activity datum active_proposal_count must be 1 (first proposal)');
-    assert.equal(Number(activityRaw.fields[3]), r.validToMs - 360_000, 'activity datum last_proposal_slot must equal validFromMs');
-
-    // validity window: exactly 360 slots (360_000ms at the test config's 1000ms/slot)
-    const start = tx.body().validity_interval_start();
-    const ttl = tx.body().ttl();
-    assert.ok(start !== undefined && ttl !== undefined, 'validity interval must be set');
-    assert.equal(Number(ttl! - start!), 360, 'validity window must be exactly 360 slots (360_000 ms)');
-    assert.equal(r.validToMs, ZERO_TIME_MS + TIP_SLOT * 1000 + 360_000, 'validToMs must be validFromMs + 360_000');
-
-    // required signer = the derived wallet address's payment hash
-    const signers = tx.body().required_signers();
-    assert.ok(signers && signers.len() >= 1, 'no required_signers');
-    let foundSigner = false;
-    for (let i = 0; i < signers!.len(); i++) {
-      if (signers!.get(i).to_hex() === OWN_VKEY_HASH) foundSigner = true;
-    }
-    assert.ok(foundSigner, 'wallet vkey hash missing from required_signers');
-
-    // reference inputs: 3 infra + 2 ref-script + 1 NFT = 6
-    const refIns = tx.body().reference_inputs();
-    assert.ok(refIns, 'no reference_inputs on the spend tx');
-    assert.equal(refIns!.len(), 6, 'must read exactly 3 infra + 2 ref-script + 1 NFT UTxOs');
+  test('step 1 by the seed: the datum names the seed, submitted_at = lo, the stake + 2 AP3X', async () => {
+    const r = await lock();
+    const out = inspect(r.txCbor).outputs[r.lockOutputIndex];
+    assert.equal(out.address, GOV.critiqueAddress);
+    assert.deepEqual(out.assets, { lovelace: 12_000_000n });
+    assert.deepEqual(decodeCritiqueDatum(out.datum!), critiqueDatum());
+    assert.equal(r.seed, `${seed.txHash}#0`);
+    assert.equal(r.proposal, refOf(proposal));
+    assert.equal(r.proposerDid, `did:vector:${PROPOSER_ID}`);
   });
 
-  test('value-preservation: continuing proposal output carries the LOCKED UTxO coin, not a recomputed constant', async () => {
-    const r = await buildProposalSpend(spendLucid, spendProvider, {
-      agentDid: AGENT_DID, lockTxHash: PRESERVE_LOCK_TX_HASH, lockOutputIndex: 0,
-    });
-    const expectedPropName = deriveProposalTokenName(PRESERVE_LOCK_TX_HASH, 0);
-    const tx = decodeTx(r.txCbor);
-    const outs = tx.body().outputs();
-    let propOut: any = null;
-    for (let i = 0; i < outs.len(); i++) {
-      const o = outs.get(i);
-      if (o.address().to_bech32() !== proposalSpendAddress) continue;
-      const ma = o.amount().multi_asset();
-      if (ma && findAssetQuantity(ma, GOV_PROPOSAL_MINT_HASH, expectedPropName) === 1n) propOut = o;
-    }
-    assert.ok(propOut, 'no continuing output carries the prop_ token');
-    assert.equal(
-      propOut.amount().coin(), 27_000_001n,
-      'must equal the locked input coin exactly, not the recomputed stake+2 constant (27_000_000n)',
-    );
+  test('step 1 by the current output: the seed comes from the submission (Koios), and an Amendment critique carries its hash', async () => {
+    const koios = koiosWith({ [proposal.txHash]: [[`${seed.txHash}#0`, GOV.proposalSpend], [`${'ad'.repeat(32)}#0`, GOV.proposalSpend]] });
+    const r = await lock({ proposalTxHash: proposal.txHash, critiqueType: 'Amendment' }, [proposal], { koios });
+    assert.deepEqual(r.datum.proposalRef, seed);
+    assert.deepEqual(r.datum.critiqueType, { type: 'Amendment', suggestedChangeHash: 'cd'.repeat(32) });
   });
 
-  test('absent locked UTxO (random hash) - await-first error', async () => {
-    await assert.rejects(
-      buildProposalSpend(spendLucid, spendProvider, {
-        agentDid: AGENT_DID, lockTxHash: 'ff'.repeat(32), lockOutputIndex: 0,
-      }),
-      /vector_await_transaction/,
-    );
+  test('step 1 refuses parties that are not different, a proposal that is not open, and a stake under the parameters', async () => {
+    const sameController = [AGENT_RECORDS[0], recordUtxo(CRITIC_ID, criticRecord({ controller: CONTROLLER.publicKey }))];
+    await assert.rejects(lock({ credentialKeyHash: CONTROLLER.keyHash }, [proposal], { records: sameController }), /not different parties|the agent and the proposer have the same controller key/);
+    const child = [AGENT_RECORDS[0], recordUtxo(CRITIC_ID, criticRecord({ endpoint: '', lineage: { type: 'Subagent', parent: PROPOSER_ID, parentEpoch: 0, depth: 1 } }))];
+    await assert.rejects(lock({}, [proposal], { records: child }), /the agent is a subagent of the proposer/);
+    await assert.rejects(lock({ agentDid: PROPOSER_ID, credentialKeyHash: CONTROLLER.keyHash }), /the proposer can only write an Amendment critique of its own proposal/);
+    const adopted = proposalUtxo(seed, { ...datum, state: { type: 'Adopted', hash: 'ee'.repeat(32) } }, { txHash: 'f1'.repeat(32), outputIndex: 0 });
+    await assert.rejects(lock({}, [adopted]), /the proposal is Adopted, not Open or Amended/);
+    await assert.rejects(lock({}, [proposal], { params: { ...PARAMS, minCritiqueStake: 20_000_000n } }), /the stake is below the minimum of 20\.000000 AP3X/);
+    await assert.rejects(lock({ stakeApex: 9 }), /Critique stake must be at least 10 AP3X/);
+    await assert.rejects(lock({}, [proposal], { records: [AGENT_RECORDS[1]] }), /No identity record of the proposer did:vector:a1a1/);
   });
 
-  test('locked UTxO exists but is not at the proposal script address - fail-fast error', async () => {
-    // A UTxO that resolves fine by outref but sits at the WALLET's own
-    // address, not the proposal script address - simulates a caller passing
-    // an unrelated txHash. Must be rejected before any datum parsing is
-    // attempted (the datum content here is irrelevant to this check).
-    const WRONG_ADDR_TX_HASH = 'dd'.repeat(32);
-    const wrongAddressUtxo: UTxO = {
-      txHash: WRONG_ADDR_TX_HASH, outputIndex: 0, address: OWN_ADDRESS,
-      assets: { lovelace: 27_000_000n }, datum: lockDatumCbor,
-    };
-    const providerWrongAddr = chainClockProvider([...baseSpendUtxos(), wrongAddressUtxo]);
-    const lucidWrongAddr = await lucidForAddress(providerWrongAddr, OWN_ADDRESS);
-    await assert.rejects(
-      buildProposalSpend(lucidWrongAddr, providerWrongAddr, {
-        agentDid: AGENT_DID, lockTxHash: WRONG_ADDR_TX_HASH, lockOutputIndex: 0,
-      }),
-      /not at the proposal script address/,
-    );
+  test('step 2 mints crit_ of the lock and reads the proposal and the proposer record; evaluated by the applied validators', async () => {
+    const locked = critiqueLock(critiqueDatum({ submittedAt: NOW - DAY }));
+    const ctx = await ctxOn([proposal, locked]);
+    const r = await buildCritiqueSpend(ctx, { ...common, agentDid: `did:vector:${CRITIC_ID}`, lockTxHash: locked.txHash });
+    const tx = inspect(r.txCbor);
+    const unit = `${GOV.critiqueMint}${deriveCritiqueTokenName(locked.txHash, 0)}`;
+    assert.deepEqual(tx.mint, { [unit]: 1n });
+    const out = tx.outputs.find((o) => o.assets[unit] === 1n)!;
+    assert.equal(out.address, GOV.critiqueAddress);
+    assert.deepEqual(out.assets, { lovelace: 12_000_000n, [unit]: 1n });
+    assert.deepEqual(decodeCritiqueDatum(out.datum!), critiqueDatum());
+    assert.ok(tx.refs.includes(refOf(proposal)) && tx.refs.includes(refOf(AGENT_RECORDS[0])) && tx.refs.includes(refOf(AGENT_RECORDS[1])));
+    assert.deepEqual(tx.signers, [CRITIC_CONTROLLER.keyHash]);
+    assert.ok(tx.scripts.length === 2 && tx.scripts.every((s) => s.mem > 0n));
+    assert.equal(r.seed, `${seed.txHash}#0`);
+    assert.equal(r.position, `${r.txHash}#${tx.outputs.indexOf(out)}`);
   });
 
-  test('DID mismatch between the locked datum and the caller agentDid - clear error', async () => {
-    await assert.rejects(
-      buildProposalSpend(spendLucid, spendProvider, {
-        agentDid: 'ee'.repeat(32), lockTxHash: LOCK_TX_HASH, lockOutputIndex: 0,
-      }),
-      /DID mismatch/,
-    );
+  test('step 2 of an Amendment critique by the proposer needs no proposer record; it is evaluated too', async () => {
+    const locked = critiqueLock(critiqueDatum({ criticDid: PROPOSER_ID, criticCredential: { type: 'VerificationKey', hash: CONTROLLER.keyHash }, critiqueType: { type: 'Amendment', suggestedChangeHash: 'cd'.repeat(32) } }));
+    const r = await buildCritiqueSpend(await ctxOn([proposal, locked]), { ...common, agentDid: PROPOSER_ID, lockTxHash: locked.txHash });
+    assert.ok(!inspect(r.txCbor).refs.includes(refOf(AGENT_RECORDS[1])));
   });
 
-  test('missing agent registry NFT - the error says that a live legacy record is needed', async () => {
-    const providerNoNft = chainClockProvider(baseSpendUtxos({ skipNft: true }));
-    const lucidNoNft = await lucidForAddress(providerNoNft, OWN_ADDRESS);
-    await assert.rejects(
-      buildProposalSpend(lucidNoNft, providerNoNft, {
-        agentDid: AGENT_DID, lockTxHash: LOCK_TX_HASH, lockOutputIndex: 0,
-      }),
-      /needs a live legacy registry record of the proposer/,
-    );
+  test('step 2 refuses a proposal that has ended and a critic that is no longer Active', async () => {
+    const locked = critiqueLock(critiqueDatum());
+    await assert.rejects(buildCritiqueSpend(await ctxOn([locked]), { ...common, agentDid: CRITIC_ID, lockTxHash: locked.txHash }), /No proposal at .* holds the proposal token of the seed 5e5e/);
+    const revoked = rootRecord({ controller: CRITIC_CONTROLLER.publicKey, keys: [], status: { type: 'Revoked', by: { type: 'ControllerSet' }, reason: 1, at: NOW - DAY, invalidFrom: null, successor: null } });
+    const ctx = await ctxOn([proposal, locked], { records: [AGENT_RECORDS[0], recordUtxo(CRITIC_ID, revoked)] });
+    await assert.rejects(buildCritiqueSpend(ctx, { ...common, agentDid: CRITIC_ID, lockTxHash: locked.txHash }), /The critic did:vector:a2a2.* is Revoked over the validity window/);
+  });
+});
+
+// ─── Endorsement ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('endorsements: the lock names the seed, the creation mints gend_', () => {
+  const { seed, utxo: proposal } = submitted();
+  const endorsementDatum = (o: Partial<EndorsementDatum> = {}): EndorsementDatum => ({
+    endorserDid: ENDORSER_ID, endorserCredential: { type: 'VerificationKey', hash: ENDORSER_CONTROLLER.keyHash }, proposalRef: seed, stakeAmount: 5_000_000n, createdAt: lo, ...o,
   });
 
-  test('missing reference scripts (omitted from fixtures) - the verbatim redeploy-hint error', async () => {
-    const providerNoRefs = chainClockProvider(baseSpendUtxos({ skipRefScripts: true }));
-    const lucidNoRefs = await lucidForAddress(providerNoRefs, OWN_ADDRESS);
-    await assert.rejects(
-      buildProposalSpend(lucidNoRefs, providerNoRefs, {
-        agentDid: AGENT_DID, lockTxHash: LOCK_TX_HASH, lockOutputIndex: 0,
-      }),
-      /redeploy_ref_scripts\.py/,
-    );
+  test('step 1 locks the endorsement of the seed with created_at = lo', async () => {
+    const ctx = await ctxOn([proposal]);
+    const r = await buildEndorseLock(ctx, { ...common, agentDid: ENDORSER_ID, credentialKeyHash: ENDORSER_CONTROLLER.keyHash, proposalTxHash: seed.txHash, stakeApex: 5 });
+    const out = inspect(r.txCbor).outputs[r.lockOutputIndex];
+    assert.equal(out.address, GOV.endorsementAddress);
+    assert.deepEqual(out.assets, { lovelace: 7_000_000n });
+    assert.deepEqual(decodeEndorsementDatum(out.datum!), endorsementDatum());
   });
 
-  describe('native-eval attempt (honesty gate)', () => {
-    // Spec PR 8 Task 4's eval strategy (plan's Global Constraints section,
-    // "Eval strategy"): attempt NATIVE UPLC evaluation of the REAL deployed
-    // proposal spend+mint validators (captured bytecode,
-    // gov-state.fixture.json) against this test file's synthetic chain
-    // state, calling the SAME buildProposalSpend build used throughout this
-    // describe block - just with the opts override flipped to
-    // localUPLCEval: true instead of the structural tests' stubbed-provider
-    // production path.
-    //
-    // OUTCOME (captured 2026-07-30, verbatim - see task-4-report.md): FAILS.
-    // The validator trace shows it entered proposal_spend and successfully
-    // read PARAMS, then crashed - a genuine Plutus evaluation rejection, not
-    // a Lucid-level "couldn't build this" error:
-    //
-    //   TxBuilderError: { Complete: "failed script execution Spend[0] the
-    //   validator crashed / exited prematurely Trace ENTER:proposal_spend
-    //   Trace OK:read_params" }
-    //
-    // What this trace DOES establish: the crash is a genuine chain-logic
-    // rejection inside the deployed validator, not a Lucid-side "couldn't
-    // even assemble this transaction" failure - the crash happens in a
-    // LATER check the plan explicitly named as chain-state-dependent
-    // (oracle freshness, or a DID/NFT cross-check needing exact real values
-    // this fixture's synthetic ORACLE/NFT data cannot satisfy offline).
-    //
-    // What it does NOT establish: that everything up to and including
-    // read_params is correct. "OK:read_params" is ONE-DIRECTIONAL evidence
-    // - an EARLIER failure (crashing before ENTER:proposal_spend, or before
-    // OK:read_params) WOULD imply a structural break, but reaching this
-    // point proves nothing about checks that come AFTER it. Confirmed
-    // directly, not assumed: deliberately dropping the NFT reference input
-    // from buildProposalSpend's readFrom calls (a real structural bug)
-    // reproduces this EXACT SAME trace, since the validator doesn't touch
-    // the NFT until a check that comes later. That specific defect class is
-    // instead caught by the structural test's reference_inputs-length pin
-    // (== 6) above, not by this trace - which is why that pin, the
-    // redeemer-content pin, and the output-order pin all live in the
-    // structural describe block rather than being inferred from this one
-    // eval attempt.
-    //
-    // This is the expected fork, not a structural defect: production keeps
-    // `localUPLCEval: false` and lets the PROVIDER evaluate (tier-1/E2E
-    // integration tests exercise that against the live network); this
-    // describe block's sibling tests above cover the offline-testable half
-    // (the transaction's own shape) with a stubbed evaluateTx that makes no
-    // claim about validator acceptance. NEVER weakened to assert.doesNotReject
-    // or deleted - the failure is pinned so a change in this behavior (pass
-    // OR a different failure) shows up here, not silently.
-    test('ATTEMPT: native UPLC eval of the deployed proposal spend+mint validators against fixture chain state (EXPECTED TO FAIL - chain-state-dependent, not a structural defect)', async () => {
-      await assert.rejects(
-        buildProposalSpend(spendLucid, spendProvider, {
-          agentDid: AGENT_DID, lockTxHash: LOCK_TX_HASH, lockOutputIndex: 0,
-        }, { localUPLCEval: true }),
-        (err: unknown) => {
-          const message = err instanceof Error ? err.message : String(err);
-          // Must be a genuine Plutus validator rejection reached AFTER
-          // read_params, not a Lucid-side build failure and not a crash
-          // earlier than this. This is one-directional: it rules OUT an
-          // earlier-than-expected structural break, it does not rule IN
-          // that every later check is correct (see the describe-level
-          // comment above for why, and what does cover that).
-          assert.match(message, /proposal_spend/, 'expected a proposal_spend validator trace, not a build-level error');
-          assert.match(message, /OK:read_params/, 'expected the validator to have gotten PAST reading params before crashing - anything earlier would suggest a structural wiring defect, not a chain-state one');
-          return true;
-        },
-      );
-    });
+  test('step 1 refuses the proposer and a stake under the parameters', async () => {
+    const ctx = await ctxOn([proposal]);
+    await assert.rejects(buildEndorseLock(ctx, { ...common, agentDid: PROPOSER_ID, credentialKeyHash: CONTROLLER.keyHash, proposalTxHash: seed.txHash, stakeApex: 5 }), /an agent cannot endorse its own proposal/);
+    const high = await ctxOn([proposal], { params: { ...PARAMS, minGovernanceEndorsement: 8_000_000n } });
+    await assert.rejects(buildEndorseLock(high, { ...common, agentDid: ENDORSER_ID, credentialKeyHash: ENDORSER_CONTROLLER.keyHash, proposalTxHash: seed.txHash, stakeApex: 5 }), /below the minimum of 8\.000000 AP3X/);
+    const sameCredential = await ctxOn([proposal], { records: [AGENT_RECORDS[0], recordUtxo(ENDORSER_ID, endorserRecord({ keys: [{ keyType: 'Ed25519', key: CONTROLLER.publicKey, purposes: 8, pop: null }] }))] });
+    await assert.rejects(buildEndorseLock(sameCredential, { ...common, agentDid: ENDORSER_ID, credentialKeyHash: CONTROLLER.keyHash, proposalTxHash: seed.txHash, stakeApex: 5 }), /the credential of the agent is the proposer credential/);
+  });
+
+  test('step 2 mints gend_(endorser, seed) through critique_mint; evaluated by the applied validators', async () => {
+    const locked = lockUtxo(GOV.endorsementAddress, encodeEndorsementDatum(endorsementDatum({ createdAt: NOW - DAY })), 7_000_000n);
+    const r = await buildEndorseSpend(await ctxOn([proposal, locked]), { ...common, agentDid: ENDORSER_ID, lockTxHash: locked.txHash });
+    const tx = inspect(r.txCbor);
+    const unit = `${GOV.critiqueMint}${deriveEndorsementTokenName(ENDORSER_ID, seed)}`;
+    assert.equal(r.tokenName, deriveEndorsementTokenName(ENDORSER_ID, seed));
+    assert.ok(r.tokenName.startsWith(utf8Hex('gend_')));
+    assert.deepEqual(tx.mint, { [unit]: 1n });
+    const out = tx.outputs.find((o) => o.assets[unit] === 1n)!;
+    assert.deepEqual(out.assets, { lovelace: 7_000_000n, [unit]: 1n });
+    assert.deepEqual(decodeEndorsementDatum(out.datum!), endorsementDatum());
+    assert.ok(tx.refs.includes(refOf(proposal)) && tx.refs.includes(refOf(AGENT_RECORDS[0])) && tx.refs.includes(refOf(AGENT_RECORDS[2])));
+    assert.deepEqual(r.requiredSigners.map((s) => s.keyHash), [ENDORSER_CONTROLLER.keyHash, OWN_KEY_HASH]);
+    assert.ok(tx.scripts.length === 2 && tx.scripts.every((s) => s.mem > 0n));
+  });
+
+  test('the scripts decide: without the proposer record as a reference input the endorsement validator fails', async () => {
+    const locked = lockUtxo(GOV.endorsementAddress, encodeEndorsementDatum(endorsementDatum()), 7_000_000n);
+    const ctx = await ctxOn([proposal, locked]);
+    const unit = `${GOV.critiqueMint}${deriveEndorsementTokenName(ENDORSER_ID, seed)}`;
+    const build = (refs: UTxO[]) => ctx.lucid.newTx()
+      .collectFrom([locked], MINT_ENDORSEMENT_TOKEN_REDEEMER)
+      .mintAssets({ [unit]: 1n }, MINT_ENDORSEMENT_TOKEN_REDEEMER)
+      .pay.ToContract(GOV.endorsementAddress, { kind: 'inline', value: encodeEndorsementDatum(endorsementDatum()) }, { lovelace: 7_000_000n, [unit]: 1n })
+      .readFrom([GOV_REF_UTXOS[4], GOV_REF_UTXOS[3], AGENT_RECORDS[2], paramsUtxo(), CROSS_REFS_UTXO, proposal, ...refs])
+      .addSignerKey(ENDORSER_CONTROLLER.keyHash)
+      .validFrom(lo).validTo(hi)
+      .complete();
+    await build([AGENT_RECORDS[0]]);
+    await assert.rejects(build([]), /failed script execution/);
   });
 });

@@ -2339,26 +2339,36 @@
     }
   },
   "vector_build_self_improvement_critique": {
-    "description": "Build an UNSIGNED transaction that submits a critique on an improvement proposal (Supportive, Opposing, or Amendment). Requires staking at least 10 AP3X. Provide critiqueDocument for automatic IPFS upload, or critiqueHash and storageUri manually. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. Find a proposalTxHash to critique with vector_self_improvement_browse.",
+    "description": "Build an UNSIGNED transaction that locks a critique of an improvement proposal (Supportive, Opposing, or Amendment) with its stake at the Module-6 critique validator (step 1 of 2). The critic is a did:vector agent whose identity record is Active; except for an Amendment critique, the critic and the proposer must be different parties (different identifiers, controller keys and credentials, and no direct subagent relation). Requires staking at least 10 AP3X. The datum names the proposal by its seed. Provide critiqueDocument for automatic IPFS upload, or critiqueHash and storageUri manually. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. After this confirms, call vector_build_self_improvement_critique_spend with the lock transaction hash to create the critique. Find a proposal with vector_self_improvement_browse.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (holds the stake AP3X; receives change). Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the stake, the fee and the deposits, gives the collateral of step 2, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
         "agentDid": {
-          "description": "Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)",
-          "type": "string"
+          "description": "The DID of the critic: did:vector:<64 hex> (the legacy form did:vector:agent:<policy>:<64 hex> and the bare 64-hex identifier also work). Its identity record must be Active.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "credentialKeyHash": {
+          "description": "The declared credential of the agent: the key hash of its record's controller key or of a listed Ed25519 key with the transaction purpose. Default: the key of changeAddress. Stakes and rewards return to it, and its key signs step 2: a key hash, 56 hex characters",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{56}$"
         },
         "proposalTxHash": {
-          "description": "TX hash of the proposal UTxO to critique",
-          "type": "string"
+          "description": "The proposal: the transaction hash of its seed (the lock that its submission spent; vector_build_self_improvement_proposal_spend shows it) or of its current output (vector_self_improvement_browse shows it)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
         },
         "proposalOutputIndex": {
-          "description": "Output index of the proposal UTxO",
+          "description": "Output index of the proposal's seed or current output (default: 0)",
           "default": 0,
-          "type": "number"
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "critiqueDocument": {
           "description": "Full critique document as JSON string. Uploaded to IPFS via Filebase; hash and CID computed automatically.",
@@ -2369,7 +2379,7 @@
           "type": "string"
         },
         "critiqueType": {
-          "description": "Type of critique",
+          "description": "Type of critique (the proposer can write only an Amendment critique of its own proposal)",
           "type": "string",
           "enum": [
             "Supportive",
@@ -2385,6 +2395,12 @@
           "description": "AP3X to stake (minimum 10)",
           "type": "number",
           "minimum": 10
+        },
+        "validMinutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
@@ -2397,32 +2413,90 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_build_self_improvement_endorse": {
-    "description": "Build an UNSIGNED transaction that endorses an improvement proposal by staking at least 5 AP3X. Endorsements signal support to the Foundation Council and are weighted by stake amount. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. Find a proposalTxHash to endorse with vector_self_improvement_browse.",
+  "vector_build_self_improvement_critique_spend": {
+    "description": "Build an UNSIGNED transaction that creates a critique (step 2 of 2): spends the confirmed critique lock through the Module-6 critique validator and mints its critique token. The critic's identity record and its ancestors, the proposal and (except for an Amendment critique) the proposer's record are reference inputs; the critic's record must be Active over the validity window (at most 1 hour). The declared credential of the lock and the wallet sign. Takes no key material. Each key holder signs in turn with vector_signer_sign, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (holds the stake AP3X; receives change). Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the stake, the fee and the deposits, gives the collateral of step 2, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
         "agentDid": {
-          "description": "Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)",
+          "description": "The DID of the critic (the critic of the lock): did:vector:<64 hex> (the legacy form did:vector:agent:<policy>:<64 hex> and the bare 64-hex identifier also work). Its identity record must be Active.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "lockTxHash": {
+          "description": "The CONFIRMED transaction hash of the lock (vector_build_self_improvement_critique)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "lockOutputIndex": {
+          "description": "Output index of the lock in that transaction (default: 0; step 1 shows it)",
+          "default": 0,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "validMinutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "agentDid",
+        "lockTxHash"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_self_improvement_endorse": {
+    "description": "Build an UNSIGNED transaction that locks an endorsement of an improvement proposal with its stake at the Module-6 endorsement validator (step 1 of 2). Endorsements signal support to the Foundation Council and are weighted by stake amount. The endorser is a did:vector agent whose identity record is Active, and a different party from the proposer (different identifiers, controller keys and credentials, and no direct subagent relation). Requires staking at least 5 AP3X. The datum names the proposal by its seed. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. After this confirms, call vector_build_self_improvement_endorse_spend with the lock transaction hash to create the endorsement. Find a proposal with vector_self_improvement_browse.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the stake, the fee and the deposits, gives the collateral of step 2, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
+        },
+        "agentDid": {
+          "description": "The DID of the endorser: did:vector:<64 hex> (the legacy form did:vector:agent:<policy>:<64 hex> and the bare 64-hex identifier also work). Its identity record must be Active.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "credentialKeyHash": {
+          "description": "The declared credential of the agent: the key hash of its record's controller key or of a listed Ed25519 key with the transaction purpose. Default: the key of changeAddress. Stakes and rewards return to it, and its key signs step 2: a key hash, 56 hex characters",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{56}$"
         },
         "proposalTxHash": {
-          "description": "TX hash of the proposal UTxO to endorse",
-          "type": "string"
+          "description": "The proposal: the transaction hash of its seed (the lock that its submission spent; vector_build_self_improvement_proposal_spend shows it) or of its current output (vector_self_improvement_browse shows it)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
         },
         "proposalOutputIndex": {
-          "description": "Output index of the proposal UTxO",
+          "description": "Output index of the proposal's seed or current output (default: 0)",
           "default": 0,
-          "type": "number"
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "stakeApex": {
           "description": "AP3X to stake as endorsement (minimum 5)",
           "type": "number",
           "minimum": 5
+        },
+        "validMinutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
@@ -2434,18 +2508,67 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_build_self_improvement_proposal_lock": {
-    "description": "Build an UNSIGNED transaction that locks an improvement-proposal stake (step 1 of 2). Requires staking at least 25 AP3X. Provide proposalDocument for automatic IPFS upload, or proposalHash and storageUri manually. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. After this confirms, call this tool's counterpart, vector_build_self_improvement_proposal_spend, with the lock transaction hash to complete the submission.",
+  "vector_build_self_improvement_endorse_spend": {
+    "description": "Build an UNSIGNED transaction that creates an endorsement (step 2 of 2): spends the confirmed endorsement lock through the Module-6 endorsement validator and mints its endorsement token (gend_). The endorser's identity record and its ancestors, the proposal and the proposer's record are reference inputs; the endorser's record must be Active over the validity window (at most 1 hour). The declared credential of the lock and the wallet sign. Takes no key material. Each key holder signs in turn with vector_signer_sign, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (holds the stake AP3X; receives change). Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the stake, the fee and the deposits, gives the collateral of step 2, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
         "agentDid": {
-          "description": "Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)",
+          "description": "The DID of the endorser (the endorser of the lock): did:vector:<64 hex> (the legacy form did:vector:agent:<policy>:<64 hex> and the bare 64-hex identifier also work). Its identity record must be Active.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "lockTxHash": {
+          "description": "The CONFIRMED transaction hash of the lock (vector_build_self_improvement_endorse)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "lockOutputIndex": {
+          "description": "Output index of the lock in that transaction (default: 0; step 1 shows it)",
+          "default": 0,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "validMinutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "agentDid",
+        "lockTxHash"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_self_improvement_proposal_lock": {
+    "description": "Build an UNSIGNED transaction that locks an improvement proposal with its stake at the Module-6 proposal validator (step 1 of 2). The proposer is a did:vector agent whose identity record is Active; the datum names its declared credential (the controller key or a listed transaction key; default the wallet key). Requires staking at least 25 AP3X (the module parameters may ask more). A proposal lock can leave the validator only through its submission, so the tool checks every submission rule first: the identity record, the module parameters, the rate limit and the activity list. Provide proposalDocument for automatic IPFS upload, or proposalHash and storageUri manually. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. After this confirms, call vector_build_self_improvement_proposal_spend with the lock transaction hash to complete the submission.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the stake, the fee and the deposits, gives the collateral of step 2, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
+        },
+        "agentDid": {
+          "description": "The DID of the proposing agent: did:vector:<64 hex> (the legacy form did:vector:agent:<policy>:<64 hex> and the bare 64-hex identifier also work). Its identity record must be Active.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "credentialKeyHash": {
+          "description": "The declared credential of the agent: the key hash of its record's controller key or of a listed Ed25519 key with the transaction purpose. Default: the key of changeAddress. Stakes and rewards return to it, and its key signs step 2: a key hash, 56 hex characters",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{56}$"
         },
         "proposalType": {
           "description": "Category of the proposal",
@@ -2459,12 +2582,12 @@
           ]
         },
         "stakeApex": {
-          "description": "AP3X to stake (minimum 25)",
+          "description": "AP3X to stake (minimum 25; an Emergency proposal needs the emergency stake of the module parameters)",
           "type": "number",
           "minimum": 25
         },
         "typeParams": {
-          "description": "Type-specific parameters (required for ParameterChange and TreasurySpend)",
+          "description": "Type-specific parameters: ParameterChange needs paramName (a governable parameter name), currentValue and proposedValue; TreasurySpend needs amount (lovelace) and recipientDescription; ProtocolUpgrade needs upgradeHash (64 hex characters); GameActivation needs gameId (a positive whole number)",
           "type": "object",
           "properties": {
             "paramName": {
@@ -2491,7 +2614,7 @@
           }
         },
         "priority": {
-          "description": "Priority level (Emergency requires higher stake and reputation)",
+          "description": "Priority level: Standard (7-day review window) or Emergency (a ParameterChange or ProtocolUpgrade with the emergency stake and the emergency review window of the module parameters)",
           "default": "Standard",
           "type": "string",
           "enum": [
@@ -2510,6 +2633,12 @@
         "storageUri": {
           "description": "Off-chain storage URI for the full proposal (IPFS CID or OriginTrail UAL). Required if proposalDocument is not provided.",
           "type": "string"
+        },
+        "validMinutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
@@ -2522,26 +2651,37 @@
     }
   },
   "vector_build_self_improvement_proposal_spend": {
-    "description": "Build an UNSIGNED transaction that completes an improvement-proposal submission (step 2 of 2): spends the locked stake through the module validator and mints the proposal and activity tokens. Requires the confirmed lock transaction hash from vector_build_self_improvement_proposal_lock. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
+    "description": "Build an UNSIGNED transaction that completes an improvement-proposal submission (step 2 of 2): spends the confirmed lock through the Module-6 proposal validator, mints the proposal token, and records the agent in the activity list (its first proposal inserts the agent's node and mints its activity token). The agent's identity record and its ancestors are reference inputs; the record must be Active over the validity window (at most 1 hour). The declared credential of the lock and the wallet sign. Takes no key material. Each key holder signs in turn with vector_signer_sign, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "The SAME wallet address used to build the proposal lock. Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the stake, the fee and the deposits, gives the collateral of step 2, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
         "agentDid": {
-          "description": "Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string) - must match the proposer DID in the locked proposal",
-          "type": "string"
+          "description": "The DID of the proposing agent (the proposer of the lock): did:vector:<64 hex> (the legacy form did:vector:agent:<policy>:<64 hex> and the bare 64-hex identifier also work). Its identity record must be Active.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
         },
         "lockTxHash": {
-          "description": "The CONFIRMED transaction hash from the proposal lock step",
-          "type": "string"
+          "description": "The CONFIRMED transaction hash of the lock (vector_build_self_improvement_proposal_lock)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
         },
         "lockOutputIndex": {
-          "description": "Output index of the locked proposal UTxO (default: 0)",
+          "description": "Output index of the lock in that transaction (default: 0; step 1 shows it)",
           "default": 0,
-          "type": "number"
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "validMinutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
@@ -3124,7 +3264,7 @@
     }
   },
   "vector_self_improvement_analyze_metrics": {
-    "description": "Analyze proposal metrics: proposal activity, adoption rate, treasury health, and engagement statistics. Read-only, takes no key material.",
+    "description": "Analyze proposal metrics of the Module-6 (self-improvement) module: proposal activity, adoption rate, treasury health, and engagement statistics. Read-only, takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3138,13 +3278,21 @@
             "treasury",
             "activity"
           ]
+        },
+        "deployment": {
+          "description": "Which Module-6 deployment to read: 'current' (default; the deployment on the identity registry that this server is configured for) or 'previous' (the deployment before the identity registry; its positions stay there until their owners exit)",
+          "type": "string",
+          "enum": [
+            "current",
+            "previous"
+          ]
         }
       },
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
   "vector_self_improvement_browse": {
-    "description": "Browse improvement proposals, critiques, and endorsements. Query on-chain UTxOs at the module's script addresses and decode datums into human-readable format.",
+    "description": "Browse improvement proposals, critiques, endorsements and the treasury of the Module-6 (self-improvement) module: reads the outputs at the module's script addresses and decodes their datums. The current deployment lists created positions only (each holds its token). Read-only.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3167,12 +3315,20 @@
           "type": "string"
         },
         "proposerDid": {
-          "description": "Filter by proposer DID (hex)",
+          "description": "Filter proposals by proposer: did:vector:<64 hex> (the legacy form and the bare 64-hex identifier also work)",
           "type": "string"
         },
         "proposalTxHash": {
-          "description": "Filter critiques/endorsements by the proposal they reference",
+          "description": "Filter critiques/endorsements by their proposal: the transaction hash of the proposal's seed (the lock that its submission spent) or of its current output",
           "type": "string"
+        },
+        "deployment": {
+          "description": "Which Module-6 deployment to read: 'current' (default; the deployment on the identity registry that this server is configured for) or 'previous' (the deployment before the identity registry; its positions stay there until their owners exit)",
+          "type": "string",
+          "enum": [
+            "current",
+            "previous"
+          ]
         }
       },
       "required": [

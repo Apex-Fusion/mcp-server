@@ -21,6 +21,26 @@
   `LEGACY_REGISTRY_POLICY_ID`, `LEGACY_REGISTRY_DEPOSIT`, `legacyRegistryScript()`, `legacyRegistryAddress()`,
   `legacyDid()`). `gov-build.ts` no longer exports `AGENT_REGISTRY_POLICY` and no longer reads the
   `AGENT_REGISTRY_POLICY` environment variable.
+- **The self-improvement tools move to the Module-6 deployment on the identity registry** (Part 2 Section 7). The
+  `GOV_*` settings name that deployment and have no defaults: `GOV_{PROPOSAL,CRITIQUE,ENDORSEMENT}_SPEND_HASH`,
+  `GOV_{PROPOSAL,CRITIQUE}_MINT_HASH`, `GOV_RECORD_TOKEN_POLICY`, `GOV_REFS_TOKEN_POLICY`, `GOV_PARAMS_ADDRESS`,
+  `GOV_CROSSREFS_ADDRESS`, `GOV_TREASURY_ADDRESS` (all or none; a value of the previous deployment stops the start) and
+  the reference scripts `GOV_{PROPOSAL,CRITIQUE,ENDORSEMENT}_SPEND_REF`, `GOV_{PROPOSAL,CRITIQUE}_MINT_REF`.
+  `GOV_PARAMS_UTXO`, `GOV_ORACLE_UTXO` and `GOV_CROSSREFS_UTXO` are gone: the builders find the GovernanceParams
+  record, the 5-field CrossRefs output and the head of the activity list by their tokens. The build tools also need
+  the identity deployment.
+- **`agentDid` is a `did:vector` agent**: the canonical DID, the legacy DID form or the bare 64-hex identifier of an
+  identity record (it was the asset name of a legacy registry NFT). The record and its ancestors are reference inputs,
+  the record must be Active over the validity window (at most one hour), and the datum names a declared credential
+  (`credentialKeyHash`: the controller key or a listed transaction key; default the wallet key), which signs step 2.
+- **Critiques and endorsements take two steps**, as proposals do: `vector_build_self_improvement_critique` and
+  `_endorse` lock the stake, and the new `vector_build_self_improvement_critique_spend` and `_endorse_spend` create the
+  position and mint its token (`crit_`, `gend_`). A critique or an endorsement names its proposal by the seed (the lock
+  that its submission spent); `proposalTxHash` takes the seed or the proposal's current output. The first submission of
+  an agent inserts its node into the activity list. Steps 2 run the applied Module-6 validators locally at build time.
+- `vector_self_improvement_browse` and `_analyze_metrics` read the current deployment, or the previous one with
+  `deployment: 'previous'` (its positions stay until their owners exit). The `proposalTxHash` filter takes the seed or
+  the current output of the proposal. `scripts/capture-gov-state.mjs` (a capture of the previous deployment) is removed.
 
 ### Added
 
@@ -70,7 +90,7 @@
 - Signer: optional `VECTOR_SIGNER_OGMIOS_URL`. With it, the signer reads the outputs that a transaction spends
   (one read-only `queryLedgerState/utxo` query, output references only) and counts only the value that its
   own inputs fund. Without it, or when the lookup fails, it uses the previous rule and says so in the result.
-- 62 tools in all (was 33).
+- 64 tools in all (was 33).
 
 ### Changed
 
