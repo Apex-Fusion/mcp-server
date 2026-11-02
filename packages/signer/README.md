@@ -1,6 +1,7 @@
 # Vector MCP Signer
 
-Local signing companion for the Vector MCP server. **Holds your key; has no network access.**
+Local signing companion for the Vector MCP server. **Holds your key; has no network access unless
+you turn on one read-only input lookup (`VECTOR_SIGNER_OGMIOS_URL`).**
 
 The hosted builder is keyless: it constructs unsigned transactions but cannot sign. This
 package signs them locally, so your key never reaches a shared server or your model
@@ -76,15 +77,21 @@ the path in use).
 `keygen` is the quickest way to a dedicated key with a small blast radius. If you would rather
 use a mnemonic you already hold, see [Configuration](#configuration).
 
-## Why it has no network
+## Why it has no network (by default)
 
 - **stdio transport only** - no port, no HTTP listener, nothing to connect to
 - **no Provider and no Lucid instance** - signing uses CML directly
 - **submission lives on the builder**, so the signer needs no egress either
+- **one optional exception:** with `VECTOR_SIGNER_OGMIOS_URL` set, `src/resolve.ts` sends one
+  read-only Ogmios query per decision (`queryLedgerState/utxo`, output references only, never a
+  key or a transaction) to learn the value and the owner of each input the transaction spends.
+  Without that setting the signer makes no network call at all.
 
 `test/boundary.test.ts` checks this mechanically: it walks every file under `src/` for a
 network-capable import or an ambient network global (`fetch`, `WebSocket`, ...), and checks
-`package.json` for a network-capable dependency. That check is a text scan, not a sandbox, and
+`package.json` for a network-capable dependency. `src/resolve.ts` is the one file that may name
+`fetch`; the check pins that it imports nothing that holds the key, makes one call, and names
+only the read-only query. That check is a text scan, not a sandbox, and
 it is scoped accordingly: it reliably catches *accidental* regressions and *casual* misuse, an
 added dependency, a forgotten forbidden import, an unthinking `fetch(...)` call, including one
 routed around the bare identifier via `globalThis['fetch']` or `globalThis.fetch`. It does not
@@ -148,6 +155,7 @@ Optional:
 | `VECTOR_SIGNER_SPEND_LIMIT_PER_TX` | `100000000` (100 AP3X) | Refuses any transaction whose net outflow exceeds this |
 | `VECTOR_SIGNER_SPEND_LIMIT_DAILY` | `500000000` (500 AP3X) | Refuses once today's signed total would exceed this |
 | `VECTOR_SIGNER_AUDIT_LOG_PATH` | *(see note below)* | Local record of every decision |
+| `VECTOR_SIGNER_OGMIOS_URL` | *(unset)* | Ogmios HTTP JSON-RPC endpoint for input resolution. Set: the own-inputs spend rule (see below). Unset: no network call at all, and the fallback rule. A value that is not an http(s) URL stops startup. |
 
 **`VECTOR_SIGNER_AUDIT_LOG_PATH`, precisely:** if unset, the log is written to
 `vector-signer-audit-log.json` resolved against the *package's own install location* (three
@@ -165,20 +173,49 @@ point `VECTOR_SIGNER_AUDIT_LOG_PATH` at some other path inside the repo, check b
 | Tool | Purpose |
 |---|---|
 | `vector_signer_get_address` | Your address. Pass it to the builder as `changeAddress`. |
-| `vector_signer_decode_transaction` | Show what a transaction would move, **without signing**. |
-| `vector_signer_sign` | Policy-check and sign. Returns signed CBOR. |
-| `vector_signer_get_spend_limits` | Limits, today's committed total, recent decisions. |
+| `vector_signer_get_public_key` | Your Ed25519 public key and its key hash (blake2b-224). Not secret; use them where an identity record must name your key. |
+| `vector_signer_decode_transaction` | Show what a transaction would move, **without signing**. Also shows the witnesses it already carries. |
+| `vector_signer_sign` | Policy-check and sign. Accepts an unsigned transaction or one that other keys signed first: their witnesses stay byte for byte and in their order, and your key gets exactly one witness. Returns signed CBOR. |
+| `vector_signer_get_spend_limits` | Limits, today's committed total, the outflow rule in use, recent decisions. |
 
 No tool accepts key material as a parameter; that is asserted by the smoke test.
 
 ## What "net outflow" means
 
-Spend limits apply to **net outflow**: every output that does *not* return to your address,
-plus the fee. Change is excluded, so a 1000 AP3X wallet sending 3 AP3X is measured as ~3.2
-AP3X, not 1000.
+Spend limits apply to **net outflow**. The signer counts it with one of two rules, and every
+result says which rule counted it, and for the fallback why.
 
-An output to your own wallet at a *different* derivation index counts as outflow. That
+**Own-inputs rule** (needs `VECTOR_SIGNER_OGMIOS_URL`, and every spent input and collateral input
+found unspent). An input is *own* when the payment credential of the output it spends is your key
+hash. Then:
+
+```text
+net outflow = max( 0,
+                   own spent inputs + withdrawals from your key's reward account - outputs to your address,
+                   own collateral inputs - the collateral return when it goes to your address,
+                   the whole fee, when your key funds any spent or collateral input )
+```
+
+The second and third terms are the two outcomes one signature covers: `is_valid` is outside the
+signed body, so a node can take the collateral instead of the inputs when a script fails. The
+fee share is conservative: when your key funds any input, the whole fee counts, even if another
+party pays it. In a multi-party transaction, the value the other parties fund does not count.
+Value at a script address that your signature unlocks is not an own input: the script's rules
+decide where it goes.
+
+**Fallback rule** (the previous rule): every output that does *not* return to your address, plus
+the fee. It applies when `VECTOR_SIGNER_OGMIOS_URL` is unset, when the lookup fails, when an input
+is not found unspent, and when a certificate returns a deposit to your key (the body does not
+always say how much). Change is excluded, so a 1000 AP3X wallet sending 3 AP3X is measured as
+~3.2 AP3X, not 1000.
+
+Under both rules an output counts as returned only when it goes to your configured address
+exactly. An output to your own wallet at a *different* derivation index counts as outflow. That
 over-counts, which refuses too much rather than too little.
+
+**Trust.** The own-inputs rule trusts the Ogmios endpoint. An endpoint that lies about who holds an
+input can make the signer count less than the signature gives away. Point
+`VECTOR_SIGNER_OGMIOS_URL` only at an endpoint you trust, best your own node.
 
 ## Known limitations
 
@@ -186,9 +223,12 @@ over-counts, which refuses too much rather than too little.
   lovelace. A transaction moving ~2 AP3X plus a valuable NFT passes the lovelace check.
   Asset movements appear in `decode_transaction` output and the audit log so they are
   visible, but they are not yet a policy input.
-- **The audit log records intent to spend, at signing time.** The signer has no network and cannot
+- **The audit log records intent to spend, at signing time.** The signer never submits and cannot
   observe whether a submit succeeded, so a failed submit still counts against the daily
   budget. Conservative by design.
+- **The fallback rule does not count collateral.** A transaction with a failing script lets a node
+  take the collateral inputs. The own-inputs rule counts your collateral; the fallback rule (no
+  `VECTOR_SIGNER_OGMIOS_URL`, or a failed lookup) counts only outputs and the fee, as before.
 - **A durable audit record is mandatory for signing: an unwritable audit log halts every
   signature.** `AuditLog.append()` throws if the write fails, and
   `vector_signer_sign` withholds a signature it already produced rather than return one with
@@ -275,7 +315,7 @@ last bullet under Known limitations above for the full evidence.
 
 ```bash
 npm run test:unit          # pure logic, no wallet, no network (from the repo root)
-npm run test:smoke:signer  # builds the signer, boots it over stdio, exercises all 4 tools and `keygen`
+npm run test:smoke:signer  # builds the signer, boots it over stdio, exercises all 5 tools, input resolution against a local Ogmios stand-in, and `keygen`
 ```
 
 Both run in CI on every PR.

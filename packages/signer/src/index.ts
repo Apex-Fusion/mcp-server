@@ -1,10 +1,12 @@
 // Local signing companion for the Vector MCP server.
 //
-// Speaks stdio only: no HTTP listener, no outbound network, no Provider.
-// The signing key never leaves this process. See test/boundary.test.ts.
+// Speaks stdio only: no HTTP listener and no Provider. Outbound network:
+// none, unless VECTOR_SIGNER_OGMIOS_URL is set; then only the read-only
+// input query of resolve.ts. The signing key never leaves this process.
+// See test/boundary.test.ts.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { loadConfig } from './config.js';
+import { loadConfig, resolutionDescription } from './config.js';
 import { printKeygen } from './keygen.js';
 import { registerSignerTools } from './tools.js';
 // Single source of truth for the advertised version; inlined at build time.
@@ -36,6 +38,7 @@ if (process.argv[2] === 'keygen') {
   // stdout is the MCP channel - every diagnostic must go to stderr.
   console.error(`vector-mcp-signer ready. Key source: ${config.keySource.describe()}`);
   console.error(`Audit log: ${config.auditLogPath}`);
+  console.error(`Input resolution: ${resolutionDescription(config.ogmiosUrl)}`);
 
   await server.connect(new StdioServerTransport());
 }

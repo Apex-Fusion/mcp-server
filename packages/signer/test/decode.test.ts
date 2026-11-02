@@ -319,3 +319,75 @@ describe('indefinite-length CBOR — the agent registry\'s D8 79 9F … FF const
     });
   });
 });
+
+describe('decodeTransaction — what the own-inputs spend rule reads', () => {
+  const credentialOf = (keyHash: string) => CML.Credential.new_pub_key(CML.Ed25519KeyHash.from_hex(keyHash));
+  const scriptCredential = CML.Credential.new_script(CML.ScriptHash.from_hex('c3'.repeat(28)));
+  const keyA = 'a1'.repeat(28);
+  const keyB = 'b2'.repeat(28);
+  const witnessKeys = [CML.PrivateKey.generate_ed25519(), CML.PrivateKey.generate_ed25519()];
+
+  /** A body with everything the rule reads: inputs, collateral, a collateral return, withdrawals, certificates and two witnesses. */
+  function richTx(): string {
+    const input = (hashByte: string, index: bigint) => CML.TransactionInput.new(CML.TransactionHash.from_hex(hashByte.repeat(32)), index);
+    const inputs = CML.TransactionInputList.new();
+    inputs.add(input('aa', 0n));
+    inputs.add(input('bb', 5n));
+    const outputs = CML.TransactionOutputList.new();
+    outputs.add(CML.TransactionOutput.new(CML.Address.from_bech32(FOREIGN_ADDRESS), CML.Value.from_coin(3_000_000n)));
+    const body = CML.TransactionBody.new(inputs, outputs, 200_000n);
+
+    const collateral = CML.TransactionInputList.new();
+    collateral.add(input('cc', 1n));
+    body.set_collateral_inputs(collateral);
+    body.set_collateral_return(CML.TransactionOutput.new(CML.Address.from_bech32(OWN_ADDRESS), CML.Value.from_coin(4_000_000n)));
+
+    const withdrawals = CML.MapRewardAccountToCoin.new();
+    withdrawals.insert(CML.RewardAddress.new(1, credentialOf(keyA)), 7_000_000n);
+    withdrawals.insert(CML.RewardAddress.new(1, scriptCredential), 1_000_000n);
+    body.set_withdrawals(withdrawals);
+
+    const certs = CML.CertificateList.new();
+    certs.add(CML.Certificate.new_stake_deregistration(credentialOf(keyA)));
+    certs.add(CML.Certificate.new_unreg_cert(credentialOf(keyB), 2_000_000n));
+    certs.add(CML.Certificate.new_unreg_drep_cert(scriptCredential, 2_000_000n)); // a script: no key to name
+    certs.add(CML.Certificate.new_stake_registration(credentialOf('d4'.repeat(28)))); // takes a deposit, returns none
+    body.set_certs(certs);
+
+    const hash = CML.hash_transaction(body).to_raw_bytes();
+    const vkeys = CML.VkeywitnessList.new();
+    for (const key of witnessKeys) vkeys.add(CML.Vkeywitness.new(key.to_public(), key.sign(hash)));
+    const witnessSet = CML.TransactionWitnessSet.new();
+    witnessSet.set_vkeywitnesses(vkeys);
+    return CML.Transaction.new(body, witnessSet, false, undefined).to_cbor_hex();
+  }
+
+  test('the spent inputs of the fixture, by reference', () => {
+    assert.deepStrictEqual(decodeTransaction(FIXTURE_CBOR).inputs, [
+      { txHash: 'e17a2ebab8eae3850f959290041b3bef3f3597584f8cf4a728e14777dddb8c32', index: 0 },
+    ]);
+  });
+
+  test('the fixture has no collateral, no withdrawal, no refund, no witness, and is valid', () => {
+    const tx = decodeTransaction(FIXTURE_CBOR);
+    assert.deepStrictEqual(
+      [tx.collateralInputs, tx.collateralReturn, tx.withdrawals, tx.depositRefundKeyHashes, tx.witnessKeyHashes, tx.isValid],
+      [[], null, [], [], [], true]
+    );
+  });
+
+  test('reads the inputs, the collateral and its return, the withdrawals, the deposit refunds and the witnesses', () => {
+    const tx = decodeTransaction(richTx());
+    assert.deepStrictEqual(tx.inputs, [{ txHash: 'aa'.repeat(32), index: 0 }, { txHash: 'bb'.repeat(32), index: 5 }]);
+    assert.deepStrictEqual(tx.collateralInputs, [{ txHash: 'cc'.repeat(32), index: 1 }]);
+    assert.deepStrictEqual(tx.collateralReturn, { address: OWN_ADDRESS, lovelace: 4_000_000n, assets: [] });
+    assert.deepStrictEqual(
+      tx.withdrawals.map((w) => [w.keyHash, w.lovelace]).sort(),
+      [[keyA, 7_000_000n], [null, 1_000_000n]].sort()
+    );
+    assert.ok(tx.withdrawals.every((w) => w.rewardAddress.startsWith('stake1')));
+    assert.deepStrictEqual(tx.depositRefundKeyHashes, [keyA, keyB], 'stake deregistration and unregistration name their keys; a script and a registration do not count');
+    assert.deepStrictEqual(tx.witnessKeyHashes, witnessKeys.map((k) => k.to_public().hash().to_hex()));
+    assert.equal(tx.isValid, false);
+  });
+});

@@ -3,6 +3,31 @@
 // signer. This path was verified to produce a byte-identical result.
 import * as CML from '@anastasia-labs/cardano-multiplatform-lib-nodejs';
 
+const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
+
+/**
+ * The Ed25519 public key (32 bytes, hex) of a bech32 signing key, and its key
+ * hash (blake2b-224, hex): the two values a transaction or an identity record
+ * uses to name the key. Neither is secret.
+ */
+export function publicKeyOf(privateKeyBech32: string): { publicKeyHex: string; keyHashHex: string } {
+  let publicKey: CML.PublicKey;
+  try {
+    publicKey = CML.PrivateKey.from_bech32(privateKeyBech32).to_public();
+  } catch {
+    // Never echo the key value into the message.
+    throw new Error('Invalid private key: could not parse the bech32 signing key.');
+  }
+  return { publicKeyHex: hex(publicKey.to_raw_bytes()), keyHashHex: publicKey.hash().to_hex() };
+}
+
+/**
+ * Adds this key's vkey witness to a transaction that is unsigned or already
+ * carries witnesses of other keys. Every witness of another key is kept,
+ * byte for byte and in its order. This key ends up with exactly one witness:
+ * appended when it had none, else in the place of its first one (Ed25519 is
+ * deterministic, so signing twice gives the same transaction).
+ */
 export function signTransaction(
   unsignedCborHex: string,
   privateKeyBech32: string
@@ -47,15 +72,26 @@ export function signTransaction(
 
   const body = tx.body();
   const txHash = CML.hash_transaction(body);
-  const signature = sk.sign(txHash.to_raw_bytes());
+  const ownKey = sk.to_public();
+  const ownKeyHex = hex(ownKey.to_raw_bytes());
+  const ownWitness = CML.Vkeywitness.new(ownKey, sk.sign(txHash.to_raw_bytes()));
 
   const witnessSet = tx.witness_set();
   const vkeys = CML.VkeywitnessList.new();
   const existing = witnessSet.vkeywitnesses();
+  let placed = false;
   if (existing) {
-    for (let i = 0; i < existing.len(); i++) vkeys.add(existing.get(i));
+    for (let i = 0; i < existing.len(); i++) {
+      const witness = existing.get(i);
+      if (hex(witness.vkey().to_raw_bytes()) !== ownKeyHex) {
+        vkeys.add(witness);
+      } else if (!placed) {
+        vkeys.add(ownWitness);
+        placed = true;
+      }
+    }
   }
-  vkeys.add(CML.Vkeywitness.new(sk.to_public(), signature));
+  if (!placed) vkeys.add(ownWitness);
   witnessSet.set_vkeywitnesses(vkeys);
 
   // Threaded through from the input transaction, not hardcoded: is_valid is

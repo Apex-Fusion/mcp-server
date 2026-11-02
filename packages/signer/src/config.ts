@@ -1,5 +1,6 @@
-// Signer configuration, entirely from the environment. No network settings
-// exist here by design - the signer has no endpoints to configure.
+// Signer configuration, entirely from the environment. The one network
+// setting is optional: VECTOR_SIGNER_OGMIOS_URL turns on input resolution
+// (resolve.ts). Without it the signer makes no network call at all.
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,8 @@ export interface SignerConfig {
   keySource: KeySource;
   limits: SpendLimits;
   auditLogPath: string;
+  /** The Ogmios HTTP JSON-RPC endpoint for input resolution; null when it is off. */
+  ogmiosUrl: string | null;
 }
 
 function repoRootDefault(): string {
@@ -31,7 +34,33 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SignerConfig {
     auditLogPath: env.VECTOR_SIGNER_AUDIT_LOG_PATH
       ? resolve(env.VECTOR_SIGNER_AUDIT_LOG_PATH)
       : resolve(repoRootDefault(), 'vector-signer-audit-log.json'),
+    ogmiosUrl: parseOgmiosUrl(env.VECTOR_SIGNER_OGMIOS_URL),
   };
+}
+
+// Fails loud on a value that is set but is not an http(s) URL, like the other
+// settings here: a typo must not silently turn resolution off. The value is
+// never echoed, because an endpoint URL can carry a token.
+function parseOgmiosUrl(raw: string | undefined): string | null {
+  if (raw === undefined || raw.trim() === '') return null;
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    throw new Error('Invalid VECTOR_SIGNER_OGMIOS_URL: expected an http:// or https:// URL.');
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error('Invalid VECTOR_SIGNER_OGMIOS_URL: expected an http:// or https:// URL.');
+  }
+  return url.toString();
+}
+
+/**
+ * The input resolution setting as the startup banner and get_spend_limits name
+ * it: the host only, because the full URL can carry a token.
+ */
+export function resolutionDescription(ogmiosUrl: string | null): string {
+  return ogmiosUrl ? `on (Ogmios at ${new URL(ogmiosUrl).host})` : 'off (VECTOR_SIGNER_OGMIOS_URL is not set)';
 }
 
 function resolveKeySource(env: NodeJS.ProcessEnv): KeySource {

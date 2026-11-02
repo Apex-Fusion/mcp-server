@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeOutflow, evaluate, type SpendLimits } from '../src/policy.ts';
+import { computeOutflow, evaluate, outRefKey, RESOLUTION_OFF, type InputResolution, type ResolvedOutput, type SpendLimits } from '../src/policy.ts';
 import type { DecodedTx } from '../src/decode.ts';
 
 const OWN = 'addr1own';
@@ -17,6 +17,13 @@ function tx(partial: Partial<DecodedTx>): DecodedTx {
     outputs: [],
     inputCount: 1,
     mintedAssetCount: 0,
+    inputs: [{ txHash: 'b'.repeat(64), index: 0 }],
+    collateralInputs: [],
+    collateralReturn: null,
+    withdrawals: [],
+    depositRefundKeyHashes: [],
+    witnessKeyHashes: [],
+    isValid: true,
     ...partial,
   };
 }
@@ -543,5 +550,187 @@ describe('evaluate — bigint precision at magnitudes beyond float safety', () =
     const d = evaluate(tx({ fee: HUGE_FEE, outputs: [] }), [OWN], zeroLimits, 0n);
     assert.equal(d.allowed, false);
     assert.equal(d.netOutflowLovelace, HUGE_FEE, 'the bigint decision figure must never lose precision');
+  });
+});
+
+// --- The own-inputs rule: inputs resolved (in the server by resolve.ts; here a map stands in for it) ---
+
+describe('own-inputs rule — only the value the signer\'s own inputs fund counts', () => {
+  const SIGNER_KEY = 'a1'.repeat(28);
+  const OTHER_KEY = 'b2'.repeat(28);
+  const OTHER = 'addr1other_party';
+  const OWN_IN = { txHash: '01'.repeat(32), index: 0 };
+  const OTHER_IN = { txHash: '02'.repeat(32), index: 1 };
+  const OWN_IN_2 = { txHash: '03'.repeat(32), index: 2 };
+  const at = (address: string, paymentKeyHash: string | null, lovelace: bigint): ResolvedOutput => ({ address, lovelace, paymentKeyHash });
+  const resolved = (entries: Array<[{ txHash: string; index: number }, ResolvedOutput]>, signerKeyHash = SIGNER_KEY): InputResolution =>
+    ({ resolved: true, signerKeyHash, outputs: new Map(entries.map(([input, output]) => [outRefKey(input), output])) });
+
+  // Another party funds 500 AP3X and pays a stranger 300; the signer puts in 10 and takes 10 back. The other party pays the fee.
+  const multiParty = tx({
+    fee: 200_000n,
+    inputs: [OWN_IN, OTHER_IN],
+    outputs: [
+      { address: FOREIGN, lovelace: 300_000_000n, assets: [] },
+      { address: OTHER, lovelace: 199_800_000n, assets: [] },
+      { address: OWN, lovelace: 10_000_000n, assets: [] },
+    ],
+  });
+  const multiPartyInputs = resolved([[OWN_IN, at(OWN, SIGNER_KEY, 10_000_000n)], [OTHER_IN, at(OTHER, OTHER_KEY, 500_000_000n)]]);
+
+  test('a multi-party transaction where another party funds most inputs passes the limit: the signer is charged the whole fee only', () => {
+    const d = evaluate(multiParty, [OWN], LIMITS, 0n, multiPartyInputs);
+    assert.equal(d.rule, 'own-inputs');
+    assert.equal(d.netOutflowLovelace, 200_000n, 'own in 10 - own out 10 = 0, so the fee share (the whole fee) decides');
+    assert.equal(d.allowed, true);
+    assert.match(d.ruleNote, /own inputs/);
+  });
+
+  test('control: the same transaction under the fallback rule counts the other party\'s outputs and is refused', () => {
+    const d = evaluate(multiParty, [OWN], LIMITS, 0n);
+    assert.equal(d.rule, 'all-outputs');
+    assert.equal(d.netOutflowLovelace, 500_000_000n);
+    assert.equal(d.allowed, false);
+    assert.match(d.ruleNote, /\(fallback rule\), because input resolution is off/);
+  });
+
+  test('a transaction that spends the signer\'s inputs to a stranger is still limited', () => {
+    const drain = tx({ fee: 200_000n, inputs: [OWN_IN], outputs: [{ address: FOREIGN, lovelace: 499_800_000n, assets: [] }] });
+    const d = evaluate(drain, [OWN], LIMITS, 0n, resolved([[OWN_IN, at(OWN, SIGNER_KEY, 500_000_000n)]]));
+    assert.equal(d.rule, 'own-inputs');
+    assert.equal(d.netOutflowLovelace, 500_000_000n);
+    assert.equal(d.allowed, false);
+    assert.match(d.reason!, /per-transaction limit/);
+  });
+
+  test('the signer\'s inputs held at another address with the signer\'s key still count as its own', () => {
+    // An address with the signer's payment key and some other stake part: the key alone spends it.
+    const drain = tx({ fee: 200_000n, inputs: [OWN_IN, OTHER_IN], outputs: [{ address: FOREIGN, lovelace: 600_000_000n, assets: [] }] });
+    const d = evaluate(drain, [OWN], LIMITS, 0n, resolved([
+      [OWN_IN, at('addr1own_key_other_stake', SIGNER_KEY, 300_000_000n)],
+      [OTHER_IN, at(OTHER, OTHER_KEY, 300_200_000n)],
+    ]));
+    assert.equal(d.netOutflowLovelace, 300_000_000n);
+    assert.equal(d.allowed, false);
+  });
+
+  test('in a single-party transaction the rule gives the same figure as the fallback rule', () => {
+    const single = tx({
+      fee: 200_000n,
+      inputs: [OWN_IN],
+      outputs: [{ address: FOREIGN, lovelace: 3_000_000n, assets: [] }, { address: OWN, lovelace: 996_800_000n, assets: [] }],
+    });
+    const own = evaluate(single, [OWN], LIMITS, 0n, resolved([[OWN_IN, at(OWN, SIGNER_KEY, 1_000_000_000n)]]));
+    const fallback = evaluate(single, [OWN], LIMITS, 0n);
+    assert.equal(own.netOutflowLovelace, 3_200_000n);
+    assert.equal(own.netOutflowLovelace, fallback.netOutflowLovelace);
+  });
+
+  test('a signer that funds no input and gains value is charged nothing, never a negative amount', () => {
+    const paid = tx({ fee: 200_000n, inputs: [OTHER_IN], outputs: [{ address: OWN, lovelace: 50_000_000n, assets: [] }, { address: OTHER, lovelace: 449_800_000n, assets: [] }] });
+    const d = evaluate(paid, [OWN], LIMITS, 0n, resolved([[OTHER_IN, at(OTHER, OTHER_KEY, 500_000_000n)]]));
+    assert.equal(d.rule, 'own-inputs');
+    assert.equal(d.netOutflowLovelace, 0n);
+    assert.equal(d.allowed, true);
+  });
+
+  test('a signer that funds an input and gains value is still charged the whole fee', () => {
+    const paid = tx({ fee: 200_000n, inputs: [OWN_IN, OTHER_IN], outputs: [{ address: OWN, lovelace: 60_000_000n, assets: [] }, { address: OTHER, lovelace: 449_800_000n, assets: [] }] });
+    const d = evaluate(paid, [OWN], LIMITS, 0n, resolved([[OWN_IN, at(OWN, SIGNER_KEY, 10_000_000n)], [OTHER_IN, at(OTHER, OTHER_KEY, 500_000_000n)]]));
+    assert.equal(d.netOutflowLovelace, 200_000n);
+  });
+
+  test('script inputs are not the signer\'s own inputs, whoever the script pays', () => {
+    const scriptSpend = tx({ fee: 200_000n, inputs: [OWN_IN, OTHER_IN], outputs: [{ address: FOREIGN, lovelace: 50_000_000n, assets: [] }, { address: OWN, lovelace: 9_800_000n, assets: [] }] });
+    const d = evaluate(scriptSpend, [OWN], LIMITS, 0n, resolved([[OWN_IN, at(OWN, SIGNER_KEY, 10_000_000n)], [OTHER_IN, at('addr1script', null, 50_000_000n)]]));
+    assert.equal(d.netOutflowLovelace, 200_000n, 'own 10 - own back 9.8 = 0.2, the fee');
+  });
+
+  test('withdrawals from the reward account of the signer\'s key count as the signer\'s value', () => {
+    const withdraw = tx({
+      fee: 200_000n,
+      inputs: [OWN_IN],
+      withdrawals: [{ rewardAddress: 'stake1own', keyHash: SIGNER_KEY, lovelace: 400_000_000n }],
+      outputs: [{ address: FOREIGN, lovelace: 400_000_000n, assets: [] }, { address: OWN, lovelace: 1_800_000n, assets: [] }],
+    });
+    const d = evaluate(withdraw, [OWN], LIMITS, 0n, resolved([[OWN_IN, at(OWN, SIGNER_KEY, 2_000_000n)]]));
+    assert.equal(d.netOutflowLovelace, 400_200_000n);
+    assert.equal(d.allowed, false);
+  });
+
+  test('the signer\'s collateral counts when a failing script would take more than the success case costs', () => {
+    // is_valid is outside the signed body: a node may take the collateral instead of the inputs.
+    const collateralGrab = tx({
+      fee: 200_000n,
+      inputs: [OTHER_IN],
+      collateralInputs: [OWN_IN_2],
+      collateralReturn: { address: FOREIGN, lovelace: 1_000_000n, assets: [] },
+      outputs: [{ address: OTHER, lovelace: 4_800_000n, assets: [] }],
+    });
+    const d = evaluate(collateralGrab, [OWN], LIMITS, 0n, resolved([[OTHER_IN, at(OTHER, OTHER_KEY, 5_000_000n)], [OWN_IN_2, at(OWN, SIGNER_KEY, 300_000_000n)]]));
+    assert.equal(d.netOutflowLovelace, 300_000_000n, 'a collateral return to a stranger gives the signer nothing back');
+    assert.equal(d.allowed, false);
+  });
+
+  test('a collateral return to the signer\'s own address is netted off the collateral', () => {
+    const usual = tx({
+      fee: 200_000n,
+      inputs: [OWN_IN],
+      collateralInputs: [OWN_IN],
+      collateralReturn: { address: OWN, lovelace: 9_700_000n, assets: [] },
+      outputs: [{ address: OWN, lovelace: 9_800_000n, assets: [] }],
+    });
+    const d = evaluate(usual, [OWN], LIMITS, 0n, resolved([[OWN_IN, at(OWN, SIGNER_KEY, 10_000_000n)]]));
+    assert.equal(d.netOutflowLovelace, 300_000n, 'max(success 0.2, collateral 10 - 9.7 = 0.3, fee 0.2)');
+  });
+
+  test('the key hash is matched without regard to case', () => {
+    const drain = tx({ inputs: [OWN_IN], outputs: [{ address: FOREIGN, lovelace: 499_800_000n, assets: [] }] });
+    const d = evaluate(drain, [OWN], LIMITS, 0n, resolved([[OWN_IN, at(OWN, SIGNER_KEY, 500_000_000n)]], SIGNER_KEY.toUpperCase()));
+    assert.equal(d.netOutflowLovelace, 500_000_000n);
+  });
+
+  describe('falls back to the all-outputs rule, and says why', () => {
+    test('when an input was not resolved', () => {
+      const d = evaluate(multiParty, [OWN], LIMITS, 0n, resolved([[OWN_IN, at(OWN, SIGNER_KEY, 10_000_000n)]]));
+      assert.equal(d.rule, 'all-outputs');
+      assert.equal(d.netOutflowLovelace, 500_000_000n);
+      assert.match(d.ruleNote, new RegExp(`input ${outRefKey(OTHER_IN)} was not found unspent`));
+    });
+
+    test('when a collateral input was not resolved', () => {
+      const withCollateral = tx({ ...multiParty, collateralInputs: [OWN_IN_2] });
+      const d = evaluate(withCollateral, [OWN], LIMITS, 0n, multiPartyInputs);
+      assert.equal(d.rule, 'all-outputs');
+      assert.match(d.ruleNote, new RegExp(`input ${outRefKey(OWN_IN_2)} was not found unspent`));
+    });
+
+    test('when a certificate returns a deposit to the signer\'s key', () => {
+      const d = evaluate(tx({ ...multiParty, depositRefundKeyHashes: [SIGNER_KEY] }), [OWN], LIMITS, 0n, multiPartyInputs);
+      assert.equal(d.rule, 'all-outputs');
+      assert.match(d.ruleNote, /a certificate returns a deposit to this signer's key/);
+    });
+
+    test('not when a certificate returns a deposit to another key', () => {
+      const d = evaluate(tx({ ...multiParty, depositRefundKeyHashes: [OTHER_KEY] }), [OWN], LIMITS, 0n, multiPartyInputs);
+      assert.equal(d.rule, 'own-inputs');
+    });
+
+    test('when the resolution failed, with the failure in the note', () => {
+      const d = evaluate(multiParty, [OWN], LIMITS, 0n, { resolved: false, why: 'input resolution failed (Ogmios answered HTTP 503)' });
+      assert.equal(d.rule, 'all-outputs');
+      assert.match(d.ruleNote, /because input resolution failed \(Ogmios answered HTTP 503\)/);
+    });
+
+    test('RESOLUTION_OFF is the default and names the setting', () => {
+      assert.deepStrictEqual(computeOutflow(multiParty, [OWN]), computeOutflow(multiParty, [OWN], RESOLUTION_OFF));
+      assert.match(computeOutflow(multiParty, [OWN]).ruleNote, /VECTOR_SIGNER_OGMIOS_URL is not set/);
+    });
+  });
+
+  test('with no own address it still fails closed, whatever the resolution says', () => {
+    const d = evaluate(multiParty, [], LIMITS, 0n, multiPartyInputs);
+    assert.equal(d.allowed, false);
+    assert.match(d.reason!, /own address/i);
   });
 });
