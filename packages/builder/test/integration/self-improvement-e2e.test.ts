@@ -1,19 +1,20 @@
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { walletFromSeed } from '@lucid-evolution/lucid';
+import { walletFromSeed, getAddressDetails } from '@lucid-evolution/lucid';
 import { startServer, stopServer, callTool, getMnemonic, wait, ServerContext } from '../setup.ts';
 import { signWithMnemonic } from './sign-helper.ts';
+import { ownedLegacyAgentDid } from './legacy-agent.ts';
 
-// FULL SELF-IMPROVEMENT LIFECYCLE ON LIVE TESTNET - gated. Registers a fresh
-// research agent, locks then spends a real improvement proposal through the
-// deployed module validator (the two-step keyless flow spec PR 8
-// introduced - the first ever keyless-built validated submit to clear it),
-// critiques and endorses that proposal, then deregisters the agent.
+// FULL SELF-IMPROVEMENT LIFECYCLE ON LIVE TESTNET - gated. Uses a legacy
+// registry record that the test wallet owns (this Module-6 deployment needs a
+// live legacy agent NFT of the proposer; the legacy registration tool is
+// retired, Part 2 Section 10, so the suite no longer registers one), locks then
+// spends a real improvement proposal through the deployed module validator, and
+// critiques and endorses that proposal.
 // One-way cost: 25 (proposal stake) + 2 (proposal module min) + 2 (activity
 // token output) + 10 (critique stake) + 2 (critique module min) + 5 (endorse
-// stake) + 2 (endorse module min) = 48 AP3X, plus 6 transaction fees. The
-// 10 AP3X registration deposit round-trips (excluded from the 48).
+// stake) + 2 (endorse module min) = 48 AP3X, plus 4 transaction fees.
 // Requires packages/builder/mnemonic.txt (never committed).
 //   VECTOR_E2E_SUBMIT=1 node --import tsx --test packages/builder/test/integration/self-improvement-e2e.test.ts
 const GATE = process.env.VECTOR_E2E_SUBMIT === '1';
@@ -40,9 +41,9 @@ function extractTxHash(text: string): string {
   // asset-name segment only, NOT the full did:vector:agent:{policyId}:
   // {nftAssetName} string the registry family's agent_id means (see
   // self-improvement-keyless.test.ts's discovery-test comment for the full
-  // finding). Both forms are needed here: agentFullDid for the registry
-  // family's build_register_agent/build_deregister_agent calls (agent_id),
-  // agentAssetName for every self-improvement build_* call (agentDid).
+  // finding). Both forms are needed here: agentFullDid for the legacy registry
+  // read (agent_id), agentAssetName for every self-improvement build_* call
+  // (agentDid).
   let agentFullDid: string;
   let agentAssetName: string;
   let lockTxHash: string;
@@ -88,17 +89,12 @@ function extractTxHash(text: string): string {
     console.log(`Starting balance: ${balanceBeforeApex} AP3X`);
   });
 
-  test('register a fresh research agent -> confirm -> DID', { timeout: 420_000 }, async () => {
-    const buildText = await callTool(ctx.client, 'vector_build_register_agent', {
-      changeAddress: walletAddress, name: `SelfImprovementE2E-${Date.now()}`,
-      description: 'self-improvement lifecycle e2e research agent', capabilities: ['research', 'data-extraction'], framework: 'custom', endpoint: '',
-    });
-    const didMatch = buildText.match(/did:vector:agent:([a-f0-9]+):([a-f0-9]+)/);
-    assert.ok(didMatch, `no DID in register build:\n${buildText.slice(0, 500)}`);
-    agentFullDid = didMatch![0];
-    agentAssetName = didMatch![2];
-    await signSubmitAwait(buildText, 'register agent');
-    console.log(`Registered agent ${agentFullDid}`);
+  test('a legacy agent that the wallet owns -> DID', { timeout: 120_000 }, async () => {
+    const owned = await ownedLegacyAgentDid(getAddressDetails(walletAddress).paymentCredential!.hash);
+    assert.ok(owned, 'the test wallet owns no legacy registry record; this Module-6 deployment needs one as the proposer');
+    agentFullDid = owned;
+    agentAssetName = owned.slice(owned.lastIndexOf(':') + 1);
+    console.log(`Proposer agent ${agentFullDid}`);
   });
 
   test('proposal lock (step 1 of 2) -> confirm', { timeout: 420_000 }, async () => {
@@ -193,18 +189,7 @@ function extractTxHash(text: string): string {
     assert.match(browseText, new RegExp(`${endorseTxHash}#\\d+`), `expected our endorsement's own UTxO in the browse response:\n${browseText.slice(0, 800)}`);
   });
 
-  // Known/accepted risk, same shape as run.test.ts's Agent Network Tools
-  // section: if an earlier step in this chain fails before this one runs,
-  // the agent's 10 AP3X deposit stays locked on-chain - nothing in this file
-  // reclaims it automatically.
-  test('deregister the agent -> confirm -> deposit returned', { timeout: 420_000 }, async () => {
-    await wait(10);
-    const buildText = await callTool(ctx.client, 'vector_build_deregister_agent', {
-      changeAddress: walletAddress, agent_id: agentFullDid,
-    });
-    assert.match(buildText, /Deposit returned on confirmation/);
-    await signSubmitAwait(buildText, 'deregister agent');
-  });
+  // No deregistration: the legacy registration tool is retired, so the suite keeps the wallet's legacy record for its next run.
 
   test('final balance reconciles to the expected one-way spend + evidence summary', { timeout: 60_000 }, async () => {
     await wait(5);
@@ -221,13 +206,12 @@ function extractTxHash(text: string): string {
     console.log(`  Delta (one-way):  ${delta.toFixed(6)} AP3X`);
     console.log('  Expected one-way: 25 (proposal stake) + 2 (proposal module min) + 2 (activity token output)');
     console.log('                    + 10 (critique stake) + 2 (critique module min) + 5 (endorse stake)');
-    console.log('                    + 2 (endorse module min) = 48 AP3X, plus 6 transaction fees.');
-    console.log('                    The 10 AP3X registration deposit round-trips (excluded from the 48).');
+    console.log('                    + 2 (endorse module min) = 48 AP3X, plus 4 transaction fees.');
 
     // Sanity bound, not a fee-exact pin (protocol fees vary per tx shape):
-    // wide enough to tolerate normal fee variance across 6 txs (~1-3 AP3X),
-    // tight enough to catch a gross error (a dropped deposit refund or a
-    // duplicated stake would blow well past either bound).
-    assert.ok(delta > 47 && delta < 54, `expected the wallet down roughly 48-53 AP3X (stakes + module minimums + 6 tx fees), got ${delta.toFixed(6)}`);
+    // wide enough to tolerate normal fee variance across 4 txs (~1-2 AP3X),
+    // tight enough to catch a gross error (a duplicated stake would blow well
+    // past either bound).
+    assert.ok(delta > 47 && delta < 53, `expected the wallet down roughly 48-52 AP3X (stakes + module minimums + 4 tx fees), got ${delta.toFixed(6)}`);
   });
 });

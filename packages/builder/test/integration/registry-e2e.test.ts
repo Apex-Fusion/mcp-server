@@ -1,14 +1,17 @@
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { CML, walletFromSeed } from '@lucid-evolution/lucid';
 import { startServer, stopServer, callTool, getMnemonic, wait, ServerContext } from '../setup.ts';
 import { signWithMnemonic } from './sign-helper.ts';
-import { walletFromSeed } from '@lucid-evolution/lucid';
 
-// FULL REGISTRY LIFECYCLE ON LIVE TESTNET - gated. Registers a real agent,
-// updates it, deregisters it. Net cost ~= 3 tx fees (~0.6 AP3X); the 10 AP3X
-// deposit round-trips. Requires packages/builder/mnemonic.txt (never committed).
-//   VECTOR_E2E_SUBMIT=1 node --import tsx --test packages/builder/test/integration/registry-e2e.test.ts
-const GATE = process.env.VECTOR_E2E_SUBMIT === '1';
+// FULL IDENTITY REGISTRY LIFECYCLE ON A LIVE NETWORK - gated twice: VECTOR_E2E_SUBMIT=1 and an identity deployment
+// (VECTOR_IDENTITY_LEGACY_ROOT, VECTOR_IDENTITY_CONFIG_SEED, VECTOR_IDENTITY_REF_UTXO) in the environment of the server.
+// Registers a record whose controller and Accountable Party is the test wallet's key, updates its description, retires it and
+// reclaims the deposit down to the ledger minimum. Net cost ~= 4 tx fees plus the ledger minimum that the tombstone keeps.
+// Requires packages/builder/mnemonic.txt (never committed). The legacy registry lifecycle that this suite ran before is retired
+// with the legacy registry writes (Part 2 Section 10).
+//   VECTOR_E2E_SUBMIT=1 VECTOR_IDENTITY_... node --import tsx --test packages/builder/test/integration/registry-e2e.test.ts
+const GATE = process.env.VECTOR_E2E_SUBMIT === '1' && Boolean(process.env.VECTOR_IDENTITY_LEGACY_ROOT?.trim());
 
 function extractCbor(text: string): string {
   const m = text.match(/```\n([0-9a-f]+)\n```/);
@@ -21,16 +24,19 @@ function extractTxHash(text: string): string {
   return m![1];
 }
 
-(GATE ? describe : describe.skip)('registry lifecycle E2E (live testnet, SUBMITS)', () => {
+(GATE ? describe : describe.skip)('identity registry lifecycle E2E (live network, SUBMITS)', () => {
   let ctx: ServerContext;
   let mnemonic: string;
   let walletAddress: string;
-  let agentDid: string;
+  let publicKey: string;
+  let did: string;
 
   before(async () => {
     ctx = await startServer();
     mnemonic = getMnemonic();
-    walletAddress = walletFromSeed(mnemonic, { network: 'Mainnet', accountIndex: 0 }).address;
+    const wallet = walletFromSeed(mnemonic, { network: 'Mainnet', accountIndex: 0 });
+    walletAddress = wallet.address;
+    publicKey = Buffer.from(CML.PrivateKey.from_bech32(wallet.paymentKey).to_public().to_raw_bytes()).toString('hex');
   });
   after(async () => { await stopServer(ctx); });
 
@@ -44,40 +50,32 @@ function extractTxHash(text: string): string {
     return submittedHash;
   }
 
-  test('register -> confirm -> profile readable', { timeout: 420_000 }, async () => {
-    const buildText = await callTool(ctx.client, 'vector_build_register_agent', {
-      changeAddress: walletAddress, name: `E2EAgent-${Date.now()}`,
-      description: 'registry e2e lifecycle agent', capabilities: ['testing', 'e2e'], framework: 'custom', endpoint: '',
+  test('register -> confirm', { timeout: 420_000 }, async () => {
+    const buildText = await callTool(ctx.client, 'vector_build_identity_register', {
+      changeAddress: walletAddress, controller: publicKey, name: `E2EAgent-${Date.now()}`, description: 'identity e2e lifecycle agent',
+      capabilities: ['testing'], parties: [{ role: 'Accountable', signer: 'controller' }],
     });
-    const didMatch = buildText.match(/(did:vector:agent:[a-f0-9]+:[a-f0-9]+)/);
-    assert.ok(didMatch, 'no DID in register build');
-    agentDid = didMatch![1];
+    const didMatch = buildText.match(/(did:vector:[0-9a-f]{64})/);
+    assert.ok(didMatch, `no DID in the register build:\n${buildText.slice(0, 500)}`);
+    did = didMatch![1];
     await signSubmitAwait(buildText);
-    await wait(5);
-    const profile = await callTool(ctx.client, 'vector_get_agent_profile', { agent_id: agentDid });
-    assert.match(profile, /registry e2e lifecycle agent/);
   });
 
-  test('update -> confirm -> profile shows the change', { timeout: 420_000 }, async () => {
-    await wait(10); // let register's UTxOs settle
-    const buildText = await callTool(ctx.client, 'vector_build_update_agent', {
-      changeAddress: walletAddress, agent_id: agentDid, description: 'updated by registry e2e',
-    });
-    await signSubmitAwait(buildText);
-    await wait(5);
-    const profile = await callTool(ctx.client, 'vector_get_agent_profile', { agent_id: agentDid });
-    assert.match(profile, /updated by registry e2e/);
-  });
-
-  test('deregister -> confirm -> agent gone', { timeout: 420_000 }, async () => {
+  test('update the description -> confirm', { timeout: 420_000 }, async () => {
     await wait(10);
-    const buildText = await callTool(ctx.client, 'vector_build_deregister_agent', {
-      changeAddress: walletAddress, agent_id: agentDid,
-    });
-    assert.match(buildText, /Deposit returned on confirmation/);
+    const buildText = await callTool(ctx.client, 'vector_build_identity_update', { changeAddress: walletAddress, did, description: 'updated by the identity e2e' });
     await signSubmitAwait(buildText);
-    await wait(5);
-    const profile = await callTool(ctx.client, 'vector_get_agent_profile', { agent_id: agentDid });
-    assert.match(profile, /Agent not found|Failed to get agent profile/);
+  });
+
+  test('retire -> confirm', { timeout: 420_000 }, async () => {
+    await wait(10);
+    const buildText = await callTool(ctx.client, 'vector_build_identity_retire', { changeAddress: walletAddress, did });
+    await signSubmitAwait(buildText);
+  });
+
+  test('reclaim the deposit -> confirm', { timeout: 420_000 }, async () => {
+    await wait(10);
+    const buildText = await callTool(ctx.client, 'vector_build_identity_reclaim', { changeAddress: walletAddress, did });
+    await signSubmitAwait(buildText);
   });
 });

@@ -18,7 +18,7 @@ import { ensureSlotConfig, paymentKeyHashOf } from './gov-build.js';
 import type { SlotClockProvider } from './gov-build.js';
 import {
   ADVERT_ADDRESS, ADVERT_REF_UTXO, ADVERT_SCRIPT_HASH, ADVERT_REDEEMER, ADVERT_DEPOSIT_FLOOR_LOVELACE, ADVERT_VALID_BEFORE_MS,
-  ADVERT_VALID_AFTER_MS, DATUM_BYTES_MAX, EMPTY_DETAIL_HASH, MARKETPLACE_MIN_FEE, MAX_PROCESSING_MS_CEILING, MIN_PROCESSING_MS_FLOOR,
+  ADVERT_VALID_AFTER_MS, DATUM_BYTES_MAX, EMPTY_DETAIL_HASH, MARKETPLACE_MIN_FEE, MAX_ESCROW_LOVELACE, MAX_PROCESSING_MS_CEILING, MIN_PROCESSING_MS_FLOOR,
 } from './marketplace-constants.js';
 import { encodeAdvertDatum, formatOutRef, parseOutRef } from './marketplace-datum.js';
 import type { AdvertDatum } from './marketplace-datum.js';
@@ -106,7 +106,8 @@ function lovelace(name: string, value: unknown): bigint {
 /**
  * Pure. The advert datum a Post would write and what the supplier is shown. Throws a readable Error for terms it must not post: the
  * advert would be refused by the ledger (a field over 64 bytes), or could never be hired through vector_build_marketplace_post_escrow
- * (a processing window over 24 h, an endpoint that is not https, a fleet capability id, numbers the escrow datum cannot hold).
+ * (a processing window over 24 h, an endpoint that is not https, a fleet capability id, numbers the escrow datum cannot hold, price +
+ * both bonds above the value cap F-29).
  * `supplierPkh` is the key that signs: the advert names it as its supplier, and only it can retire the advert.
  */
 export function planPostAdvert(terms: AdvertTerms, supplierPkh: string, nowMs: number): PostAdvertPlan {
@@ -142,6 +143,9 @@ export function planPostAdvert(terms: AdvertTerms, supplierPkh: string, nowMs: n
     endpoint_url: endpointUrl, detail_uri: detailUri, detail_hash: terms.detailHash.toLowerCase(),
     advertised_at: nowMs, status: 'Active',
   };
+  // The value cap F-29 (MAX_ESCROW_LOVELACE): vector_build_marketplace_post_escrow refuses an escrow above it in either layout.
+  const economic = datum.price_lovelace + datum.supplier_bond_lovelace + datum.buyer_bond_lovelace;
+  if (economic > MAX_ESCROW_LOVELACE) throw new Error(`price + both bonds is ${economic} lovelace, above the ${MAX_ESCROW_LOVELACE} lovelace (10,000 AP3X) value cap of an escrow (F-29): vector_build_marketplace_post_escrow would not hire this advert.`);
   const deposit = datum.supplier_bond_lovelace > ADVERT_DEPOSIT_FLOOR_LOVELACE ? datum.supplier_bond_lovelace : ADVERT_DEPOSIT_FLOOR_LOVELACE;
   return {
     datum, datumHex: encodeAdvertDatum(datum), depositLovelace: deposit, endpointHost,

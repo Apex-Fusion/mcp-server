@@ -275,13 +275,13 @@ describe('vector_marketplace_get_supplier', () => {
 });
 
 describe('vector_marketplace_list_suppliers', () => {
-  test('keeps every table row on one line with nine cells; the JSON keeps the raw values', async () => {
+  test('keeps every table row on one line with ten cells; the JSON keeps the raw values', async () => {
     const evil = supplierRow({ utxo_ref: 'e'.repeat(64) + '#0', model: 'a|b\nc`d', capability_id: 'x.'.repeat(60), endpoint_url: 'not a url | with\nnewline', status: 'free|\nfake' });
     stub({ suppliers: [evil, supplierRow({ utxo_ref: 'a'.repeat(64) + '#0', price_lovelace: '100000' })] });
     const t = await call('vector_marketplace_list_suppliers', { only_free: false, limit: 20 });
     const rows = markdownOf(t).split('\n').filter((l) => l.startsWith('| `'));
     assert.equal(rows.length, 2);
-    for (const r of rows) assert.equal(r.split(' | ').length, 9, r);
+    for (const r of rows) assert.equal(r.split(' | ').length, 10, r);
     assert.ok(rows[1].includes("a¦b c'd"), rows[1]);
     assert.ok(rows[1].includes('…'), 'the 120-character capability id is capped');
     const j = jsonOf(t);
@@ -332,7 +332,7 @@ describe('vector_marketplace_list_suppliers', () => {
     const t = await call('vector_marketplace_list_suppliers', { only_free: true, limit: 50 });
     const rows = markdownOf(t).split('\n').filter((l) => l.startsWith('| `'));
     assert.equal(rows.length, 7);
-    for (const r of rows) assert.equal(r.split(' | ').length, 9, r);
+    for (const r of rows) assert.equal(r.split(' | ').length, 10, r);
     for (const id of fleet) assert.ok(rows.find((r) => r.includes(`| ${id} - not hireable through these tools (fleet route) |`)), `${id} is marked`);
     for (const id of template) assert.ok(rows.find((r) => r.includes(`| ${id} |`)), `${id} is not`);
     assert.equal(rows.filter((r) => r.includes('not hireable through these tools (fleet route)')).length, 4);
@@ -439,7 +439,10 @@ describe('vector_build_marketplace_post_escrow', () => {
     assert.equal(lineOf(t, '**Collateral kept aside:**'), '**Collateral kept aside:** yes');
     assert.ok(!t.includes('Warning'));
     assert.equal(j.payload, 'hello');
-    assert.deepEqual(Object.keys(j).sort(), ['collateral_kept', 'deliver_by', 'escrow_ref', 'fee', 'lock_lovelace', 'payload', 'prompt_hash', 'tx_hash', 'valid_to']);
+    assert.deepEqual(Object.keys(j).sort(), ['collateral_kept', 'deliver_by', 'escrow_ref', 'fee', 'layout', 'lock_lovelace', 'payload', 'prompt_hash', 'required_signers', 'tx_hash', 'valid_to']);
+    assert.equal(j.layout, 'legacy');
+    assert.deepEqual(j.required_signers, [{ key_hash: OWN_PKH, roles: ['buyer (wallet: inputs, fee and collateral)'] }]);
+    assert.equal(lineOf(t, '**Required signers:**'), `**Required signers:** \`${OWN_PKH}\` (buyer (wallet: inputs, fee and collateral))`);
   });
   test('the JSON block echoes the payload verbatim, whatever it holds, and the markdown does not carry it: what is carried from the block is what was committed', async () => {
     const payloads = [
@@ -739,13 +742,14 @@ describe('the build tools\' error text and rate limit', () => {
 });
 
 describe('registration', () => {
-  test('registers exactly the three read tools, the three build tools, the three transport tools and the two advert tools', () => {
-    const eleven = [
-      'vector_build_marketplace_accept', 'vector_build_marketplace_post_advert', 'vector_build_marketplace_post_escrow', 'vector_build_marketplace_reclaim',
-      'vector_build_marketplace_retire_advert',
+  test('registers exactly the three read tools, the eight build tools, the three transport tools and the two legacy advert tools', () => {
+    const all = [
+      'vector_build_marketplace_accept', 'vector_build_marketplace_advert_post', 'vector_build_marketplace_advert_retire', 'vector_build_marketplace_advert_update',
+      'vector_build_marketplace_post_advert', 'vector_build_marketplace_post_escrow', 'vector_build_marketplace_reclaim', 'vector_build_marketplace_refund_revoked',
+      'vector_build_marketplace_release', 'vector_build_marketplace_retire_advert',
       'vector_marketplace_get_job', 'vector_marketplace_get_supplier', 'vector_marketplace_list_capabilities', 'vector_marketplace_list_suppliers',
       'vector_marketplace_send_job', 'vector_marketplace_verify_receipt',
     ];
-    assert.deepEqual([...handlers.keys()].sort(), eleven);
+    assert.deepEqual([...handlers.keys()].sort(), all);
   });
 });

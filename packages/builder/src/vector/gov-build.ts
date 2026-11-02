@@ -750,7 +750,8 @@ export async function buildProposalSpend(
   if (!nftUtxo) {
     throw new Error(
       `Agent registry NFT not found on-chain. Expected token: ${LEGACY_REGISTRY_POLICY_ID.slice(0, 12)}...${p.agentDid.slice(0, 12)}... ` +
-      `The agent may need to re-register with vector_build_register_agent.`,
+      'This Module-6 deployment needs a live legacy registry record of the proposer; a deregistered or adopted record has no legacy token. ' +
+      'Module-6 moves to the identity registry with its new deployment.',
     );
   }
 

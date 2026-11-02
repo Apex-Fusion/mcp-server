@@ -31,8 +31,15 @@ export const MIN_UTXO_LOVELACE = 1_000_000n;
 /** The indexer base URL as an operator wrote it, without trailing slashes: every request appends `/<route>`. */
 export const indexerUrlFrom = (configured: string | undefined): string => (configured || 'https://mp-indexer.vector.apexfusion.org').replace(/\/+$/, '');
 export const INDEXER_URL = indexerUrlFrom(process.env.VECTOR_MARKETPLACE_INDEXER_URL);
-/** Redeemer constructor indices of the escrow validator (escrow.ak). */
-export const REDEEMER = { Claim: 0, Submit: 1, Accept: 2, Reclaim: 3, Release: 4 } as const;
+/** Redeemer constructor indices of the escrow validator (escrow.ak). RefundRevoked exists only in the identity-marketplace escrow (Part 2 Section 6.1). */
+export const REDEEMER = { Claim: 0, Submit: 1, Accept: 2, Reclaim: 3, Release: 4, RefundRevoked: 5 } as const;
+/**
+ * The value cap F-29 (Part 2 Sections 6.1 and 6.5): payment + buyer bond + supplier bond of an escrow is at most 10,000 AP3X. The
+ * identity-marketplace escrow refuses a Claim above it, and the Post builders refuse to build such an escrow in either layout.
+ */
+export const MAX_ESCROW_LOVELACE = 10_000_000_000n;
+/** The most an identity-marketplace escrow input may hold for a Claim: 10,005 AP3X (the cap plus room for the lock floor). */
+export const MAX_ESCROW_INPUT_LOVELACE = 10_005_000_000n;
 /** Redeemer constructor indices of the advert validator (advert.ak, types.ak AdvertRedeemer). PostAdvert never reaches the validator: creating an output runs no script. */
 export const ADVERT_REDEEMER = { PostAdvert: 0, UpdateAdvert: 1, RetireAdvert: 2 } as const;
 /**

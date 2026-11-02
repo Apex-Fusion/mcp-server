@@ -11,7 +11,7 @@ import { RateLimiter } from '../src/vector/rate-limiter.ts';
 import { INDEXER_URL } from '../src/vector/marketplace-constants.ts';
 import { DEFAULT_IDENTITY_GATEWAY_URL, identityGatewayUrl } from '../src/vector/identity-gateway.ts';
 import { LEGACY_REGISTRY_DEPOSIT, LEGACY_REGISTRY_POLICY_ID, legacyRegistryAddress, legacyDid } from '../src/vector/legacy-registry.ts';
-import { buildAgentDatum } from '../src/vector/registry-build.ts';
+import { legacyAgentDatum } from './fixtures/legacy-datum.ts';
 import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS } from './fixtures/fixture-provider.ts';
 
 type Handler = (args: Record<string, unknown>) => Promise<{ content: { type: string; text: string }[] }>;
@@ -69,7 +69,7 @@ const LEGACY_NAME = 'ab'.repeat(32);
 const LEGACY_UTXO = {
   txHash: 'cd'.repeat(32), outputIndex: 0, address: legacyRegistryAddress(),
   assets: { lovelace: LEGACY_REGISTRY_DEPOSIT, [`${LEGACY_REGISTRY_POLICY_ID}${LEGACY_NAME}`]: 1n },
-  datum: buildAgentDatum(OWN_KEY, 'LegacyAgent', 'a legacy record', ['testing'], 'custom', '', 1750000000000),
+  datum: legacyAgentDatum(OWN_KEY, 'LegacyAgent', 'a legacy record', ['testing'], 'custom', '', 1750000000000),
 };
 
 function tools(limiter: Pick<RateLimiter, 'check'> = new RateLimiter(100_000)) {

@@ -1,5 +1,6 @@
 // Agent identity family: 3 read-only tools (resolve a DID, an agent's profile, discovery through the marketplace indexer)
-// + 4 keyless build_* tools for the legacy registry.
+// + the keyless deregistration of a legacy record (Part 2 Section 10: the legacy registry writes are retired, and a legacy record
+// that does not adopt can still deregister). The identity registry build tools live in identity-tools.ts.
 // KEYLESS since spec PR 7: no tool here takes key material. Builds are
 // unsigned; the 4-call flow is get_address -> build_* -> signer sign -> submit.
 // The legacy registry's script, policy, address and deposit live in legacy-registry.ts, its build logic in registry-build.ts,
@@ -15,10 +16,7 @@ import {
 import { limiterFor } from './rate-limiter.js';
 import type { RateLimiter } from './rate-limiter.js';
 import { lucidForAddress } from './build.js';
-import {
-  resolveAgentUtxo, buildRegisterAgent, buildUpdateAgent, buildTransferAgent, buildDeregisterAgent,
-} from './registry-build.js';
-import { LEGACY_REGISTRY_DEPOSIT } from './legacy-registry.js';
+import { resolveAgentUtxo, buildDeregisterAgent } from './registry-build.js';
 import {
   resolveDid, resolutionError, isJsonObject, CANONICAL_DID, LEGACY_DID_PREFIX,
 } from './identity-gateway.js';
@@ -162,8 +160,8 @@ interface DiscoveredAgent {
 }
 
 /**
- * Registers the agent identity tools. The server passes only `server` and `identity`; `provider` (the node the legacy reads
- * and the build tools use) and `limiter` are for tests.
+ * Registers the agent identity read tools and the legacy deregistration. The server passes only `server` and `identity`;
+ * `provider` (the node the legacy reads and the build tool use) and `limiter` are for tests.
  */
 export function registerAgentNetworkTools(
   server: McpServer, identity: string,
@@ -319,171 +317,13 @@ ${capList}
     }
   );
 
-  // vector_build_register_agent - KEYLESS
-  server.tool(
-    "vector_build_register_agent",
-    "Build an UNSIGNED transaction that registers an agent in the Vector on-chain registry (mints a soulbound identity NFT, locks a 10 AP3X deposit). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
-    {
-      changeAddress: z.string().describe("Your wallet address (source of the deposit and change). Get it from vector_signer_get_address."),
-      name: z.string().min(1).max(64).describe("Agent name (e.g. 'ResearchAgent', 'ArchiveBot')"),
-      description: z.string().max(256).describe("Short description of the agent's purpose"),
-      capabilities: z.array(z.string()).describe("List of capability tags (e.g. ['research', 'data-extraction', 'environmental'])"),
-      framework: z.string().describe("Framework used (e.g. 'OpenClaw', 'LangChain', 'CrewAI', 'custom')"),
-      endpoint: z.string().describe("A2A communication endpoint URL (or empty string if not applicable)"),
-    },
-    async ({ changeAddress, name, description, capabilities, framework, endpoint }) => {
-      const rateLimited = checkRateLimit();
-      if (rateLimited) return rateLimited;
-      try {
-        const lucid = await lucidForAddress(provider(), changeAddress);
-        const r = await buildRegisterAgent(lucid, { name, description, capabilities, framework, endpoint });
-        return {
-          content: [{
-            type: "text" as const,
-            text: `# Unsigned Registration Built (Not Submitted)
-
-**Agent DID:** ${r.agentId}
-**Name:** ${name}
-**NFT Asset Name:** ${r.nftAssetName}
-**Registry Address:** ${r.registryAddress}
-**Deposit:** ${lovelaceToAda(r.depositLovelace)} AP3X (returned on deregistration)
-**Estimated Fee:** ${r.feeAda} AP3X
-
-**Unsigned TX CBOR:**
-\`\`\`
-${r.txCbor}
-\`\`\`
-
-The DID above is bound to the exact wallet UTxO this build consumed - if that UTxO is spent by another transaction first, rebuild to get a new DID. Your signer must allow ~${lovelaceToAda((LEGACY_REGISTRY_DEPOSIT + 500_000n).toString())} AP3X net outflow (deposit + fee). ${SIGN_AND_SUBMIT_COPY}`,
-          }],
-        };
-      } catch (err) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Failed to build agent registration: ${err instanceof Error ? err.message : String(err)}
-
-**Troubleshooting Tips:**
-1. Ensure the changeAddress wallet holds at least 12 AP3X (10 deposit + fees)
-2. Each wallet can register multiple agents (different one-shot UTxOs)
-3. Verify the configured Ogmios endpoint is reachable`,
-          }],
-        };
-      }
-    }
-  );
-
-  // vector_build_update_agent - KEYLESS
-  server.tool(
-    "vector_build_update_agent",
-    "Build an UNSIGNED transaction that updates a registered agent's profile fields. Only the specified fields change; others are preserved. Takes no key material - the on-chain validator requires the owner's signature, which you add locally with vector_signer_sign before vector_submit_transaction, then confirm with vector_await_transaction.",
-    {
-      changeAddress: z.string().describe("The agent OWNER's wallet address. Get it from vector_signer_get_address."),
-      agent_id: z.string().describe("Agent DID to update: did:vector:agent:{policyId}:{nftAssetName}"),
-      name: z.string().min(1).max(64).optional().describe("New agent name"),
-      description: z.string().max(256).optional().describe("New description"),
-      capabilities: z.array(z.string()).optional().describe("New capability tags (replaces existing list)"),
-      framework: z.string().optional().describe("New framework identifier"),
-      endpoint: z.string().optional().describe("New A2A endpoint URL (or empty string to clear)"),
-    },
-    async ({ changeAddress, agent_id, name, description, capabilities, framework, endpoint }) => {
-      const rateLimited = checkRateLimit();
-      if (rateLimited) return rateLimited;
-      try {
-        const node = provider();
-        const lucid = await lucidForAddress(node, changeAddress);
-        const r = await buildUpdateAgent(lucid, node, { agentId: agent_id, name, description, capabilities, framework, endpoint });
-        return {
-          content: [{
-            type: "text" as const,
-            text: `# Unsigned Update Built (Not Submitted)
-
-**Agent DID:** ${agent_id}
-**Fields to update:** ${r.detail}
-**Estimated Fee:** ${r.feeAda} AP3X
-
-**Unsigned TX CBOR:**
-\`\`\`
-${r.txCbor}
-\`\`\`
-
-The identity NFT and deposit are unchanged by this update. ${SIGN_AND_SUBMIT_COPY}`,
-          }],
-        };
-      } catch (err) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Failed to build agent update: ${err instanceof Error ? err.message : String(err)}
-
-**Troubleshooting Tips:**
-1. Verify the agent DID is correct
-2. The changeAddress must be the agent's current owner wallet
-3. Use vector_get_agent_profile to check the agent's current state`,
-          }],
-        };
-      }
-    }
-  );
-
-  // vector_build_transfer_agent - KEYLESS
-  server.tool(
-    "vector_build_transfer_agent",
-    "Build an UNSIGNED transaction that transfers agent ownership to a new address (must be a verification-key address, not a script). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
-    {
-      changeAddress: z.string().describe("The CURRENT owner's wallet address. Get it from vector_signer_get_address."),
-      agent_id: z.string().describe("Agent DID to transfer: did:vector:agent:{policyId}:{nftAssetName}"),
-      new_owner_address: z.string().describe("Bech32 address of the new owner (must be a verification key address, not a script address)"),
-    },
-    async ({ changeAddress, agent_id, new_owner_address }) => {
-      const rateLimited = checkRateLimit();
-      if (rateLimited) return rateLimited;
-      try {
-        const node = provider();
-        const lucid = await lucidForAddress(node, changeAddress);
-        const r = await buildTransferAgent(lucid, node, { agentId: agent_id, newOwnerAddress: new_owner_address });
-        return {
-          content: [{
-            type: "text" as const,
-            text: `# Unsigned Transfer Built (Not Submitted)
-
-**Agent DID:** ${agent_id}
-**Name:** ${r.agentName}
-**Current owner (changeAddress):** ${changeAddress}
-**New owner:** ${new_owner_address}
-**Estimated Fee:** ${r.feeAda} AP3X
-
-**Unsigned TX CBOR:**
-\`\`\`
-${r.txCbor}
-\`\`\`
-
-After this transaction confirms, only the new owner can update, transfer, or deregister the agent. ${SIGN_AND_SUBMIT_COPY}`,
-          }],
-        };
-      } catch (err) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Failed to build agent transfer: ${err instanceof Error ? err.message : String(err)}
-
-**Troubleshooting Tips:**
-1. Verify the agent DID is correct
-2. The changeAddress must be the agent's current owner wallet
-3. The new owner address must be a verification key address (not a script)`,
-          }],
-        };
-      }
-    }
-  );
-
   // vector_build_deregister_agent - KEYLESS. Stays for legacy records that do not adopt (Part 2 Section 10).
   server.tool(
     "vector_build_deregister_agent",
-    "Build an UNSIGNED transaction that deregisters an agent (burns the identity NFT, returns the 10 AP3X deposit to the owner wallet). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
+    "Build an UNSIGNED transaction that deregisters a LEGACY registry record (did:vector:agent:...) that will not adopt into the identity registry: burns its token and returns the deposit to the owner wallet; its DID then resolves as deactivated. To move a legacy record into the identity registry instead, use vector_build_identity_adopt. Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
     {
-      changeAddress: z.string().describe("The agent OWNER's wallet address (receives the returned deposit). Get it from vector_signer_get_address."),
-      agent_id: z.string().describe("Agent DID to deregister: did:vector:agent:{policyId}:{nftAssetName}"),
+      changeAddress: z.string().describe("The legacy record OWNER's wallet address (receives the returned deposit). Get it from vector_signer_get_address."),
+      agent_id: z.string().describe("Legacy agent DID to deregister: did:vector:agent:{policyId}:{nftAssetName}"),
     },
     async ({ changeAddress, agent_id }) => {
       const rateLimited = checkRateLimit();

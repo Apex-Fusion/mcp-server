@@ -11,7 +11,7 @@ import { lucidForAddress } from '../src/vector/build.ts';
 import { ensureSlotConfig } from '../src/vector/gov-build.ts';
 import {
   ADVERT_ADDRESS, ADVERT_REF_UTXO, ADVERT_SCRIPT_HASH, ADVERT_DEPOSIT_FLOOR_LOVELACE, EMPTY_DETAIL_HASH, MARKETPLACE_MIN_FEE,
-  MAX_PROCESSING_MS_CEILING, MIN_PROCESSING_MS_FLOOR, DELIVER_BY_BUFFER_MS,
+  MAX_ESCROW_LOVELACE, MAX_PROCESSING_MS_CEILING, MIN_PROCESSING_MS_FLOOR, DELIVER_BY_BUFFER_MS,
 } from '../src/vector/marketplace-constants.ts';
 import { decodeAdvertDatum, encodeAdvertDatum, formatOutRef } from '../src/vector/marketplace-datum.ts';
 import type { AdvertDatum } from '../src/vector/marketplace-datum.ts';
@@ -141,7 +141,7 @@ describe('planPostAdvert', () => {
       refuses({ endpointUrl: `https://x.example${String.fromCharCode(0xa0)}` }, /endpoint_url must not contain whitespace/);
       refuses({ endpointUrl: 'https://x.example/api?key=1' }, /must not contain a query/);
     });
-    test('a processing window under 60,001 ms or over 24 h, and numbers that are not whole lovelace or milliseconds', () => {
+    test('a processing window under 60,001 ms or over 24 h, numbers that are not whole lovelace or milliseconds, and price + bonds above the value cap', () => {
       refuses({ maxProcessingMs: MAX_PROCESSING_MS_CEILING + 1 }, /max_processing_ms is 86400001, more than 86400000 \(24 h\)/);
       // A supplier template starts only with ADVERT_MAX_PROCESSING_MS >= SERVICE_TIMEOUT_MS (at least 1 ms) + 60 s, and refuses jobs for a
       // smaller window: 60,000 ms is one millisecond short of what any template supplier can serve.
@@ -153,6 +153,9 @@ describe('planPostAdvert', () => {
       refuses({ maxOutputTokens: -1 }, /max_output_tokens must be a whole number from 0/);
       refuses({ priceLovelace: -1n }, /price_lovelace must be a whole number of lovelace from 0/);
       refuses({ buyerBondLovelace: BigInt(Number.MAX_SAFE_INTEGER) + 1n }, /check the unit/);
+      const bonds = TERMS.supplierBondLovelace + TERMS.buyerBondLovelace;
+      refuses({ priceLovelace: MAX_ESCROW_LOVELACE - bonds + 1n }, /above the 10000000000 lovelace \(10,000 AP3X\) value cap of an escrow \(F-29\)/);
+      assert.doesNotThrow(() => planPostAdvert({ ...TERMS, priceLovelace: MAX_ESCROW_LOVELACE - bonds }, SUPPLIER, NOW), 'the cap itself is accepted');
     });
     test('a detail hash that is not 32 bytes of hex, and a supplier key that is not one', () => {
       refuses({ detailHash: 'ab' }, /detail_hash must be 64 hex characters/);
@@ -179,7 +182,7 @@ describe('planPostAdvert', () => {
   });
   test('an advert it accepts is one vector_build_marketplace_post_escrow hires, at every window and price it allows', () => {
     for (const maxProcessingMs of [MIN_PROCESSING_MS_FLOOR, 180_000, 300_000, MAX_PROCESSING_MS_CEILING]) {
-      for (const [price, sBond, bBond] of [[0n, 0n, 0n], [200_000n, 1_000_000n, 1_000_000n], [BigInt(Number.MAX_SAFE_INTEGER), BigInt(Number.MAX_SAFE_INTEGER), BigInt(Number.MAX_SAFE_INTEGER)]]) {
+      for (const [price, sBond, bBond] of [[0n, 0n, 0n], [200_000n, 1_000_000n, 1_000_000n], [MAX_ESCROW_LOVELACE - 2_000_000n, 1_000_000n, 1_000_000n]]) {
         const plan = planPostAdvert({ ...TERMS, maxProcessingMs, priceLovelace: price, supplierBondLovelace: sBond, buyerBondLovelace: bBond }, SUPPLIER, NOW);
         const hire = planPostEscrow(plan.datum, `${'cd'.repeat(32)}#0`, OTHER_PKH, 'a payload', NOW + 1_000);
         assert.equal(hire.deliverBy, NOW + 1_000 + maxProcessingMs + DELIVER_BY_BUFFER_MS, `window ${maxProcessingMs}, price ${price}`);

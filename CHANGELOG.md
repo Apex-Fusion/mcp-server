@@ -4,6 +4,13 @@
 
 ### Breaking
 
+- **The legacy registry writes are retired** (Part 2 Section 10): `vector_build_register_agent`,
+  `vector_build_update_agent` and `vector_build_transfer_agent` are removed with their builders. New records go
+  to the identity registry (`vector_build_identity_register`); a legacy record moves there with
+  `vector_build_identity_adopt`. `vector_build_deregister_agent` stays for legacy records that do not adopt.
+- **Two escrow and advert layouts during the drain** (Part 2 Section 6): the marketplace tools read both the legacy
+  layouts and the identity-marketplace layouts (escrow: `agent_id` and `refund`; advert: `agent_id`), and every
+  post refuses an escrow above the 10,000 AP3X value cap (payment + both bonds).
 - **`vector_build_message_agent` is retired** (Part 2 Section 10 of the identity registry plan). Its builder,
   the label-674 constant and the `metadataStr` helper are removed.
 - **`vector_discover_agents` reads the marketplace indexer** (`/suppliers`, which applies the listing rule)
@@ -31,6 +38,27 @@
   start, which must be Vector mainnet's. Mainnet only. The unit tests rebuild two stakes the SDK made on mainnet and
   have the deployed reputation validator evaluate them offline. **Held:** not for use on mainnet until the deployed
   Module-3 module is fixed and redeployed (the README's Reputation section says why).
+- **Identity registry build tools** (`did:vector`, Part 2 Sections 3 and 10), keyless: `vector_build_identity_register`
+  (also subagents), `_adopt`, `_update`, `_change_controller`, `_suspend`, `_unsuspend`, `_revoke`, `_retire`,
+  `_reclaim`, `_set_successor`, `_recovery_start`, `_recovery_cancel`, `_recovery_complete`, `_end_subagents`.
+  Every build returns the unsigned transaction and every key hash that must sign it, with its role; each key
+  holder signs in turn with `vector_signer_sign`. Lucid runs the applied identity script on each build.
+- **Attestation, delegation and vault build tools** (Part 2 Sections 4 and 5): `vector_build_attestation_attest`,
+  `_revoke`, `_contest`, `_withdraw`; `vector_build_delegation_delegate`, `_undelegate`;
+  `vector_build_vault_open`, `_pay`, `_close`.
+- **Marketplace tools for the identity layout** (Part 2 Section 6): `vector_build_marketplace_release`,
+  `vector_build_marketplace_refund_revoked`, `vector_build_marketplace_advert_post`, `_advert_update`,
+  `_advert_retire`. Post escrow takes `agent_id` from an advert that the indexer lists and sets the refund to the
+  buyer's own address; accept, reclaim and release work in both layouts; receipts are checked with 8 fields
+  (legacy escrow) or 9 fields with `agent_did` (identity escrow); the supplier lists show the agent DID; the
+  escrow lineage follows both escrow credentials.
+- **Identity deployment configuration**: `VECTOR_IDENTITY_LEGACY_ROOT` and `VECTOR_IDENTITY_CONFIG_SEED` (both or
+  neither), optional `VECTOR_IDENTITY_POLICY_ID`, the reference-script UTxOs `VECTOR_IDENTITY_REF_UTXO`,
+  `VECTOR_IDENTITY_{ATTESTATION,DELEGATION,VAULT,ESCROW,ADVERT,MODULE1}_REF_UTXO`, and `VECTOR_IDENTITY_ALLOWLIST_URL`.
+  The server applies the deployment parameters to the unapplied scripts of the identity-marketplace blueprint
+  (agents-marketplace b5d66a6, generated into `identity-scripts.generated.ts` by
+  `packages/builder/scripts/gen-identity-scripts.mjs`, with a checksum test) at startup, with the uplc crate of
+  Aiken (`@lucid-evolution/uplc`, now a direct dependency), so the hashes equal `aiken blueprint apply`.
 - `vector_resolve_did`: resolves a `did:vector` DID (canonical or legacy form, optional `versionId` or
   `versionTime`) through the identity gateway (`GET /1.0/identifiers/{did}`, `Accept: application/did-resolution`)
   and returns the HTTP status and the resolution result unchanged. Gateway: `VECTOR_IDENTITY_GATEWAY_URL`
@@ -39,7 +67,7 @@
 - Signer: optional `VECTOR_SIGNER_OGMIOS_URL`. With it, the signer reads the outputs that a transaction spends
   (one read-only `queryLedgerState/utxo` query, output references only) and counts only the value that its
   own inputs fund. Without it, or when the lookup fails, it uses the previous rule and says so in the result.
-- 37 tools in all (was 33).
+- 62 tools in all (was 33).
 
 ### Changed
 

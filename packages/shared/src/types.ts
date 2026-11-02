@@ -55,18 +55,11 @@ export interface VectorBuildInteractResult extends VectorUnsignedBuildResult {
   scriptAddress: string; action: 'lock' | 'spend';
 }
 
-// --- Keyless registry builds (spec PR 7) ---
-
-export interface VectorBuildRegisterResult extends VectorUnsignedBuildResult {
-  agentId: string;
-  nftAssetName: string;
-  registryAddress: string;
-  depositLovelace: string;
-}
+// --- Keyless legacy registry deregistration (spec PR 7; the legacy register, update and transfer are retired) ---
 
 export interface VectorBuildAgentOpResult extends VectorUnsignedBuildResult {
   agentId: string;
-  op: 'update' | 'transfer' | 'deregister';
+  op: 'deregister';
   agentName: string;
   detail: string;
 }

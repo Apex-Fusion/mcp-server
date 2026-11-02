@@ -120,55 +120,23 @@ Build an unsigned transaction interacting with a deployed smart contract: lock A
 
 **Example prompt:** "Collect the locked AP3X from the escrow contract at addr1..."
 
-### vector_build_register_agent
+### Identity registry, attestation, delegation and vault tools
 
-Build an unsigned transaction that registers an agent in the Vector on-chain registry: mints a soulbound identity NFT and locks a 10 AP3X deposit (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
+The `vector_build_identity_*`, `vector_build_attestation_*`, `vector_build_delegation_*` and `vector_build_vault_*` tools build unsigned transactions for the `did:vector` identity registry (Part 2 of the identity registry plan). Each takes `changeAddress` (the wallet that pays the fee, any deposit and the collateral) and an optional `valid_minutes` (1 to 59, default 30), and returns the unsigned CBOR with every key hash that must sign it. Each key holder signs in turn with `vector_signer_sign` (it keeps the witnesses already present), then `vector_submit_transaction` broadcasts once. The README lists the tools; their input schemas are in `packages/builder/test/smoke/tool-schemas.snapshot.json`. The server needs the identity deployment values (`VECTOR_IDENTITY_LEGACY_ROOT`, `VECTOR_IDENTITY_CONFIG_SEED` and the reference-script UTxOs; see the README).
 
-**Parameters:**
-- `changeAddress` (string, required) - Your wallet address; source of the deposit and change (addr1...)
-- `name` (string, required) - Agent name (max 64 chars)
-- `description` (string, required) - Short description of the agent's purpose (max 256 chars)
-- `capabilities` (array of strings, required) - Capability tags (e.g. `["research", "data-extraction"]`)
-- `framework` (string, required) - Framework used (e.g. "OpenClaw", "LangChain", "CrewAI", "custom")
-- `endpoint` (string, required) - A2A communication endpoint URL (or empty string if not applicable)
+**Example prompt:** "Register an agent named ResearchAgent with my signer key as controller and Accountable Party, and the capability research"
 
-**Example prompt:** "Register an agent named ResearchAgent with research and data-extraction capabilities"
-
-### vector_build_update_agent
-
-Build an unsigned transaction that updates a registered agent's profile fields: only the specified fields change, the rest are preserved (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
-
-**Parameters:**
-- `changeAddress` (string, required) - The agent owner's wallet address (addr1...)
-- `agent_id` (string, required) - Agent DID to update: `did:vector:agent:{policyId}:{nftAssetName}`
-- `name` (string, optional) - New agent name
-- `description` (string, optional) - New description
-- `capabilities` (array of strings, optional) - New capability tags (replaces the existing list)
-- `framework` (string, optional) - New framework identifier
-- `endpoint` (string, optional) - New A2A endpoint URL (or empty string to clear)
-
-**Example prompt:** "Update my agent's description to mention archive-extraction support"
-
-### vector_build_transfer_agent
-
-Build an unsigned transaction that transfers agent ownership to a new address (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
-
-**Parameters:**
-- `changeAddress` (string, required) - The CURRENT owner's wallet address (addr1...)
-- `agent_id` (string, required) - Agent DID to transfer: `did:vector:agent:{policyId}:{nftAssetName}`
-- `new_owner_address` (string, required) - Bech32 address of the new owner (must be a verification-key address, not a script address)
-
-**Example prompt:** "Transfer my agent to addr1qy..."
+The legacy registry writes (`vector_build_register_agent`, `vector_build_update_agent`, `vector_build_transfer_agent`) are retired. A legacy record moves into the identity registry with `vector_build_identity_adopt`.
 
 ### vector_build_deregister_agent
 
-Build an unsigned transaction that deregisters an agent: burns the identity NFT and returns the 10 AP3X deposit to the owner wallet (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
+Build an unsigned transaction that deregisters a legacy record that does not adopt: burns its token and returns the deposit to the owner wallet (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
 
 **Parameters:**
-- `changeAddress` (string, required) - The agent owner's wallet address; receives the returned deposit (addr1...)
-- `agent_id` (string, required) - Agent DID to deregister: `did:vector:agent:{policyId}:{nftAssetName}`
+- `changeAddress` (string, required) - The legacy record owner's wallet address; receives the returned deposit (addr1...)
+- `agent_id` (string, required) - Legacy agent DID to deregister: `did:vector:agent:{policyId}:{nftAssetName}`
 
-**Example prompt:** "Deregister my agent and reclaim the deposit"
+**Example prompt:** "Deregister my legacy agent and reclaim the deposit"
 
 ### vector_resolve_did
 

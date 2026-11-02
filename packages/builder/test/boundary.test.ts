@@ -21,11 +21,15 @@ const CUSTODIAL_UNTIL_LATER_PR = new Set<string>([]);
 // No \b boundaries: this is deliberately a substring match, not a whole-word
 // one. Word-bounding let `seedPhrase`, `WALLET_SEED` or `bip39x` slip past
 // undetected — those are real key-material vocabulary wearing a different
-// word shape, not false positives. `fromSeed`/`walletFromSeed` are already
-// covered as substrings of `seed`, but stay in the alternation anyway for
-// self-documentation (they cost nothing and name the exact API shape this
-// guard exists to catch).
-const FORBIDDEN = /(mnemonic|seed|bip39|fromSeed|walletFromSeed|selectWallet\.fromSeed)/i;
+// word shape, not false positives.
+// The bare word `seed` is no longer forbidden: in the identity registry
+// (did:vector method specification Section 3.1, Part 2 Sections 3.4, 4 and 5)
+// a "seed" is the output reference that a registration spends and that names
+// the new identifier, a public value of the protocol and not key material. The
+// pattern keeps every key-material shape of the word: seed phrase and seed
+// words in any spelling, a wallet seed (`WALLET_SEED`, `walletSeed`), a key
+// seed, and the exact Lucid key-derivation APIs this guard exists to catch.
+const FORBIDDEN = /(mnemonic|bip39|seed[\s_-]*phrase|seed[\s_-]*words|wallet[\s_-]*seed|key[\s_-]*seed|walletFromSeed|selectWallet\.fromSeed)/i;
 
 function sourceFiles(dir: string): string[] {
   const out: string[] = [];
@@ -88,14 +92,18 @@ describe('builder custody boundary', () => {
   // trip the guard, so widening FORBIDDEN too aggressively is equally visible.
   test('every FORBIDDEN alternative is individually pinned against a fixture corpus', () => {
     const mustMatch = [
-      'mnemonic', 'MNEMONIC', 'seedPhrase', 'WALLET_SEED', 'bip39',
-      'fromSeed', 'walletFromSeed', 'selectWallet.fromSeed', 'seed',
+      'mnemonic', 'MNEMONIC', 'seedPhrase', 'seed phrase', 'SEED_WORDS', 'WALLET_SEED', 'walletSeed', 'keySeed', 'bip39',
+      'walletFromSeed', 'selectWallet.fromSeed',
     ];
     for (const s of mustMatch) {
       assert.match(s, FORBIDDEN, `FORBIDDEN should match "${s}" - deleting the alternative that catches this would silently narrow the guard`);
     }
 
-    const mustNotMatch = ['address-only wallet', 'unsigned transaction', 'changeAddress'];
+    // The identity registry's seed is an output reference, a public protocol value (did:vector Section 3.1): not key material.
+    const mustNotMatch = [
+      'address-only wallet', 'unsigned transaction', 'changeAddress',
+      'the seed output of the registration', 'identifierFromSeed', 'Register { seed }', 'VECTOR_IDENTITY_CONFIG_SEED',
+    ];
     for (const s of mustNotMatch) {
       assert.doesNotMatch(s, FORBIDDEN, `FORBIDDEN should NOT match "${s}" - this is legitimate keyless vocabulary`);
     }

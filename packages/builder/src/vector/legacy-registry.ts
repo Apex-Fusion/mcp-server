@@ -1,8 +1,7 @@
 // packages/builder/src/vector/legacy-registry.ts
 // The legacy agent registry (did:vector method, Part 1 Section 4): the deployed script, its policy, its address and its
 // deposit, in one place. The identity registry replaces it. Only legacy reads, adoption and the legacy deregistration use these
-// values (Part 2 Section 10); the legacy register, update and transfer builders (registry-build.ts) use them too until the
-// identity registry tools replace those builders.
+// values (Part 2 Section 10), and Module-6 until it moves to its new deployment.
 // Source blueprint: vector-ai-agents/agent-registry/deploy/agent-registry/plutus.json (agent-registry v2, audited).
 import { validatorToAddress } from '@lucid-evolution/lucid';
 import type { SpendingValidator } from '@lucid-evolution/lucid';

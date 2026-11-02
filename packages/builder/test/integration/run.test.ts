@@ -1,9 +1,10 @@
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { walletFromSeed } from '@lucid-evolution/lucid';
+import { walletFromSeed, getAddressDetails } from '@lucid-evolution/lucid';
 import { startServer, stopServer, callTool, getMnemonic, wait, ServerContext } from '../setup.ts';
 import { signWithMnemonic } from './sign-helper.ts';
+import { ownedLegacyAgentDid } from './legacy-agent.ts';
 
 // Always-succeeds PlutusV2 validator (accepts any datum/redeemer/context, returns True)
 const ALWAYS_SUCCEEDS_V2 = '49480100002221200101';
@@ -286,91 +287,44 @@ async function buildSignSubmit(
 }
 
 describe('Agent Network Tools', () => {
-  test('vector_build_register_agent -> sign -> submit', { timeout: 120_000 }, async () => {
-    if (walletHasAda) {
-      console.log('Waiting 10s for UTxOs to settle before register...');
-      await wait(10);
-    }
-    const timestamp = Date.now();
-    const { buildText, submitted } = await buildSignSubmit('vector_build_register_agent', {
-      changeAddress: walletAddress,
-      name: `TestAgent-${timestamp}`,
-      description: 'Integration test agent',
-      capabilities: ['testing'],
-      framework: 'custom',
-      endpoint: '',
-    }, /Agent DID:/);
+  // The legacy register, update and transfer tools are retired (Part 2 Section 10). The live suite reads a legacy agent that the
+  // wallet owns (legacy-agent.ts) and builds, without submitting, its deregistration; the identity registry tools answer a build
+  // when the server has an identity deployment, or say how to configure one.
+  test('a legacy agent that the wallet owns, from the legacy registry', { timeout: 120_000 }, async () => {
+    agentDid = await ownedLegacyAgentDid(getAddressDetails(walletAddress).paymentCredential!.hash);
+    console.log(agentDid ? `Owned legacy agent DID: ${agentDid}` : 'The wallet owns no legacy record');
+  });
 
-    const didMatch = buildText.match(/(did:vector:agent:[a-f0-9]+:[a-f0-9]+)/);
-    if (submitted && didMatch) {
-      agentDid = didMatch[1];
-      console.log(`Registered agent DID: ${agentDid}`);
-    }
+  test('vector_build_identity_register (build only)', { timeout: 120_000 }, async () => {
+    const text = await callTool(ctx.client, 'vector_build_identity_register', {
+      changeAddress: walletAddress, controller: 'ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c',
+      name: `TestAgent-${Date.now()}`, parties: [{ role: 'Accountable', signer: 'controller' }],
+    });
+    console.log(text.slice(0, 500));
+    assertSuccessOrKnownError(text, /Identity Registration Built|VECTOR_IDENTITY_LEGACY_ROOT and VECTOR_IDENTITY_CONFIG_SEED/, 'vector_build_identity_register');
   });
 
   test('vector_discover_agents (no mnemonic)', { timeout: 120_000 }, async () => {
-    if (walletHasAda && agentDid) {
-      console.log('Waiting 10s for agent registration to confirm...');
-      await wait(10);
-    }
     const text = await callTool(ctx.client, 'vector_discover_agents', {});
     console.log(text);
     assertSuccessOrKnownError(text, /Agent Discovery Results|No listed agents found/, 'vector_discover_agents');
   });
 
   test('vector_get_agent_profile', { timeout: 120_000 }, async () => {
-    // Use a known DID format even if registration failed, to test the tool responds
+    // Use a known DID format even if the wallet owns no legacy record, to test the tool responds
     const testDid = agentDid || `did:vector:agent:${ALWAYS_SUCCEEDS_V2}:${'a'.repeat(64)}`;
     const text = await callTool(ctx.client, 'vector_get_agent_profile', { agent_id: testDid });
     console.log(text);
     assertSuccessOrKnownError(text, /Agent Profile/, 'vector_get_agent_profile');
   });
 
-  test('vector_build_update_agent -> sign -> submit', { timeout: 120_000 }, async () => {
+  test('vector_build_deregister_agent (build only: the legacy record stays for the Module-6 section)', { timeout: 120_000 }, async () => {
     if (!agentDid) {
-      console.log('Skipping update — no agent registered');
+      console.log('Skipping deregister - the wallet owns no legacy record');
       return;
     }
-    if (walletHasAda) {
-      console.log('Waiting 10s for UTxOs to settle before update...');
-      await wait(10);
-    }
-    await buildSignSubmit('vector_build_update_agent', {
-      changeAddress: walletAddress,
-      agent_id: agentDid,
-      description: 'Updated integration test agent',
-    }, /Agent DID:/);
-  });
-
-  test('vector_build_transfer_agent (to self) -> sign -> submit', { timeout: 120_000 }, async () => {
-    if (!agentDid || !walletAddress) {
-      console.log('Skipping transfer — no agent registered or no wallet address');
-      return;
-    }
-    if (walletHasAda) {
-      console.log('Waiting 10s for UTxOs to settle before transfer...');
-      await wait(10);
-    }
-    await buildSignSubmit('vector_build_transfer_agent', {
-      changeAddress: walletAddress,
-      agent_id: agentDid,
-      new_owner_address: walletAddress,
-    }, /Agent DID:/);
-  });
-
-  test('vector_build_deregister_agent -> sign -> submit', { timeout: 120_000 }, async () => {
-    if (!agentDid) {
-      console.log('Skipping deregister — no agent registered');
-      return;
-    }
-    if (walletHasAda) {
-      console.log('Waiting 10s for UTxOs to settle before deregister...');
-      await wait(10);
-    }
-    await buildSignSubmit('vector_build_deregister_agent', {
-      changeAddress: walletAddress,
-      agent_id: agentDid,
-    }, /Deposit returned on confirmation/);
+    const text = await callTool(ctx.client, 'vector_build_deregister_agent', { changeAddress: walletAddress, agent_id: agentDid });
+    assertSuccessOrKnownError(text, /Deposit returned on confirmation/, 'vector_build_deregister_agent');
   });
 });
 
@@ -383,13 +337,11 @@ describe('Agent Network Tools', () => {
 // walletHasAda gating, settle waits), rather than "rewritten" from a prior
 // custodial version that turns out not to exist in this file.
 //
-// Runs its OWN dedicated agent lifecycle (registers here, deregisters at the
-// end of this section) instead of reusing Agent Network Tools' `agentDid`
-// above: that section deregisters its agent as ITS OWN last test, which runs
-// before this section in file order, so by the time this section starts,
-// that DID's registry NFT is already burned. proposal_spend below needs a
-// LIVE agent NFT as a reference input, so reusing a dead DID would fail for
-// a reason unrelated to what this section tests.
+// Uses a legacy record that the wallet owns (legacy-agent.ts): this Module-6
+// deployment needs a LIVE legacy agent NFT of the proposer as a reference
+// input, and the legacy registration tool is retired (Part 2 Section 10), so
+// the suite no longer registers and deregisters an agent of its own. Module-6
+// moves to the identity registry with its new deployment.
 //
 // The self-improvement family's "agentDid" wire param is the trailing hex
 // asset-name segment only, NOT the full did:vector:agent:{policyId}:
@@ -402,9 +354,8 @@ describe('Agent Network Tools', () => {
 // these (gov-build.ts's buildCritique/buildEndorse build a plain lock paid
 // to a NEW UTxO; they never spend or validate the target proposal's state),
 // at MINIMUM stakes (10 -> 12 AP3X output; 5 -> 7 AP3X output). That is real,
-// on-chain coverage of the critique and endorse build_* tools plus register/
-// deregister, for about 15 AP3X one-way (register's 10 AP3X deposit round-
-// trips) - this is the path actually run live for this task.
+// on-chain coverage of the critique and endorse build_* tools for about
+// 15 AP3X one-way.
 //
 // The two-step proposal SUBMISSION (lock -> await -> spend -> await) is
 // deliberately NOT run by default here: self-improvement-e2e.test.ts already
@@ -427,25 +378,13 @@ describe('Self-Improvement Tools', () => {
   let siProposalTxHash: string | null = null;
   let siProposalOutputIndex = 0;
 
-  test('vector_build_register_agent (dedicated self-improvement agent) -> sign -> submit', { timeout: 120_000 }, async () => {
-    if (walletHasAda) {
-      console.log('Waiting 10s for UTxOs to settle before register...');
-      await wait(10);
-    }
-    const { buildText, submitted } = await buildSignSubmit('vector_build_register_agent', {
-      changeAddress: walletAddress,
-      name: `SelfImprovementLegacy-${Date.now()}`,
-      description: 'run.test.ts self-improvement section agent',
-      capabilities: ['research'],
-      framework: 'custom',
-      endpoint: '',
-    }, /Agent DID:/);
-
-    const didMatch = buildText.match(/did:vector:agent:([a-f0-9]+):([a-f0-9]+)/);
-    if (submitted && didMatch) {
-      siAgentFullDid = didMatch[0];
-      siAgentAssetName = didMatch[2];
-      console.log(`Registered self-improvement agent DID: ${siAgentFullDid}`);
+  test('a legacy agent that the wallet owns (this Module-6 deployment needs a legacy record of the proposer)', { timeout: 120_000 }, async () => {
+    siAgentFullDid = await ownedLegacyAgentDid(getAddressDetails(walletAddress).paymentCredential!.hash);
+    if (siAgentFullDid) {
+      siAgentAssetName = siAgentFullDid.slice(siAgentFullDid.lastIndexOf(':') + 1);
+      console.log(`Self-improvement agent DID: ${siAgentFullDid}`);
+    } else {
+      console.log('The wallet owns no legacy record: the critique, endorse and proposal steps below are skipped');
     }
   });
 
@@ -595,18 +534,5 @@ describe('Self-Improvement Tools', () => {
     }
   });
 
-  test('vector_build_deregister_agent (dedicated self-improvement agent) -> sign -> submit', { timeout: 120_000 }, async () => {
-    if (!siAgentFullDid) {
-      console.log('Skipping deregister - no self-improvement agent registered');
-      return;
-    }
-    if (walletHasAda) {
-      console.log('Waiting 10s for UTxOs to settle before deregister...');
-      await wait(10);
-    }
-    await buildSignSubmit('vector_build_deregister_agent', {
-      changeAddress: walletAddress,
-      agent_id: siAgentFullDid,
-    }, /Deposit returned on confirmation/);
-  });
+  // No deregistration here: the legacy registration tool is retired, so this suite keeps the wallet's legacy record for its next run.
 });

@@ -1,19 +1,18 @@
-// Keyless build core for the legacy agent-registry family (spec PR 7).
+// Keyless build core for the legacy agent registry (spec PR 7), reduced to what Part 2 Section 10 keeps: the legacy reads (the
+// profile of a legacy DID) and the legacy deregistration of a record that does not adopt. The legacy register, update and transfer
+// builders are retired; new records go to the identity registry (identity-build.ts), and a legacy record moves there by adoption.
 // Constructs UNSIGNED transactions only. The user's key never enters this
 // package: signing happens on the local signer (packages/signer), submission
 // via vector_submit_transaction. The registry validator itself enforces
 // ownership on-chain; the verifyOwnership() check here is a fail-fast courtesy.
 // The legacy registry's script, policy, address and deposit live in
 // legacy-registry.ts.
-import { fromText, toText, Data, Constr, getAddressDetails } from '@lucid-evolution/lucid';
+import { toText, Data, Constr, getAddressDetails } from '@lucid-evolution/lucid';
 import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
 import type { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
-import { deriveNftAssetName } from '@apexfusion/vector-mcp-shared/tx';
-import type { VectorBuildRegisterResult, VectorBuildAgentOpResult } from '@apexfusion/vector-mcp-shared/types';
+import type { VectorBuildAgentOpResult } from '@apexfusion/vector-mcp-shared/types';
 import { toBuildResult } from './build.js';
-import {
-  LEGACY_REGISTRY_POLICY_ID, LEGACY_REGISTRY_DEPOSIT, legacyRegistryScript, legacyRegistryAddress, legacyDid,
-} from './legacy-registry.js';
+import { LEGACY_REGISTRY_POLICY_ID, legacyRegistryScript, legacyRegistryAddress, legacyDid } from './legacy-registry.js';
 
 export interface RegistryAgentProfile {
   agentId: string;
@@ -38,38 +37,6 @@ export function paymentKeyHashOf(address: string): string {
     throw new Error('Address must have a verification key payment credential, not a script credential.');
   }
   return details.paymentCredential.hash;
-}
-
-export function validateEndpoint(endpoint: string): void {
-  if (!endpoint) return; // empty string is allowed
-  try {
-    new URL(endpoint);
-  } catch {
-    throw new Error(`Invalid endpoint URL: "${endpoint}". Must be a valid URL (e.g. https://example.com/api) or empty string.`);
-  }
-}
-
-export function validateCapabilities(capabilities: string[]): void {
-  for (const cap of capabilities) {
-    if (typeof cap !== 'string' || cap.trim().length === 0) {
-      throw new Error('Each capability must be a non-empty string.');
-    }
-  }
-}
-
-export function buildAgentDatum(
-  vkeyHash: string, name: string, description: string, capabilities: string[],
-  framework: string, endpoint: string, registeredAt?: number,
-): string {
-  return Data.to(new Constr(0, [
-    new Constr(0, [vkeyHash]),
-    fromText(name),
-    fromText(description),
-    capabilities.map((c) => fromText(c)),
-    fromText(framework),
-    fromText(endpoint),
-    BigInt(registeredAt ?? Date.now()),
-  ]));
 }
 
 export function parseAgentDatum(
@@ -138,133 +105,6 @@ export function verifyOwnership(profile: RegistryAgentProfile, walletVkeyHash: s
   if (profile.ownerVkeyHash !== walletVkeyHash) {
     throw new Error("Ownership check failed: the changeAddress wallet does not own this agent. The agent's owner verification key does not match that wallet's payment key. (The on-chain validator would also reject this.)");
   }
-}
-
-export async function buildRegisterAgent(lucid: LucidEvolution, p: {
-  name: string; description: string;
-  capabilities: string[]; framework: string; endpoint: string;
-}): Promise<VectorBuildRegisterResult> {
-  const changeAddress = await lucid.wallet().address();
-  validateEndpoint(p.endpoint);
-  validateCapabilities(p.capabilities);
-  const vkeyHash = paymentKeyHashOf(changeAddress);
-  const utxos = await lucid.wallet().getUtxos();
-  // Same selection heuristic as the old custodial tool (behavior parity):
-  // prefer a pure-lovelace UTxO covering deposit + fee headroom, else the first.
-  const oneShotUtxo = utxos.find((u) => {
-    const keys = Object.keys(u.assets);
-    return keys.length === 1 && keys[0] === 'lovelace' && u.assets['lovelace'] >= LEGACY_REGISTRY_DEPOSIT + 2_000_000n;
-  }) || utxos[0];
-  if (!oneShotUtxo) throw new Error('No UTxOs at the changeAddress. Add AP3X to the wallet first.');
-  const nftAssetName = deriveNftAssetName(oneShotUtxo.txHash, oneShotUtxo.outputIndex);
-  const nftUnit = `${LEGACY_REGISTRY_POLICY_ID}${nftAssetName}`;
-  const datum = buildAgentDatum(vkeyHash, p.name, p.description, p.capabilities, p.framework, p.endpoint);
-  const registerRedeemer = Data.to(new Constr(0, [new Constr(0, [oneShotUtxo.txHash, BigInt(oneShotUtxo.outputIndex)])]));
-  const completed = await lucid.newTx()
-    .collectFrom([oneShotUtxo])
-    .mintAssets({ [nftUnit]: 1n }, registerRedeemer)
-    .attach.MintingPolicy(legacyRegistryScript())
-    .pay.ToAddressWithData(legacyRegistryAddress(), { kind: 'inline', value: datum }, { lovelace: LEGACY_REGISTRY_DEPOSIT, [nftUnit]: 1n })
-    .addSigner(changeAddress)
-    .complete();
-  return {
-    ...toBuildResult(completed),
-    agentId: legacyDid(nftAssetName),
-    nftAssetName,
-    registryAddress: legacyRegistryAddress(),
-    depositLovelace: LEGACY_REGISTRY_DEPOSIT.toString(),
-  };
-}
-
-export async function buildUpdateAgent(
-  lucid: LucidEvolution,
-  provider: Pick<OgmiosProvider, 'getUtxos' | 'getUtxoByUnit'>,
-  p: {
-    agentId: string; name?: string; description?: string;
-    capabilities?: string[]; framework?: string; endpoint?: string;
-  },
-): Promise<VectorBuildAgentOpResult> {
-  const changeAddress = await lucid.wallet().address();
-  if (p.name === undefined && p.description === undefined && p.capabilities === undefined
-    && p.framework === undefined && p.endpoint === undefined) {
-    throw new Error('At least one field must be provided to update (name, description, capabilities, framework, or endpoint).');
-  }
-  if (p.endpoint !== undefined) validateEndpoint(p.endpoint);
-  if (p.capabilities !== undefined) validateCapabilities(p.capabilities);
-  const vkeyHash = paymentKeyHashOf(changeAddress);
-  const { profile, utxo } = await resolveAgentUtxo(provider, p.agentId);
-  verifyOwnership(profile, vkeyHash);
-  // Owner is written from profile.ownerVkeyHash, not the caller's vkeyHash:
-  // makes owner-immutability on this path structural (the datum literally
-  // cannot carry a different owner out of buildUpdateAgent) rather than
-  // depending solely on the verifyOwnership() call two lines up.
-  const newDatum = buildAgentDatum(
-    profile.ownerVkeyHash,
-    p.name ?? profile.name,
-    p.description ?? profile.description,
-    p.capabilities ?? profile.capabilities,
-    p.framework ?? profile.framework,
-    p.endpoint ?? profile.endpoint,
-    profile.registeredAt,
-  );
-  const spendRedeemer = Data.to(new Constr(0, [])); // Update
-  // The continuing output must carry the spent input's value EXACTLY
-  // (utxo.assets - lovelace AND the NFT), not a hardcoded
-  // { lovelace: LEGACY_REGISTRY_DEPOSIT, [nftUnit]: 1n } - the deployed validator
-  // enforces value preservation on Update (differential-tested; see
-  // task-3-report.md's correction section). Hardcoding the floor here was
-  // the same latent defect the old custodial code had.
-  const completed = await lucid.newTx()
-    .collectFrom([utxo], spendRedeemer)
-    .attach.SpendingValidator(legacyRegistryScript())
-    .pay.ToAddressWithData(legacyRegistryAddress(), { kind: 'inline', value: newDatum }, utxo.assets)
-    .addSigner(changeAddress)
-    .complete();
-  const updatedFields: string[] = [];
-  if (p.name !== undefined) updatedFields.push('name');
-  if (p.description !== undefined) updatedFields.push('description');
-  if (p.capabilities !== undefined) updatedFields.push('capabilities');
-  if (p.framework !== undefined) updatedFields.push('framework');
-  if (p.endpoint !== undefined) updatedFields.push('endpoint');
-  return {
-    ...toBuildResult(completed),
-    agentId: p.agentId, op: 'update', agentName: profile.name, detail: updatedFields.join(', '),
-  };
-}
-
-export async function buildTransferAgent(
-  lucid: LucidEvolution,
-  provider: Pick<OgmiosProvider, 'getUtxos' | 'getUtxoByUnit'>,
-  p: { agentId: string; newOwnerAddress: string },
-): Promise<VectorBuildAgentOpResult> {
-  const changeAddress = await lucid.wallet().address();
-  const vkeyHash = paymentKeyHashOf(changeAddress);
-  let newOwnerHash: string;
-  try {
-    newOwnerHash = paymentKeyHashOf(p.newOwnerAddress);
-  } catch (e) {
-    throw new Error(`Invalid new owner address: ${e instanceof Error ? e.message : String(e)} The on-chain contract rejects script credentials as owners.`);
-  }
-  const { profile, utxo } = await resolveAgentUtxo(provider, p.agentId);
-  verifyOwnership(profile, vkeyHash);
-  const newDatum = buildAgentDatum(
-    newOwnerHash, profile.name, profile.description,
-    profile.capabilities, profile.framework, profile.endpoint, profile.registeredAt,
-  );
-  const spendRedeemer = Data.to(new Constr(0, [])); // Update (transfer uses the Update redeemer)
-  // Value-preserving output, same reasoning as buildUpdateAgent above: the
-  // deployed validator requires the continuing output to carry the spent
-  // input's value exactly, not a hardcoded deposit-floor amount.
-  const completed = await lucid.newTx()
-    .collectFrom([utxo], spendRedeemer)
-    .attach.SpendingValidator(legacyRegistryScript())
-    .pay.ToAddressWithData(legacyRegistryAddress(), { kind: 'inline', value: newDatum }, utxo.assets)
-    .addSigner(changeAddress)
-    .complete();
-  return {
-    ...toBuildResult(completed),
-    agentId: p.agentId, op: 'transfer', agentName: profile.name, detail: p.newOwnerAddress,
-  };
 }
 
 export async function buildDeregisterAgent(

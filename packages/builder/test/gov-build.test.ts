@@ -6,7 +6,7 @@ import { CML, Data, Constr, toText, getAddressDetails } from '@lucid-evolution/l
 import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
 import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS } from './fixtures/fixture-provider.ts';
 import { lucidForAddress } from '../src/vector/build.ts';
-import { buildAgentDatum } from '../src/vector/registry-build.ts';
+import { legacyAgentDatum } from './fixtures/legacy-datum.ts';
 import { LEGACY_REGISTRY_POLICY_ID, LEGACY_REGISTRY_DEPOSIT, legacyRegistryAddress } from '../src/vector/legacy-registry.ts';
 import {
   GOV_PROPOSAL_SPEND_HASH, GOV_CRITIQUE_SPEND_HASH, GOV_ENDORSEMENT_SPEND_HASH,
@@ -586,7 +586,7 @@ describe('buildProposalSpend (offline, FixtureProvider)', () => {
     return {
       txHash: NFT_TX_HASH, outputIndex: 0, address: legacyRegistryAddress(),
       assets: { lovelace: LEGACY_REGISTRY_DEPOSIT, [NFT_UNIT]: 1n },
-      datum: buildAgentDatum(OWN_VKEY_HASH, 'FixtureAgent', 'offline fixture agent', ['testing'], 'custom', ''),
+      datum: legacyAgentDatum(OWN_VKEY_HASH, 'FixtureAgent', 'offline fixture agent', ['testing'], 'custom', ''),
     };
   }
   function refScriptFixtureUtxos(): UTxO[] {
@@ -887,14 +887,14 @@ describe('buildProposalSpend (offline, FixtureProvider)', () => {
     );
   });
 
-  test('missing agent registry NFT - re-register error', async () => {
+  test('missing agent registry NFT - the error says that a live legacy record is needed', async () => {
     const providerNoNft = chainClockProvider(baseSpendUtxos({ skipNft: true }));
     const lucidNoNft = await lucidForAddress(providerNoNft, OWN_ADDRESS);
     await assert.rejects(
       buildProposalSpend(lucidNoNft, providerNoNft, {
         agentDid: AGENT_DID, lockTxHash: LOCK_TX_HASH, lockOutputIndex: 0,
       }),
-      /re-register/,
+      /needs a live legacy registry record of the proposer/,
     );
   });
 

@@ -1,5 +1,5 @@
 // packages/builder/src/vector/marketplace-verify.ts
-// The check of a receipt a supplier returned: verifyReceipt (pure: the five checks and the extra row, run on what it is given) and
+// The check of a receipt a supplier returned: verifyReceipt (pure: the six checks and the extra row, run on what it is given) and
 // verifyJob (reads the escrow, the supplier's key and the Submitted output on chain, then runs verifyReceipt on what it found). It sends
 // nothing but one GET for the supplier's key, through safeFetch, and everything else it reads is public. Nothing here builds, signs or
 // submits a transaction. marketplace-transport.ts re-exports it, so callers import the transport and the check from one module.
@@ -9,15 +9,16 @@ import { safeFetch } from './safe-fetch.js';
 import { fetchEscrows } from './marketplace-indexer.js';
 import { canonicalize, formatOutRef, sha256Utf8Hex } from './marketplace-datum.js';
 import type { EscrowDatum } from './marketplace-datum.js';
-import { resolveEscrowLineage, readEscrowOutput, readSubmittedOutput, submittedRefsOf } from './marketplace-lineage.js';
-import type { EscrowLineage } from './marketplace-lineage.js';
+import { resolveEscrowLineage, readEscrowOutput, readSubmittedOutput, submittedRefsOf, isIdentityEscrow } from './marketplace-lineage.js';
+import type { EscrowLineage, EscrowLayout } from './marketplace-lineage.js';
 import { cell } from './marketplace-shared.js';
 import { readTargetAdvert, callFailure, trim, jsonObject, canonicalRef, notThePostOutput } from './marketplace-supplier.js';
+import type { IdentityDeployment } from './identity-deployment.js';
 
 // ─── Verifying a receipt ─────────────────────────────────────────────────────────────────────────────────────────────────────────
-// A receipt is the supplier's own account of a job. Five questions make it more than that, and none of them takes the supplier at its
-// word. The template's own buyer (vector-agent-template c4c378a, try-it/src/verify-receipt.ts, the strict one) asks the same; the
-// SDK's shape-only check is not used.
+// A receipt is the supplier's own account of a job. Six questions make it more than that, and none of them takes the supplier at its
+// word. The template's own buyer (vector-agent-template c4c378a, try-it/src/verify-receipt.ts, the strict one) asks the first five;
+// the SDK's shape-only check is not used.
 //   (1) escrow_ref_matches      receipt.escrow_ref equals the escrow ref: the receipt is for this escrow and not another job's.
 //   (2) response_hash_matches   with the report text given, sha256(result) equals receipt.response_hash. Without it the check is skipped.
 //   (3) supplier_key_matches    the supplier's public key hashes to receipt.supplier_pkh AND to the supplier_pkh of the escrow's datum,
@@ -27,9 +28,13 @@ import { readTargetAdvert, callFailure, trim, jsonObject, canonicalRef, notThePo
 //   (5) on_chain_hash_matches   the result_receipt_hash in the escrow's Submitted output equals sha256(canonicalize({receipt, signature})):
 //                               the bytes verified here are the bytes the supplier committed on chain in its Submit. The output is
 //                               found live, or, once it is spent, through the marketplace indexer (submittedReceiptHash).
+//   (6) fields_match            the receipt has exactly the fields of its escrow's layout (Part 2 Section 6.3; agents-marketplace
+//                               verifyEscrowReceipt): the 8 receipt fields for a legacy escrow; those 8 and agent_did for an
+//                               identity-marketplace escrow, with agent_did = "did:vector:<the escrow's agent_id>". The receipt then
+//                               names the agent the buyer hired, and a receipt made for one layout does not pass for the other.
 //   extra: prompt_hash_matches  receipt.prompt_hash equals the prompt_hash of the escrow's datum: the receipt is for the request the
-//                               buyer committed to and not for another. It is not one of the design's five and it counts all the same:
-//                               a receipt for another request is not a good one.
+//                               buyer committed to and not for another. It is not one of the six and it counts all the same: a receipt
+//                               for another request is not a good one.
 // "verified" is said only when every row passes. A check that was not run is `skipped` and a verdict with one is `incomplete`, never
 // "verified".
 
@@ -39,7 +44,8 @@ export type CheckState = 'pass' | 'fail' | 'skipped';
 export interface Check { state: CheckState; note: string }
 export interface ReceiptChecks {
   escrow_ref_matches: Check; response_hash_matches: Check; supplier_key_matches: Check; signature_valid: Check; on_chain_hash_matches: Check;
-  /** The extra row: not one of the design's five. */
+  fields_match: Check;
+  /** The extra row: not one of the six. */
   prompt_hash_matches: Check;
 }
 export type Verdict = 'verified' | 'failed' | 'incomplete';
@@ -60,11 +66,18 @@ export interface VerifyInput {
   escrowSupplierPkh: string;
   /** The prompt_hash of the escrow's datum. */
   escrowPromptHash: string;
+  /** The agent_id of an identity-marketplace escrow's datum; null or absent for a legacy escrow. */
+  escrowAgentId?: string | null;
   /** The result_receipt_hash of the escrow's Submitted output, or null when there is none to compare. */
   resultReceiptHashOnChain: string | null;
   /** Why there is none, when `resultReceiptHashOnChain` is null. */
   onChainNote?: string;
 }
+
+/** The 8 fields of a receipt for a legacy escrow (agents-marketplace packages/shared/src/receipt/build.ts RECEIPT_FIELDS). */
+export const RECEIPT_FIELDS = ['prompt_hash', 'response_hash', 'model', 'prompt_tokens', 'completion_tokens', 'wallclock_ms', 'supplier_pkh', 'escrow_ref'] as const;
+/** The 9 fields of a receipt for an identity-marketplace escrow: the 8 and agent_did (AGENT_RECEIPT_FIELDS). */
+export const AGENT_RECEIPT_FIELDS = [...RECEIPT_FIELDS, 'agent_did'] as const;
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 const HEX128 = /^[0-9a-f]{128}$/i;
@@ -72,6 +85,21 @@ const passed = (): Check => ({ state: 'pass', note: '' });
 const failed = (note: string): Check => ({ state: 'fail', note });
 const skipped = (note: string): Check => ({ state: 'skipped', note });
 const NOT_AN_OBJECT = 'the receipt is not a JSON object';
+
+/** Check (6): exactly the fields of the escrow's layout, and for an identity-marketplace escrow the agent DID of its agent_id. */
+function fieldsCheck(receipt: Record<string, unknown>, agentId: string | null): Check {
+  const fields: readonly string[] = agentId === null ? RECEIPT_FIELDS : AGENT_RECEIPT_FIELDS;
+  const kind = agentId === null ? 'a legacy escrow' : 'an identity-marketplace escrow';
+  const missing = fields.filter((field) => !Object.prototype.hasOwnProperty.call(receipt, field));
+  const extra = Object.keys(receipt).filter((key) => !fields.includes(key));
+  if (missing.length > 0 || extra.length > 0) {
+    const listed = (names: string[]) => `${names.slice(0, 5).map((n) => n.slice(0, 40)).join(', ')}${names.length > 5 ? ` and ${names.length - 5} more` : ''}`;
+    const what = [missing.length > 0 ? `it lacks ${listed(missing)}` : '', extra.length > 0 ? `it has fields the layout does not have: ${listed(extra)}` : ''].filter((s) => s !== '').join('; ');
+    return failed(`a receipt for ${kind} has exactly the ${fields.length} receipt fields; ${what}`);
+  }
+  if (agentId !== null && receipt.agent_did !== `did:vector:${agentId}`) return failed("the receipt's agent_did is not did:vector:<the escrow's agent_id>: it names another agent than the one the buyer hired");
+  return passed();
+}
 
 /** Runs the checks on what it is given. Pure: nothing is read, and nothing throws, whatever the receipt and the signature are. */
 export function verifyReceipt(i: VerifyInput): ReceiptVerdict {
@@ -123,6 +151,9 @@ export function verifyReceipt(i: VerifyInput): ReceiptVerdict {
   else if (signature === null) onChainHash = failed('there is no signature to hash');
   else onChainHash = sha256Utf8Hex(canonicalize({ receipt, signature })) === i.resultReceiptHashOnChain.toLowerCase() ? passed() : failed('the hash on chain is not the hash of this signed receipt');
 
+  // (6) the fields of the escrow's layout
+  const fieldsMatch = receipt === null ? failed(NOT_AN_OBJECT) : fieldsCheck(receipt, typeof i.escrowAgentId === 'string' ? i.escrowAgentId.toLowerCase() : null);
+
   // extra: the receipt is for the request the escrow committed to
   let promptHash: Check;
   if (receipt === null) promptHash = failed(NOT_AN_OBJECT);
@@ -131,7 +162,7 @@ export function verifyReceipt(i: VerifyInput): ReceiptVerdict {
 
   const checks: ReceiptChecks = {
     escrow_ref_matches: escrowRef, response_hash_matches: responseHash, supplier_key_matches: supplierKey, signature_valid: signatureValid,
-    on_chain_hash_matches: onChainHash, prompt_hash_matches: promptHash,
+    on_chain_hash_matches: onChainHash, fields_match: fieldsMatch, prompt_hash_matches: promptHash,
   };
   const states = Object.values(checks).map((c) => c.state);
   const verdict: Verdict = states.includes('fail') ? 'failed' : states.includes('skipped') ? 'incomplete' : 'verified';
@@ -152,6 +183,10 @@ export interface VerifiedJob extends ReceiptVerdict {
   submittedSpent: boolean | null;
   /** How it was found: live on chain (the lineage), through the marketplace indexer, or named by the caller; null when none was. */
   submittedVia: 'lineage' | 'indexer' | 'argument' | null;
+  /** The escrow's layout. */
+  layout: EscrowLayout;
+  /** For an identity-marketplace escrow, the DID of the agent the buyer hired (`did:vector:<agent_id>`); null for a legacy escrow. */
+  agentDid: string | null;
 }
 
 /** GET /capability answers with the advert and the supplier's key. A few hundred bytes of it matter, and it has no business being large. */
@@ -159,13 +194,13 @@ const CAPABILITY_CALL = { maxResponseBytes: 64 * 1024, timeoutMs: 20_000 } as co
 
 /**
  * The public key of the supplier of an escrow, as the supplier's own GET /capability serves it (`pub_key_hex`), at the endpoint of the
- * advert the escrow names. The endpoint is resolved as a poll resolves it (readTargetAdvert: the advert whatever its state, https, a
- * template-contract capability), and the call is made as every call to a supplier is: through safeFetch, with a 64 KiB cap and a
- * 20 s budget, carrying nothing about the escrow or the job. The key is the supplier's word and nothing more: check (3) holds it to
- * the escrow's supplier_pkh.
+ * advert the escrow names. The endpoint is resolved as a poll resolves it (readTargetAdvert: the advert whatever its state, in the
+ * escrow's layout, https, a template-contract capability), and the call is made as every call to a supplier is: through safeFetch,
+ * with a 64 KiB cap and a 20 s budget, carrying nothing about the escrow or the job. The key is the supplier's word and nothing more:
+ * check (3) holds it to the escrow's supplier_pkh.
  */
-async function capabilityKey(posted: EscrowDatum, koiosUrl: string, fetchImpl: typeof fetch, refuse: (why: string) => Error): Promise<string> {
-  const advert = await readTargetAdvert(posted, koiosUrl, fetchImpl, { refuse, forSend: false });
+async function capabilityKey(posted: EscrowDatum, koiosUrl: string, fetchImpl: typeof fetch, refuse: (why: string) => Error, deployment: IdentityDeployment | null): Promise<string> {
+  const advert = await readTargetAdvert(posted, koiosUrl, fetchImpl, { refuse, forSend: false, deployment });
   const unreadable = (why: string) => refuse(`the supplier's public key could not be read (${why}); pass supplier_pub_key_hex.`);
   let res: Awaited<ReturnType<typeof safeFetch>>;
   try {
@@ -204,24 +239,25 @@ const indexerFailure = (err: unknown): string => (err instanceof Error && /^list
  * check and nothing else.
  */
 async function submittedReceiptHash(
-  provider: Provider, koiosUrl: string, post: { ref: string; datum: EscrowDatum; lovelace: bigint }, given: string | null, fetchImpl: typeof fetch,
+  provider: Provider, koiosUrl: string, post: { ref: string; datum: EscrowDatum; lovelace: bigint; layout: EscrowLayout }, given: string | null, fetchImpl: typeof fetch,
+  deployment: IdentityDeployment | null,
 ): Promise<SubmittedFound | { why: string }> {
   const why = (text: string) => ({ why: text });
   if (given !== null) {
     try {
-      const out = await readSubmittedOutput(koiosUrl, post, given, fetchImpl);
+      const out = await readSubmittedOutput(koiosUrl, post, given, fetchImpl, deployment);
       return { hash: out.receiptHash, ref: out.ref, spent: out.spent, via: 'argument' };
     } catch (err) { return why(`${NOT_LOCATABLE}the one you gave was refused: ${flat(err)}`); }
   }
 
   let live: EscrowLineage['current'] = null;
   let lineageFailure: string | null = null;
-  try { live = (await resolveEscrowLineage(provider, koiosUrl, post.ref, fetchImpl)).current; } catch (err) { lineageFailure = flat(err); }
+  try { live = (await resolveEscrowLineage(provider, koiosUrl, post.ref, fetchImpl, deployment)).current; } catch (err) { lineageFailure = flat(err); }
   if (live !== null) {
     if (live.datum.state !== 'Submitted') return why(`the escrow is ${live.datum.state}: the supplier has not put a receipt hash on chain`);
     const ref = formatOutRef(live.utxo.txHash, live.utxo.outputIndex);
     let output: Awaited<ReturnType<typeof readEscrowOutput>>;
-    try { output = await readEscrowOutput(koiosUrl, ref, fetchImpl); } catch (err) { return why(`the Submitted output ${ref} could not be read by its ref: ${flat(err)}`); }
+    try { output = await readEscrowOutput(koiosUrl, ref, fetchImpl, deployment); } catch (err) { return why(`the Submitted output ${ref} could not be read by its ref: ${flat(err)}`); }
     const hash = output.datum.result_receipt_hash;
     if (output.datum.state !== 'Submitted' || hash === null || hash !== live.datum.result_receipt_hash) return why(`Koios describes the Submitted output ${ref} differently when it is read by its ref; its receipt hash is not used`);
     return { hash, ref, spent: output.spent, via: 'lineage' };
@@ -234,38 +270,46 @@ async function submittedReceiptHash(
   if (refs.length === 0) return why(`${NOT_LOCATABLE}${lead}, and the indexer lists no Submitted output of it`);
   if (refs.length > 1) return why(`${NOT_LOCATABLE}the indexer lists ${refs.length} Submitted outputs that match this escrow; pass submitted_ref to name the one`);
   try {
-    const out = await readSubmittedOutput(koiosUrl, post, refs[0], fetchImpl);
+    const out = await readSubmittedOutput(koiosUrl, post, refs[0], fetchImpl, deployment);
     return { hash: out.receiptHash, ref: out.ref, spent: out.spent, via: 'indexer' };
   } catch (err) { return why(`${NOT_LOCATABLE}the indexer lists ${refs[0]}, which was refused: ${flat(err)}`); }
 }
 
 /**
  * Checks a receipt against the escrow it is for: reads the escrow's Post output (the supplier the buyer paid, the request it committed
- * to), the supplier's key (`supplierPubKeyHex` when the caller gives one, else the supplier's own GET /capability) and the receipt hash
- * of the escrow's Submitted output (live, settled, or named by `submittedRef`: see submittedReceiptHash), and runs verifyReceipt. It
- * needs no buyer: it sends nothing but one GET for the key, and everything it reads is public. `signature` is the supplier's string
- * exactly as it gave it. An escrow that cannot be read, a ref that names a later output, a `submittedRef` that is no ref, and a key
- * that cannot be read are errors that name the escrow and say nothing of the supplier's host or its answer.
+ * to, and for an identity-marketplace escrow the agent it hired), the supplier's key (`supplierPubKeyHex` when the caller gives one,
+ * else the supplier's own GET /capability) and the receipt hash of the escrow's Submitted output (live, settled, or named by
+ * `submittedRef`: see submittedReceiptHash), and runs verifyReceipt. It needs no buyer: it sends nothing but one GET for the key, and
+ * everything it reads is public. `signature` is the supplier's string exactly as it gave it. `deployment` is the server's identity
+ * deployment, which an identity-marketplace escrow needs. An escrow that cannot be read, a ref that names a later output, a
+ * `submittedRef` that is no ref, and a key that cannot be read are errors that name the escrow and say nothing of the supplier's host
+ * or its answer.
  */
 export async function verifyJob(
   provider: Provider, koiosUrl: string,
-  p: { escrowRef: string; receipt: unknown; signature: string; result?: string; supplierPubKeyHex?: string; submittedRef?: string },
+  p: { escrowRef: string; receipt: unknown; signature: string; result?: string; supplierPubKeyHex?: string; submittedRef?: string; deployment?: IdentityDeployment | null },
   fetchImpl: typeof fetch = fetch,
 ): Promise<VerifiedJob> {
   const canonical = canonicalRef(p.escrowRef);
   const given = p.submittedRef === undefined ? null : canonicalRef(p.submittedRef);
+  const deployment = p.deployment ?? null;
   const refuse = (why: string) => new Error(`Cannot verify a receipt for escrow ${canonical}: ${why}`);
-  const { datum: posted, lovelace } = await readEscrowOutput(koiosUrl, canonical, fetchImpl);
+  const { datum: posted, lovelace } = await readEscrowOutput(koiosUrl, canonical, fetchImpl, deployment);
   const notPost = notThePostOutput(posted);
   if (notPost !== null) throw refuse(notPost);
+  const agentId = isIdentityEscrow(posted) ? posted.agent_id : null;
+  const layout: EscrowLayout = agentId === null ? 'legacy' : 'identity';
   const keyFrom = p.supplierPubKeyHex === undefined ? 'capability' : 'argument';
-  const supplierPubKeyHex = p.supplierPubKeyHex ?? await capabilityKey(posted, koiosUrl, fetchImpl, refuse);
-  const onChain = await submittedReceiptHash(provider, koiosUrl, { ref: canonical, datum: posted, lovelace }, given, fetchImpl);
+  const supplierPubKeyHex = p.supplierPubKeyHex ?? await capabilityKey(posted, koiosUrl, fetchImpl, refuse, deployment);
+  const onChain = await submittedReceiptHash(provider, koiosUrl, { ref: canonical, datum: posted, lovelace, layout }, given, fetchImpl, deployment);
   const found = 'hash' in onChain ? onChain : null;
   const checked = verifyReceipt({
     receipt: p.receipt, signature: p.signature, escrowRef: canonical, result: p.result, supplierPubKeyHex,
-    escrowSupplierPkh: posted.supplier_pkh, escrowPromptHash: posted.prompt_hash,
+    escrowSupplierPkh: posted.supplier_pkh, escrowPromptHash: posted.prompt_hash, escrowAgentId: agentId,
     resultReceiptHashOnChain: found?.hash ?? null, onChainNote: 'why' in onChain ? onChain.why : undefined,
   });
-  return { ...checked, escrowRef: canonical, supplierPkh: posted.supplier_pkh, keyFrom, submittedRef: found?.ref ?? null, submittedSpent: found?.spent ?? null, submittedVia: found?.via ?? null };
+  return {
+    ...checked, escrowRef: canonical, supplierPkh: posted.supplier_pkh, keyFrom, submittedRef: found?.ref ?? null, submittedSpent: found?.spent ?? null,
+    submittedVia: found?.via ?? null, layout, agentDid: agentId === null ? null : `did:vector:${agentId}`,
+  };
 }
