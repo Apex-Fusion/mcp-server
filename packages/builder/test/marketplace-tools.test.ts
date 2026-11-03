@@ -12,7 +12,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { registerMarketplaceTools } from '../src/vector/marketplace.ts';
 import { RateLimiter } from '../src/vector/rate-limiter.ts';
-import { ADVERT_ADDRESS, ESCROW_ADDRESS, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
+import { ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_SWITCH_SLOT, INDEXER_URL } from '../src/vector/marketplace-constants.ts';
+import { legacyEscrowRefusal } from '../src/vector/marketplace-build.ts';
 import { decodeEscrowDatum, encodeEscrowDatum, promptHashForPayload } from '../src/vector/marketplace-datum.ts';
 import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
 import { ADVERT_DATUM_HEX, ADVERT_EXPECTED, ADVERT_REF, ESCROW_LOCKED_LOVELACE, ESCROW_OPEN_DATUM_HEX, ESCROW_REF } from './fixtures/marketplace.fixture.ts';
@@ -394,6 +395,10 @@ const askedConfiguredKoios = (urls: string[]) => {
   for (const u of koios) assert.ok(u.startsWith(`${VECTOR_KOIOS_URL.replace(/\/+$/, '')}/api/v1/`), `${u} is not under ${VECTOR_KOIOS_URL}`);
 };
 const SIGN_FLOW = 'Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.';
+/** The node of the running test, its tip at `slot` (FixtureProvider's tip is slot 0, before the escrow switch). */
+const tipAt = (slot: number) => { Object.assign(nodeOfTheTest(), { getNetworkTip: async () => ({ slot, hash: '' }) }); };
+/** A tip one day past the escrow switch slot. */
+const PAST_THE_SWITCH = ESCROW_SWITCH_SLOT + 86_400;
 
 describe('vector_build_marketplace_post_escrow', () => {
   beforeEach(() => { node = new FixtureProvider(FIXTURE_UTXOS); stub({ utxos: [advertUtxo(TEMPLATE_ADVERT)] }); });
@@ -545,6 +550,24 @@ describe('vector_build_marketplace_post_escrow', () => {
     assert.ok(t.startsWith('Failed to build escrow post: '), t);
     assert.ok(t.includes('**Troubleshooting Tips:**'));
   });
+  test('from the escrow switch slot on, a legacy advert is refused as text before its author is checked; one slot before, it is hired', async () => {
+    assert.equal(legacyEscrowRefusal(ADVERT_REF), `Advert ${ADVERT_REF} has the legacy layout (it names no agent DID). From the escrow switch (slot 37226741, 2026-11-03T13:25:41Z) on, ` +
+      'new escrows go to identity-layout adverts only, so no new escrow is built for it. Hire an advert that names an agent (vector_marketplace_list_suppliers shows its DID) with ' +
+      'vector_build_marketplace_post_escrow, or ask the supplier to post one with vector_build_marketplace_advert_post. Escrows posted before the switch keep their Accept, Reclaim and Release.');
+    for (const slot of [ESCROW_SWITCH_SLOT, PAST_THE_SWITCH]) {
+      tipAt(slot);
+      stub({ utxos: [advertUtxo(TEMPLATE_ADVERT)] });
+      const t = await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+      assert.ok(t.startsWith(`Failed to build escrow post: ${legacyEscrowRefusal(ADVERT_REF)}\n\n**Troubleshooting Tips:**\n1. `), `tip at slot ${slot}: ${t}`);
+      assert.ok(!t.includes('Unsigned'));
+      assert.ok(!requested.some((u) => u.endsWith('/api/v1/tx_info')), 'the advert\'s author is not asked for');
+    }
+    tipAt(ESCROW_SWITCH_SLOT - 1);
+    stub({ utxos: [advertUtxo(TEMPLATE_ADVERT)] });
+    const t = await call(POST_TOOL, { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: 'hello' });
+    assert.ok(t.startsWith('# Unsigned Escrow Post Built (Not Submitted)\n'), t.slice(0, 300));
+    assert.equal(jsonOf(t).layout, 'legacy');
+  });
 });
 
 // The escrow world: a node that can evaluate scripts and the Koios that describes the same chain. Times are taken from the clock the
@@ -595,6 +618,15 @@ describe('vector_build_marketplace_accept', () => {
     assert.ok(outs.some((o) => o.address === OWN_ADDRESS && o.lovelace === 1_000_000n), 'the buyer bond comes back');
     assert.equal(j.tx_hash.length, 64);
     assert.ok(markdownOf(t).endsWith(SIGN_FLOW));
+  });
+  test('the escrow switch does not stop it: a legacy escrow is accepted at a tip past the switch slot', async () => {
+    const now = Date.now();
+    const posted = postedAround(now);
+    escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 60_000))], posted, true);
+    tipAt(PAST_THE_SWITCH);
+    const t = await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    assert.ok(t.startsWith('# Unsigned Accept Built (Not Submitted)\n'), t.slice(0, 300));
+    assert.ok(outputsOf(cborOf(t)).some((o) => o.address === SUPPLIER_ADDRESS && o.lovelace === 1_200_000n), 'the supplier is paid price + supplier bond');
   });
   test('hurries the caller when less than two minutes of the window are left', async () => {
     const now = Date.now();
@@ -673,6 +705,15 @@ describe('vector_build_marketplace_reclaim', () => {
     assert.equal(jsonOf(t).escrow_ref, ESCROW_REF);
     assert.ok(outputsOf(cborOf(t)).some((o) => o.address === OWN_ADDRESS && o.lovelace === 2_200_000n));
     assert.ok(markdownOf(t).endsWith(SIGN_FLOW));
+  });
+  test('the escrow switch does not stop it: a legacy escrow is reclaimed at a tip past the switch slot', async () => {
+    const now = Date.now();
+    const posted = postedAround(now, { deliver_by: now - 300_000 });
+    escrowWorld([escrowAt(ESCROW_TX, posted)], posted, false);
+    tipAt(PAST_THE_SWITCH);
+    const t = await call(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
+    assert.ok(t.startsWith('# Unsigned Reclaim Built (Not Submitted)\n'), t.slice(0, 300));
+    assert.ok(outputsOf(cborOf(t)).some((o) => o.address === OWN_ADDRESS && o.lovelace === 2_200_000n), 'everything comes back');
   });
   test('a reclaim before deliver_by has passed is a text refusal that names when it opens', async () => {
     const now = Date.now();

@@ -8,6 +8,17 @@ export const ADVERT_SCRIPT_HASH = '9929fa4eed8b66b30b8608e601ed2a4b7b413a2413dd1
 export const ADVERT_ADDRESS = 'addr1wxvjn7jwak9kdvctscywvq0d9f9hksf6ysfa6yatya2efksvgxwpa';
 export const ESCROW_REF_UTXO = { txHash: 'c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54', outputIndex: 0 };
 export const ADVERT_REF_UTXO = { txHash: 'c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54', outputIndex: 1 };
+/**
+ * The escrow switch on Vector mainnet (Part 2 Section 9.6 of the identity registry plan): slot 37,226,741, which is 2026-11-03T13:25:41Z
+ * (the chain start, 1,756,485,600,000 ms, plus one second per slot). From this slot on, the builders create identity-layout adverts and
+ * escrows only: vector_build_marketplace_post_advert and an escrow Post on a legacy-layout advert are refused. Every spend of what exists
+ * stays until the drain ends: Accept, Reclaim and Release of a legacy escrow, and the Retire of a legacy advert. The tools compare it
+ * with the slot of the node's tip (tip >= ESCROW_SWITCH_SLOT), as the gateway, the indexer and the buyer SDK of agents-marketplace
+ * compare their SWITCH_SLOT.
+ */
+export const ESCROW_SWITCH_SLOT = 37_226_741;
+/** ESCROW_SWITCH_SLOT as the time Vector mainnet gives that slot, for the refusals. */
+export const ESCROW_SWITCH_AT = '2026-11-03T13:25:41Z';
 export const ACCEPT_WINDOW_MS = 600_000;
 /** Buyer-side buffer added to the advert's processing window when computing deliver_by. */
 export const DELIVER_BY_BUFFER_MS = 180_000;

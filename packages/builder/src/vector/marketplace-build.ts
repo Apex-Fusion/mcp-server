@@ -4,10 +4,11 @@
 // same numbers can be shown to the signer and unit-tested without a chain.
 //
 // Two escrow layouts during the drain (Part 2 Sections 6.1, 6.5 and 9.6). The legacy escrow keeps its rules and is evaluated by the
-// node, as before. The identity-marketplace escrow of the server's deployment (16-field datum: agent_id and refund) adds rules that
-// every spend here meets: the escrow input is the only script input, no mint, withdrawal or certificate, a validity range of at most
-// one hour, and buyer payouts at the refund address with its datum when the escrow names one. Its spends are evaluated locally with
-// the real script, read from the deployment's reference-script UTxO. Post refuses an escrow above the value cap F-29 in both layouts.
+// node, as before; from the escrow switch on (ESCROW_SWITCH_SLOT) Post builds no new legacy escrow, and the legacy spends stay. The
+// identity-marketplace escrow of the server's deployment (16-field datum: agent_id and refund) adds rules that every spend here meets:
+// the escrow input is the only script input, no mint, withdrawal or certificate, a validity range of at most one hour, and buyer
+// payouts at the refund address with its datum when the escrow names one. Its spends are evaluated locally with the real script, read
+// from the deployment's reference-script UTxO. Post refuses an escrow above the value cap F-29 in both layouts.
 import { Data, Constr, CML, calculateMinLovelaceFromUTxO, credentialToAddress } from '@lucid-evolution/lucid';
 import type { Assets, LucidEvolution, Provider, TxSignBuilder, UTxO } from '@lucid-evolution/lucid';
 import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
@@ -17,7 +18,7 @@ import { ensureSlotConfig, paymentKeyHashOf, ChainClockError } from './gov-build
 import type { SlotClockProvider } from './gov-build.js';
 import {
   ESCROW_ADDRESS, ESCROW_REF_UTXO, ACCEPT_WINDOW_MS, DELIVER_BY_BUFFER_MS, MAX_PROCESSING_MS_CEILING, MARKETPLACE_MIN_FEE,
-  COLLATERAL_MIN_LOVELACE, MIN_UTXO_LOVELACE, REDEEMER, MAX_ESCROW_LOVELACE,
+  COLLATERAL_MIN_LOVELACE, MIN_UTXO_LOVELACE, REDEEMER, MAX_ESCROW_LOVELACE, ESCROW_SWITCH_SLOT, ESCROW_SWITCH_AT,
 } from './marketplace-constants.js';
 import {
   advertTextFieldsRoundTrip, encodeEscrowDatum, encodeIdentityEscrowDatum, requestSpecHash, promptHashForPayload,
@@ -311,10 +312,41 @@ export async function checkListingRule(provider: Provider, deployment: IdentityD
   return found;
 }
 
+// ─── The escrow switch (Part 2 Section 9.6) ─────────────────────────────────
+
+/** The escrow switch as the tool texts and the refusals name it. */
+export const ESCROW_SWITCH_NAME = `the escrow switch (slot ${ESCROW_SWITCH_SLOT}, ${ESCROW_SWITCH_AT})`;
+/** The refusal of a new legacy-layout advert from the escrow switch on (buildPostAdvert, vector_build_marketplace_post_advert). */
+export const LEGACY_ADVERT_REFUSAL = `From ${ESCROW_SWITCH_NAME} on, new adverts use the identity layout only, so no new legacy-layout advert is built. Post an identity-layout advert with vector_build_marketplace_advert_post: it names the agent (did:vector) whose record lists your supplier key and the capability. To take a legacy advert off the market and get its deposit back, use vector_build_marketplace_advert_retire.`;
+/** The refusal of a new escrow on the legacy-layout advert `advertRef` from the escrow switch on (buildPostEscrow). */
+export const legacyEscrowRefusal = (advertRef: string): string => `Advert ${advertRef} has the legacy layout (it names no agent DID). From ${ESCROW_SWITCH_NAME} on, new escrows go to identity-layout adverts only, so no new escrow is built for it. Hire an advert that names an agent (vector_marketplace_list_suppliers shows its DID) with vector_build_marketplace_post_escrow, or ask the supplier to post one with vector_build_marketplace_advert_post. Escrows posted before the switch keep their Accept, Reclaim and Release.`;
+
+/**
+ * Whether the node's tip has reached the escrow switch, decided as the agents-marketplace gateway decides it: the slot of the tip is at
+ * least ESCROW_SWITCH_SLOT. A tip that the node cannot give is an error, so that nothing of the legacy layout is built on an unknown
+ * side of the switch. The spends of what exists (Accept, Reclaim, Release, the Retire of an advert) never ask.
+ */
+export async function escrowSwitchPassed(provider: Provider): Promise<boolean> {
+  let slot: unknown;
+  try { slot = (await (provider as unknown as Required<Pick<SlotClockProvider, 'getNetworkTip'>>).getNetworkTip()).slot; } catch (err) {
+    throw new Error(`Could not read the chain tip from the node, so it is not known whether ${ESCROW_SWITCH_NAME} has passed: ${nodeFailure(err)}`);
+  }
+  if (typeof slot !== 'number' || !Number.isSafeInteger(slot) || slot < 0) {
+    throw new Error(`The node did not report a usable chain tip, so it is not known whether ${ESCROW_SWITCH_NAME} has passed.`);
+  }
+  return slot >= ESCROW_SWITCH_SLOT;
+}
+
+/** Refuses with `refusal` (one of the two above) once the node's tip has reached the escrow switch. */
+export async function assertBeforeEscrowSwitch(provider: Provider, refusal: string): Promise<void> {
+  if (await escrowSwitchPassed(provider)) throw new Error(refusal);
+}
+
 /**
  * Builds the unsigned Post: locks price + both bonds in a new escrow (output 0) for the advert. Reads the advert through
  * readAdvert in either layout and refuses one that is spent, retired, not valid UTF-8, of a fleet capability, above the value cap
- * (F-29), and a buyer who is the supplier. A legacy advert must have been created by its supplier key; the escrow is the legacy one.
+ * (F-29), and a buyer who is the supplier. A legacy advert is refused once the node's tip has reached the escrow switch
+ * (legacyEscrowRefusal); before it, the advert must have been created by its supplier key, and the escrow is the legacy one.
  * An identity-marketplace advert (at the advert address of `deployment`) must be listed by the indexer with its agent_id and pass the
  * listing rule on chain; the escrow is the identity one at the deployment's escrow address, with that agent_id and the refund set to
  * the buyer's own address (`changeAddress`) with no datum (Part 2 Section 6.5), so that anybody can Reclaim it to the buyer after
@@ -334,6 +366,7 @@ export async function buildPostEscrow(
   let plan: PostEscrowPlan;
   let escrowAddress = ESCROW_ADDRESS;
   if (read.layout === 'legacy') {
+    await assertBeforeEscrowSwitch(provider, legacyEscrowRefusal(advertRef));
     plan = planPostEscrow(read.advert, advertRef, buyerPkh, p.payload, nowMs, p.deliverByMs);
     await assertAdvertAuthor(advertRef, read.utxo.tx_hash, read.advert.supplier_pkh, fetchImpl);
   } else {

@@ -1,9 +1,10 @@
 // packages/builder/test/marketplace-advert.test.ts
-// The legacy-layout advert: the datum writer, the Post (legacy layout, until the switch date) and the Retire. Parity is held against the
-// supplier template's own transactions on mainnet (advert-stake-golden.fixture.ts): the same datum bytes, deposit and validity range for
-// each of the service agents' Posts, and for the Retire the same output to the supplier, validity range and reference script, with the
-// deployed advert validator evaluating the built transaction (uplc-node.fixture.ts). The terms rules that both layouts share
-// (checkAdvertTerms) are covered here, through planPostAdvert. No network is touched: Koios is stubbed, and any other fetch fails.
+// The legacy-layout advert: the datum writer, the Post (legacy layout, refused from the escrow switch on) and the Retire. Parity is
+// held against the supplier template's own transactions on mainnet (advert-stake-golden.fixture.ts): the same datum bytes, deposit and
+// validity range for each of the service agents' Posts, and for the Retire the same output to the supplier, validity range and
+// reference script, with the deployed advert validator evaluating the built transaction (uplc-node.fixture.ts). The terms rules that
+// both layouts share (checkAdvertTerms) are covered here, through planPostAdvert. No network is touched: Koios is stubbed, and any
+// other fetch fails.
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML, Constr, Data, getAddressDetails, validatorToScriptHash } from '@lucid-evolution/lucid';
@@ -12,13 +13,13 @@ import { lucidForAddress } from '../src/vector/build.ts';
 import { ensureSlotConfig } from '../src/vector/gov-build.ts';
 import {
   ADVERT_ADDRESS, ADVERT_REF_UTXO, ADVERT_SCRIPT_HASH, ADVERT_DEPOSIT_FLOOR_LOVELACE, EMPTY_DETAIL_HASH, MARKETPLACE_MIN_FEE,
-  MAX_ESCROW_LOVELACE, MAX_PROCESSING_MS_CEILING, MIN_PROCESSING_MS_FLOOR, DELIVER_BY_BUFFER_MS,
+  MAX_ESCROW_LOVELACE, MAX_PROCESSING_MS_CEILING, MIN_PROCESSING_MS_FLOOR, DELIVER_BY_BUFFER_MS, ESCROW_SWITCH_SLOT,
 } from '../src/vector/marketplace-constants.ts';
 import { decodeAdvertDatum, encodeAdvertDatum, formatOutRef } from '../src/vector/marketplace-datum.ts';
 import type { AdvertDatum } from '../src/vector/marketplace-datum.ts';
 import { planPostAdvert, buildPostAdvert, advertOutputZero, planRetireAdvert, buildRetireAdvert } from '../src/vector/marketplace-advert.ts';
 import type { AdvertTerms } from '../src/vector/marketplace-advert-build.ts';
-import { planPostEscrow } from '../src/vector/marketplace-build.ts';
+import { planPostEscrow, LEGACY_ADVERT_REFUSAL } from '../src/vector/marketplace-build.ts';
 import { ROUTES } from '../src/vector/marketplace-transport.ts';
 import { ADVERT_DATUM_HEX } from './fixtures/marketplace.fixture.ts';
 import { ADVERT_POSTS, ADVERT_RETIRE, ADVERT_REF_UTXO_BARE, ADVERT_SCRIPT_CBOR, STAKE_A, STAKE_B } from './fixtures/advert-stake-golden.fixture.ts';
@@ -282,6 +283,21 @@ describe('buildPostAdvert', () => {
     const elsewhere = await (await lucidForAddress(node, SUPPLIER_ADDRESS)).newTx()
       .pay.ToAddressWithData(SUPPLIER_ADDRESS, { kind: 'inline', value: plan.datumHex }, { lovelace: r.depositLovelace }).complete();
     assert.throws(() => advertOutputZero(elsewhere.toCBOR(), { ...plan, depositLovelace: r.depositLovelace }), /not have the planned advert as output 0/);
+  });
+  test('from the escrow switch slot on it refuses before it checks the terms; one slot before, it builds', async () => {
+    const at = (slot: number) => Object.assign(new FixtureProvider(supplierWallet()), { getNetworkTip: async () => ({ slot, hash: '' }) });
+    const refused = (err: unknown) => { assert.ok(err instanceof Error); assert.equal(err.message, LEGACY_ADVERT_REFUSAL); return true; };
+    for (const slot of [ESCROW_SWITCH_SLOT, ESCROW_SWITCH_SLOT + 86_400]) {
+      const node = at(slot);
+      const lucid = await lucidForAddress(node, SUPPLIER_ADDRESS);
+      await assert.rejects(buildPostAdvert(lucid, node, { changeAddress: SUPPLIER_ADDRESS, terms: TERMS, nowMs: NOW }), refused);
+      // Terms that the rules refuse are refused for the switch: no change of terms makes a legacy advert buildable.
+      await assert.rejects(buildPostAdvert(lucid, node, { changeAddress: SUPPLIER_ADDRESS, terms: { ...TERMS, capabilityId: 'llm.chat.v1' }, nowMs: NOW }), refused);
+    }
+    const before = at(ESCROW_SWITCH_SLOT - 1);
+    const r = await buildPostAdvert(await lucidForAddress(before, SUPPLIER_ADDRESS), before, { changeAddress: SUPPLIER_ADDRESS, terms: TERMS, nowMs: NOW });
+    assert.equal(txOf(r.txCbor).body().outputs().get(0).address().to_bech32(), ADVERT_ADDRESS);
+    assert.equal(r.advertRef, `${r.txHash}#0`);
   });
 });
 

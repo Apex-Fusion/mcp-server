@@ -3,7 +3,8 @@
 // advert tools are in marketplace-advert-tools.ts). Each takes a wallet address only and returns unsigned CBOR for the local signer
 // with every key hash that must sign; nothing here signs or submits. The node they build against comes from `providerFor` and the
 // identity deployment from `deploymentFor`, so the entry point decides them (and a test can hand in its own). The escrow tools work in
-// both layouts (Part 2 Section 9.6): a legacy advert or escrow needs no deployment; an identity-marketplace one needs it.
+// both layouts (Part 2 Section 9.6): a legacy advert or escrow needs no deployment; an identity-marketplace one needs it. From the
+// escrow switch on (ESCROW_SWITCH_SLOT), the Post refuses a legacy advert; the spends of legacy escrows stay.
 import { z } from "zod/v4";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Provider } from '@lucid-evolution/lucid';
@@ -11,7 +12,7 @@ import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
 import { lucidForAddress } from './build.js';
 import { withJson } from './marketplace-indexer.js';
-import { buildPostEscrow, buildAccept, buildReclaim, buildRelease, buildRefundRevoked, supplierPayoutRaised } from './marketplace-build.js';
+import { buildPostEscrow, buildAccept, buildReclaim, buildRelease, buildRefundRevoked, supplierPayoutRaised, ESCROW_SWITCH_NAME } from './marketplace-build.js';
 import type { EscrowSpendBuild } from './marketplace-build.js';
 import { text, fail, cell, isoOrRaw, signersLine, signersJson, SIGN_COPY, ACCEPT_WINDOW_S, RELEASE_TAKE } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
@@ -39,7 +40,7 @@ export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit:
   server.tool(
     "vector_build_marketplace_post_escrow",
     "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Template-contract suppliers only in this release. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref, the same payload (the JSON block echoes it verbatim) and your wallet address as buyerAddress. The transaction is valid for at most 180 s, so sign and submit it at once. " +
-      "Both advert layouts: an identity-marketplace advert (it names an agent, did:vector) must be listed by the marketplace indexer and its agent must pass the listing rule on chain; its escrow names the agent and refunds to your address, so anybody can Reclaim it to you after deliver_by. Price + both bonds above 10,000 AP3X is refused (value cap F-29). " + SIGN_COPY,
+      "An identity-marketplace advert (it names an agent, did:vector) must be listed by the marketplace indexer and its agent must pass the listing rule on chain; its escrow names the agent and refunds to your address, so anybody can Reclaim it to you after deliver_by. A legacy-layout advert (it names no agent DID) is refused from " + ESCROW_SWITCH_NAME + " on: new escrows go to identity-layout adverts only, and escrows posted before the switch keep their Accept, Reclaim and Release. Price + both bonds above 10,000 AP3X is refused (value cap F-29). " + SIGN_COPY,
     {
       changeAddress: z.string().describe("Your wallet address (pays the lock and fees; receives the bond back on Accept). Get it from vector_signer_get_address."),
       advert_ref: z.string().describe("Advert '<txid>#<index>' from vector_marketplace_list_suppliers"),
