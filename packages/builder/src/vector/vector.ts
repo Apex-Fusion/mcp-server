@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Provider } from '@lucid-evolution/lucid';
 
 import * as dotenv from 'dotenv';
 import { resolve } from 'path';
@@ -20,8 +21,9 @@ import { registerIdentityFamily } from './identity-family.js';
 import type { VectorDryRunResult } from '@apexfusion/vector-mcp-shared/types';
 import {
   lucidForAddress, buildSendApex, buildSendTokens, buildMultiOutput,
-  buildDeployContract, buildInteractContract,
+  buildDeployContract, buildInteractContract, declaredFee,
 } from './build.js';
+import { walletBuildText } from './wallet-build-text.js';
 
 // Direct .env loading
 const __filename = fileURLToPath(import.meta.url);
@@ -46,8 +48,14 @@ function makeProvider(): OgmiosProvider {
   });
 }
 
-// Register all Vector MCP tools
-export function registerVectorTools(server: McpServer, identity: string) {
+/** The node of the wallet build tools and vector_dry_run: a Lucid provider that also evaluates a transaction, as Ogmios does. */
+export type BuildNode = Provider & Pick<OgmiosProvider, 'evaluateTransaction'>;
+
+/**
+ * Register all Vector MCP tools. The server passes only `server` and `identity`; `nodeFor` (the node of the wallet build tools and
+ * vector_dry_run) is for tests, which hand in a fixture node.
+ */
+export function registerVectorTools(server: McpServer, identity: string, nodeFor: () => BuildNode = makeProvider) {
   const rateLimiter = limiterFor(identity);
 
   // vector_get_balance - Get balance for any address
@@ -191,24 +199,18 @@ ${utxoList}`,
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
       }
       try {
-        const lucid = await lucidForAddress(makeProvider(), changeAddress);
+        const lucid = await lucidForAddress(nodeFor(), changeAddress);
         const result = await buildSendApex(lucid, { recipientAddress, amountApex: amount, metadataJson: metadata });
         return {
           content: [{
             type: "text",
-            text: `# Unsigned Transaction Built
+            text: walletBuildText(`# Unsigned Transaction Built
 
 **Amount:** ${amount} AP3X
 **To:** ${recipientAddress}
 **Estimated Fee:** ${result.feeAda} AP3X
-**Tx Hash:** ${result.txHash}
-
-**Unsigned TX CBOR:**
-\`\`\`
-${result.txCbor}
-\`\`\`
-
-Non-custodial flow: 1) sign locally with vector_signer_sign { txCbor } - your keys never leave your machine; 2) broadcast with vector_submit_transaction { signedTxCbor }; 3) confirm with vector_await_transaction { txHash }.`,
+**Tx Hash:** ${result.txHash}`, result, changeAddress,
+              'Non-custodial flow: 1) sign locally with vector_signer_sign { txCbor } - your keys never leave your machine; 2) broadcast with vector_submit_transaction { signedTxCbor }; 3) confirm with vector_await_transaction { txHash }.'),
           }],
         };
       } catch (err) {
@@ -246,26 +248,20 @@ Non-custodial flow: 1) sign locally with vector_signer_sign { txCbor } - your ke
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
       }
       try {
-        const lucid = await lucidForAddress(makeProvider(), changeAddress);
+        const lucid = await lucidForAddress(nodeFor(), changeAddress);
         const result = await buildSendTokens(lucid, { recipientAddress, policyId, assetName, amount, apexAmount: adaAmount });
         const displayName = assetName && !/^[0-9a-fA-F]+$/.test(assetName) ? assetName : (formatAssetName(assetName) || `${policyId.substring(0, 8)}...`);
         return {
           content: [{
             type: "text",
-            text: `# Unsigned Token Transaction Built
+            text: walletBuildText(`# Unsigned Token Transaction Built
 
 **Token:** ${displayName}
 **Amount:** ${amount}
 **To:** ${recipientAddress}
 **Estimated Fee:** ${result.feeAda} AP3X
-**Tx Hash:** ${result.txHash}
-
-**Unsigned TX CBOR:**
-\`\`\`
-${result.txCbor}
-\`\`\`
-
-Non-custodial flow: 1) sign locally with vector_signer_sign { txCbor }; 2) broadcast with vector_submit_transaction { signedTxCbor }; 3) confirm with vector_await_transaction { txHash }.`,
+**Tx Hash:** ${result.txHash}`, result, changeAddress,
+              'Non-custodial flow: 1) sign locally with vector_signer_sign { txCbor }; 2) broadcast with vector_submit_transaction { signedTxCbor }; 3) confirm with vector_await_transaction { txHash }.'),
           }],
         };
       } catch (err) {
@@ -304,25 +300,19 @@ Non-custodial flow: 1) sign locally with vector_signer_sign { txCbor }; 2) broad
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
       }
       try {
-        const lucid = await lucidForAddress(makeProvider(), changeAddress);
+        const lucid = await lucidForAddress(nodeFor(), changeAddress);
         const result = await buildMultiOutput(lucid, { outputs, metadataJson: metadata });
         const totalLovelace = outputs.reduce((sum, o) => sum + o.lovelace, 0);
         return {
           content: [{
             type: "text",
-            text: `# Unsigned Transaction Built (Not Submitted)
+            text: walletBuildText(`# Unsigned Transaction Built (Not Submitted)
 
 **Tx Hash:** ${result.txHash}
 **Fee:** ${result.feeAda} AP3X
 **Outputs:** ${outputs.length}
-**Total AP3X:** ${lovelaceToAda(totalLovelace)} AP3X
-
-**Unsigned TX CBOR:**
-\`\`\`
-${result.txCbor}
-\`\`\`
-
-Use vector_dry_run with this CBOR to simulate it, sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction { txHash }.`,
+**Total AP3X:** ${lovelaceToAda(totalLovelace)} AP3X`, result, changeAddress,
+              'Use vector_dry_run with this CBOR to simulate it, sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction { txHash }.'),
           }],
         };
       } catch (err) {
@@ -362,13 +352,14 @@ Use vector_dry_run with this CBOR to simulate it, sign it locally with vector_si
       }
       try {
         let cborToEvaluate = txCbor;
-        let feeFromBuild: string | null = null;
+        // Built from outputs here (not given): a failed script evaluation then still leaves a usable fee estimate.
+        let builtHere = false;
 
         if (!cborToEvaluate && outputs && outputs.length > 0) {
           if (!changeAddress) throw new Error('changeAddress is required when building from outputs');
-          const lucid = await lucidForAddress(makeProvider(), changeAddress);
+          const lucid = await lucidForAddress(nodeFor(), changeAddress);
           const built = await buildMultiOutput(lucid, { outputs, metadataJson: metadata });
-          feeFromBuild = built.fee;
+          builtHere = true;
           // Ogmios evaluates scripts against the UNSIGNED transaction -
           // signatures are not required for evaluation.
           cborToEvaluate = built.txCbor;
@@ -377,8 +368,10 @@ Use vector_dry_run with this CBOR to simulate it, sign it locally with vector_si
         if (!cborToEvaluate) {
           throw new Error('Provide either txCbor or outputs to evaluate');
         }
+        // The fee of the evaluated transaction, as its body declares it: the build's estimate, or the fee of the transaction given.
+        const fee = declaredFee(cborToEvaluate);
 
-        const provider = makeProvider();
+        const provider = nodeFor();
 
         let evalResult: VectorDryRunResult;
         try {
@@ -396,7 +389,6 @@ Use vector_dry_run with this CBOR to simulate it, sign it locally with vector_si
             }
           }
 
-          const fee = feeFromBuild || '0';
           evalResult = {
             valid: true,
             fee,
@@ -404,18 +396,18 @@ Use vector_dry_run with this CBOR to simulate it, sign it locally with vector_si
             executionUnits: (totalMemory > 0 || totalCpu > 0) ? { memory: totalMemory, cpu: totalCpu } : undefined,
           };
         } catch (evalErr) {
-          if (feeFromBuild) {
+          if (builtHere) {
             evalResult = {
               valid: true,
-              fee: feeFromBuild,
-              feeAda: lovelaceToAda(feeFromBuild),
+              fee,
+              feeAda: lovelaceToAda(fee),
               error: `Script evaluation unavailable: ${(evalErr as Error).message}. Fee estimate is from transaction building.`,
             };
           } else {
             evalResult = {
               valid: false,
-              fee: '0',
-              feeAda: '0',
+              fee,
+              feeAda: lovelaceToAda(fee),
               error: `Evaluation failed: ${(evalErr as Error).message}`,
             };
           }
@@ -619,25 +611,20 @@ ${txList}
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
       }
       try {
-        const lucid = await lucidForAddress(makeProvider(), changeAddress);
+        const lucid = await lucidForAddress(nodeFor(), changeAddress);
         const result = await buildDeployContract(lucid, { scriptCbor, scriptType, initialDatum, lovelaceAmount });
         return {
           content: [{
             type: "text",
-            text: `# Unsigned Contract Deployment Built
+            text: walletBuildText(`# Unsigned Contract Deployment Built
 
 **Script Address:** ${result.scriptAddress}
 **Script Hash:** ${result.scriptHash}
 **Script Type:** ${result.scriptType}
 **Estimated Fee:** ${result.feeAda} AP3X
-**Tx Hash:** ${result.txHash}
-
-**Unsigned TX CBOR:**
-\`\`\`
-${result.txCbor}
-\`\`\`
-
-Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction { txHash }. Once confirmed, use vector_build_interact_contract to interact with the deployed contract.`,
+**Tx Hash:** ${result.txHash}`, result, changeAddress,
+              'Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction { txHash }. Once confirmed, use vector_build_interact_contract to interact with the deployed contract.',
+              { script_address: result.scriptAddress, script_hash: result.scriptHash, script_type: result.scriptType }),
           }],
         };
       } catch (err) {
@@ -681,7 +668,7 @@ Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, 
         return { content: [{ type: "text", text: `Rate limit exceeded. Retry after ${rateCheck.retryAfterMs}ms.` }] };
       }
       try {
-        const lucid = await lucidForAddress(makeProvider(), changeAddress);
+        const lucid = await lucidForAddress(nodeFor(), changeAddress);
         const result = await buildInteractContract(lucid, {
           scriptCbor, scriptType, action, changeAddress, redeemer, datum, lovelaceAmount, utxoRef, assets,
         });
@@ -689,19 +676,14 @@ Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, 
         return {
           content: [{
             type: "text",
-            text: `# Unsigned Contract Interaction Built
+            text: walletBuildText(`# Unsigned Contract Interaction Built
 
 **Action:** ${result.action} (${actionVerb} the script address)
 **Script Address:** ${result.scriptAddress}
 **Estimated Fee:** ${result.feeAda} AP3X
-**Tx Hash:** ${result.txHash}
-
-**Unsigned TX CBOR:**
-\`\`\`
-${result.txCbor}
-\`\`\`
-
-Sign locally with vector_signer_sign { txCbor }, then broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.`,
+**Tx Hash:** ${result.txHash}`, result, changeAddress,
+              'Sign locally with vector_signer_sign { txCbor }, then broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.',
+              { action: result.action, script_address: result.scriptAddress }),
           }],
         };
       } catch (err) {

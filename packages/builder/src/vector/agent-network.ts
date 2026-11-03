@@ -117,6 +117,11 @@ function canonicalProfile(did: string, answer: GatewayAnswer): string {
   const recordOutput = ledger
     ? `${cell(ledger.txId)}${typeof ledger.outputIndex === 'number' ? `#${ledger.outputIndex}` : ''} (${cell(ledger.confirmations)} confirmations)`
     : '(not given)';
+  // Part 1 Section 8.2: `created` is the block time of the transaction that first minted the identifier. The profile's createdAt is the
+  // record's created_at, which is the end of the validity window of the creating transaction (up to an hour after its block), or the
+  // block time of the mint for a legacy version.
+  const created = cell(str(meta.created));
+  const recordCreatedAt = cell(str(profile.createdAt));
   const md = `# Agent Profile
 
 **DID:** ${did}
@@ -130,7 +135,8 @@ ${capabilities.length ? capabilities.map((c) => `- ${cell(c)}`).join('\n') : '- 
 
 **Framework:** ${cell(str(profile.framework)) || '(not specified)'}
 **Endpoint:** ${cell(str(profile.endpoint), 200) || '(not specified)'}
-**Registered:** ${cell(str(profile.createdAt) || str(meta.created)) || '(not given)'}
+**Registered:** ${created ? `${created} (block time of the transaction that first minted the identifier)` : '(not given)'}
+**Record created_at:** ${recordCreatedAt ? `${recordCreatedAt} (the time that the record stores: the end of the validity window of the transaction that created it, or the block time of the mint for a legacy record)` : '(not given)'}
 
 **Keys:**
 ${keyLines.length ? keyLines.join('\n') : '- (none)'}
@@ -141,6 +147,7 @@ The full resolution result: vector_resolve_did { did }.`;
   return withJson(md, {
     did,
     canonical_id: meta.canonicalId ?? null,
+    created: meta.created ?? null,
     origin: meta.vectorOrigin ?? null,
     version_id: meta.versionId ?? null,
     deactivated,

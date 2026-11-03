@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `vector_dry_run` of a given transaction (`txCbor`) shows the fee that the transaction declares. It showed
+  0 AP3X. A `txCbor` that does not decode as a transaction is refused before the evaluation.
+- `vector_get_agent_profile` of a canonical DID shows as "Registered" the block time of the transaction that first
+  minted the identifier (`created` of the resolution result). It showed the record's `created_at`, which is the end
+  of the validity window of the creating transaction (up to one hour later). The record's `created_at` shows on its
+  own line, and the JSON block adds `created`.
+- `vector_build_send_apex`, `vector_build_send_tokens`, `vector_build_transaction`, `vector_build_deploy_contract`
+  and `vector_build_interact_contract` list the key hashes that must sign (the wallet key, and any key that the
+  transaction names as a required signer) before the unsigned CBOR, and in a JSON block with `tx_hash`, `fee` and
+  `required_signers` (`[{ key_hash, roles }]`), as the identity and marketplace tools do. The ledger refuses a
+  transaction that is submitted without these signatures.
+
 ## 3.0.0 - 2026-11-03
 
 The identity release (PR #26) and the escrow switch (PR #27). The builder adds keyless tools for the `did:vector`

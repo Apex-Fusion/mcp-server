@@ -6,7 +6,7 @@
 // material anywhere in this package) and returns UNSIGNED CBOR. Signing
 // happens on the user's local signer; submission via vector_submit_transaction.
 import {
-  Lucid, fromText, Data, applyDoubleCborEncoding, validatorToAddress,
+  CML, Lucid, fromText, Data, applyDoubleCborEncoding, validatorToAddress,
   validatorToScriptHash, getAddressDetails,
 } from '@lucid-evolution/lucid';
 import type { LucidEvolution, Provider, SpendingValidator, TxSignBuilder } from '@lucid-evolution/lucid';
@@ -45,6 +45,18 @@ export function toBuildResult(completed: TxSignBuilder): VectorUnsignedBuildResu
     fee,
     feeAda: lovelaceToAda(fee),
   };
+}
+
+/**
+ * The fee that a transaction declares in its body, in lovelace: what vector_dry_run reports for a transaction it is given. Throws a
+ * readable error when `txCbor` does not decode as a transaction.
+ */
+export function declaredFee(txCbor: string): string {
+  try {
+    return CML.Transaction.from_cbor_hex(txCbor).body().fee().toString();
+  } catch {
+    throw new Error('txCbor does not decode as a transaction (expected the hex CBOR of a built transaction), so it cannot be evaluated.');
+  }
 }
 
 function requireValidRecipient(address: string): void {
