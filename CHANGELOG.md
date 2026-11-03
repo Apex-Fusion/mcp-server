@@ -45,8 +45,10 @@
 ### Added
 
 - **Advert tools, one per action** (PR #25 merged into the identity layout): `vector_build_marketplace_advert_post`,
-  `_advert_update` and `_advert_retire`. One set of terms rules holds in both layouts: each text field at most 64
-  bytes of UTF-8, no fleet capability id, an https endpoint without whitespace, query or fragment (jobs go to
+  `_advert_update` and `_advert_retire`. One set of terms rules holds in both layouts: `capability_id` and `model` at
+  most 64 bytes of UTF-8, `endpoint_url` and `detail_uri` at most 64 bytes in the legacy layout (its encoder writes
+  each field as one bytestring) and 256 in the identity layout (its encoder splits long bytestrings), no fleet
+  capability id, an https endpoint without whitespace, query or fragment (jobs go to
   `<endpoint_url>/v1/job`), a processing window from 60,001 ms (the shortest a supplier template serves) to 24 h,
   price + both bonds at most 10,000 AP3X, and a `detail_uri` only with the caller's `detail_hash` (the server fetches
   nothing). `vector_build_marketplace_advert_retire` also retires a legacy-layout advert (the supplier template's

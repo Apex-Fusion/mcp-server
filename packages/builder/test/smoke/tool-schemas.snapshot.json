@@ -1833,7 +1833,7 @@
     }
   },
   "vector_build_marketplace_advert_post": {
-    "description": "Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace with an identity-layout advert (Part 2 Section 6.2): the advert names the agent (did:vector) whose record lists the supplier key with the transaction purpose and the capability, and the capability, model, price, bonds, processing window and https endpoint that buyers' jobs go to. It locks a deposit that returns when you retire the advert. The builder checks the listing rule on chain (the record is live, independent and Active, and lists the key and the capability), so the indexer lists the advert. Terms that buyers could not hire or that a supplier template cannot serve are refused: a text field over 64 bytes of UTF-8, a fleet capability id, an endpoint that is not https or that has whitespace, a query or a fragment (jobs go to <endpoint_url>/v1/job), a processing window outside 60,001 ms to 24 h, and price + both bonds above 10,000 AP3X. A detail_uri needs your detail_hash: this server fetches nothing. The supplier key must sign (the listing rule needs its signature). Once the Post confirms, buyers can hire it with vector_build_marketplace_post_escrow; set your supplier runtime's ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names (after a Retire and a new Post, ADVERT_REF must change to the new ref). Takes no key material.",
+    "description": "Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace with an identity-layout advert (Part 2 Section 6.2): the advert names the agent (did:vector) whose record lists the supplier key with the transaction purpose and the capability, and the capability, model, price, bonds, processing window and https endpoint that buyers' jobs go to. It locks a deposit that returns when you retire the advert. The builder checks the listing rule on chain (the record is live, independent and Active, and lists the key and the capability), so the indexer lists the advert. Terms that buyers could not hire or that a supplier template cannot serve are refused: a capability_id or model over 64 bytes of UTF-8, an endpoint_url or detail_uri over 256, a fleet capability id, an endpoint that is not https or that has whitespace, a query or a fragment (jobs go to <endpoint_url>/v1/job), a processing window outside 60,001 ms to 24 h, and price + both bonds above 10,000 AP3X. A detail_uri needs your detail_hash: this server fetches nothing. The supplier key must sign (the listing rule needs its signature). Once the Post confirms, buyers can hire it with vector_build_marketplace_post_escrow; set your supplier runtime's ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names (after a Retire and a new Post, ADVERT_REF must change to the new ref). Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1880,15 +1880,16 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
-        "endpoint_url": {
-          "description": "https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
-          "type": "string",
-          "minLength": 1
-        },
         "detail_hash": {
           "description": "sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used",
           "type": "string",
           "pattern": "^(?:[0-9a-fA-F]{64})?$"
+        },
+        "endpoint_url": {
+          "description": "https URL of your supplier runtime, at most 256 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
         },
         "supplier_bond_lovelace": {
           "description": "Supplier bond in lovelace: a buyer locks price + both bonds per job, and on Accept the supplier receives price + supplier bond",
@@ -1903,8 +1904,9 @@
           "maximum": 9007199254740991
         },
         "detail_uri": {
-          "description": "Optional https URL of your manifest (agent.json), at most 64 bytes (default none); requires detail_hash",
-          "type": "string"
+          "description": "Optional https URL of your manifest (agent.json), at most 256 bytes (default none); requires detail_hash",
+          "type": "string",
+          "maxLength": 256
         },
         "deposit_lovelace": {
           "description": "The AP3X the advert locks, in lovelace (default 2 AP3X, raised to the ledger minimum); it returns on retirement",
@@ -1962,7 +1964,7 @@
     }
   },
   "vector_build_marketplace_advert_update": {
-    "description": "Build an UNSIGNED UpdateAdvert of an identity-layout advert: changes the fields you pass and keeps the others; the supplier key and the agent stay (the contract keeps them), advertised_at moves to now. The new terms follow the rules of a Post: Terms that buyers could not hire or that a supplier template cannot serve are refused: a text field over 64 bytes of UTF-8, a fleet capability id, an endpoint that is not https or that has whitespace, a query or a fragment (jobs go to <endpoint_url>/v1/job), a processing window outside 60,001 ms to 24 h, and price + both bonds above 10,000 AP3X. A detail_uri needs your detail_hash: this server fetches nothing. An advert that stays Active must still pass the listing rule; status Retired takes it off the market but keeps the output (vector_build_marketplace_advert_retire returns the deposit). The supplier key signs. The update writes a new advert output, so once it confirms, set your supplier runtime's ADVERT_REF to the new advert_ref. Takes no key material.",
+    "description": "Build an UNSIGNED UpdateAdvert of an identity-layout advert: changes the fields you pass and keeps the others; the supplier key and the agent stay (the contract keeps them), advertised_at moves to now. The new terms follow the rules of a Post: Terms that buyers could not hire or that a supplier template cannot serve are refused: a capability_id or model over 64 bytes of UTF-8, an endpoint_url or detail_uri over 256, a fleet capability id, an endpoint that is not https or that has whitespace, a query or a fragment (jobs go to <endpoint_url>/v1/job), a processing window outside 60,001 ms to 24 h, and price + both bonds above 10,000 AP3X. A detail_uri needs your detail_hash: this server fetches nothing. An advert that stays Active must still pass the listing rule; status Retired takes it off the market but keeps the output (vector_build_marketplace_advert_retire returns the deposit). The supplier key signs. The update writes a new advert output, so once it confirms, set your supplier runtime's ADVERT_REF to the new advert_ref. Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2015,13 +2017,15 @@
           "maximum": 9007199254740991
         },
         "endpoint_url": {
-          "description": "https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
+          "description": "https URL of your supplier runtime, at most 256 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 256
         },
         "detail_uri": {
-          "description": "The new https URL of your manifest, at most 64 bytes (\"\" for none); a new detail_uri requires its detail_hash",
-          "type": "string"
+          "description": "The new https URL of your manifest, at most 256 bytes (\"\" for none); a new detail_uri requires its detail_hash",
+          "type": "string",
+          "maxLength": 256
         },
         "detail_hash": {
           "description": "sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used",
@@ -2093,15 +2097,15 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
-        "endpoint_url": {
-          "description": "https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
-          "type": "string",
-          "minLength": 1
-        },
         "detail_hash": {
           "description": "sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used",
           "type": "string",
           "pattern": "^(?:[0-9a-fA-F]{64})?$"
+        },
+        "endpoint_url": {
+          "description": "https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
+          "type": "string",
+          "minLength": 1
         },
         "supplier_bond_lovelace": {
           "description": "Supplier bond in lovelace (default 1000000). A buyer locks price + both bonds per job; on Accept the supplier receives price + supplier bond. It is also the advert's deposit, raised to 2 units",

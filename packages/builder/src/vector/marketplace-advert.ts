@@ -56,7 +56,7 @@ export interface PostAdvertPlan {
 export function planPostAdvert(terms: AdvertTerms, supplierPkh: string, nowMs: number): PostAdvertPlan {
   if (!KEY_HASH_HEX.test(supplierPkh)) throw new Error('The supplier key hash must be 56 lower-case hex characters.');
   if (!Number.isSafeInteger(nowMs) || nowMs <= 0) throw new Error('nowMs must be a whole number of POSIX milliseconds');
-  const t = checkAdvertTerms(terms);
+  const t = checkAdvertTerms(terms, 'legacy');
   const datum: AdvertDatum = {
     supplier_pkh: supplierPkh, capability_id: t.capabilityId, model: t.model,
     max_output_tokens: t.maxOutputTokens, max_processing_ms: t.maxProcessingMs,

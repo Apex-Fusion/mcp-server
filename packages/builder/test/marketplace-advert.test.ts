@@ -107,6 +107,14 @@ describe('planPostAdvert', () => {
       refuses({ detailUri: `https://h.example/${'p'.repeat(50)}` }, /detail_uri is 68 bytes/);
       assert.doesNotThrow(() => planPostAdvert({ ...TERMS, capabilityId: 'a'.repeat(64) }, SUPPLIER, NOW), 'exactly 64 is fine');
     });
+    test('endpoint_url and detail_uri hold 64 bytes in the legacy layout (its encoder writes each field as one bytestring): 64 is written, 65 refused', () => {
+      const url = (bytes: number) => `https://h.example/${'p'.repeat(bytes - 18)}`;
+      assert.equal(Buffer.byteLength(url(64)), 64);
+      assert.equal(planPostAdvert({ ...TERMS, endpointUrl: url(64) }, SUPPLIER, NOW).datum.endpoint_url, url(64));
+      refuses({ endpointUrl: url(65) }, /endpoint_url is 65 bytes as UTF-8; an advert field holds at most 64 \(the marketplace writes each field as one bytestring/);
+      assert.equal(planPostAdvert({ ...TERMS, detailUri: url(64) }, SUPPLIER, NOW).datum.detail_uri, url(64));
+      refuses({ detailUri: url(65) }, /detail_uri is 65 bytes as UTF-8; an advert field holds at most 64/);
+    });
     test('text UTF-8 does not carry unchanged, control characters and line breaks', () => {
       refuses({ model: 'a\ud800b' }, /model is not text that UTF-8 carries unchanged/);
       refuses({ model: '\ufeffmodel' }, /model is not text that UTF-8 carries unchanged/);

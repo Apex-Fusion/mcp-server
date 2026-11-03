@@ -54,19 +54,30 @@ export interface AdvertTerms {
 }
 
 /**
- * A text field of an advert: what the marketplace's encoder writes is its UTF-8 bytes as one bytestring, so it must be text that
- * survives that round trip (an unpaired surrogate or a leading byte-order mark does not) and fit the 64 bytes a datum bytestring holds.
- * The identity layout keeps the same limit, so that the terms of an advert hold in both layouts. No control characters: every tool
- * shows these fields on one line.
+ * The most bytes of UTF-8 that endpoint_url and detail_uri hold in an identity-layout advert (did:vector Part 1 Section 5 allows an
+ * endpoint of 256 bytes). The identity layout's encoder (Plutus Data, as Aiken writes it) splits a longer bytestring into 64-byte
+ * chunks, so the legacy limit of DATUM_BYTES_MAX does not hold there; capability_id and model keep it in both layouts.
  */
-function textField(name: string, value: unknown, required: boolean): string {
+export const IDENTITY_URL_BYTES_MAX = 256;
+
+/**
+ * A text field of an advert: what the marketplace's encoder writes is its UTF-8 bytes as one bytestring, so it must be text that
+ * survives that round trip (an unpaired surrogate or a leading byte-order mark does not) and fit `maxBytes`. The legacy encoder writes
+ * each field as one bytestring, so in the legacy layout every field holds at most the 64 bytes a datum bytestring holds. No control
+ * characters: every tool shows these fields on one line.
+ */
+function textField(name: string, value: unknown, required: boolean, maxBytes: number = DATUM_BYTES_MAX): string {
   if (typeof value !== 'string') throw new Error(`${name} must be text.`);
   if (required && value.length === 0) throw new Error(`${name} must not be empty.`);
   if (/[\u0000-\u001f\u007f\u2028\u2029]/.test(value)) throw new Error(`${name} must not contain control characters or line breaks.`);
   const hex = fromText(value);
   if (toText(hex) !== value) throw new Error(`${name} is not text that UTF-8 carries unchanged (an unpaired surrogate, or a leading byte-order mark).`);
   const bytes = hex.length / 2;
-  if (bytes > DATUM_BYTES_MAX) throw new Error(`${name} is ${bytes} bytes as UTF-8; an advert field holds at most ${DATUM_BYTES_MAX} (the marketplace writes each field as one bytestring, and the ledger refuses a longer one in a datum).`);
+  if (bytes > maxBytes) {
+    throw new Error(maxBytes === DATUM_BYTES_MAX
+      ? `${name} is ${bytes} bytes as UTF-8; an advert field holds at most ${DATUM_BYTES_MAX} (the marketplace writes each field as one bytestring, and the ledger refuses a longer one in a datum).`
+      : `${name} is ${bytes} bytes as UTF-8; an identity-layout advert holds at most ${maxBytes} in it.`);
+  }
   return value;
 }
 
@@ -97,19 +108,21 @@ function lovelace(name: string, value: unknown): bigint {
 }
 
 /**
- * Pure. The terms of an advert in either layout, checked: throws a readable Error for terms that must not be posted. The advert would
- * be refused by the ledger (a field over 64 bytes), could never be hired through vector_build_marketplace_post_escrow (a fleet
- * capability id, an endpoint that is not https or that a job URL would not survive, a processing window over 24 h, price + both bonds
- * above the value cap F-29), or no supplier template could serve it (a processing window under MIN_PROCESSING_MS_FLOOR). Returns the
- * terms with the detail hash in lower case.
+ * Pure. The terms of an advert in `layout`, checked: throws a readable Error for terms that must not be posted. The advert would be
+ * refused by the ledger (a legacy-layout field over 64 bytes), could never be hired through vector_build_marketplace_post_escrow (a
+ * fleet capability id, an endpoint that is not https or that a job URL would not survive, a processing window over 24 h, price + both
+ * bonds above the value cap F-29), or no supplier template could serve it (a processing window under MIN_PROCESSING_MS_FLOOR).
+ * capability_id and model hold at most 64 bytes in both layouts; endpoint_url and detail_uri hold 64 in the legacy layout and
+ * IDENTITY_URL_BYTES_MAX in the identity layout. Returns the terms with the detail hash in lower case.
  */
-export function checkAdvertTerms(t: AdvertTerms): AdvertTerms {
+export function checkAdvertTerms(t: AdvertTerms, layout: AdvertLayout): AdvertTerms {
+  const urlBytes = layout === 'legacy' ? DATUM_BYTES_MAX : IDENTITY_URL_BYTES_MAX;
   const capabilityId = textField('capability_id', t.capabilityId, true);
   // vector_build_marketplace_post_escrow refuses fleet capabilities: their suppliers check another hash of the request than the one a
   // Post commits, so vector_marketplace_send_job could never deliver the job. An advert in those namespaces could not be hired here.
   if (isFleetCapability(capabilityId)) throw new Error(`capability_id ${cell(capabilityId)} is in a fleet namespace (llm.text.generate.*, llm.chat.*, ocr.page.extract.* or audio.synthesize.*), which these tools do not hire; name the capability outside those namespaces (for example research.summary.v1).`);
   const model = textField('model', t.model, true);
-  const endpointUrl = textField('endpoint_url', t.endpointUrl, true);
+  const endpointUrl = textField('endpoint_url', t.endpointUrl, true, urlBytes);
   // A job goes to `<endpoint_url>/v1/job` (the template route appends the path to the text, trimming only trailing slashes), so anything
   // that keeps the result from being that path is refused: whitespace (the URL parser drops a trailing space, the route does not), a query
   // or a fragment (the path would land inside it).
@@ -117,7 +130,7 @@ export function checkAdvertTerms(t: AdvertTerms): AdvertTerms {
   if (endpointUrl.includes('?')) throw new Error('endpoint_url must not contain a query (?): jobs are sent to <endpoint_url>/v1/job, and the path would land inside the query.');
   if (endpointUrl.includes('#')) throw new Error('endpoint_url must not contain a fragment (#): jobs are sent to <endpoint_url>/v1/job, and the path would land inside the fragment.');
   callableUrl('endpoint_url', endpointUrl);
-  const detailUri = textField('detail_uri', t.detailUri, false);
+  const detailUri = textField('detail_uri', t.detailUri, false, urlBytes);
   if (detailUri !== '') callableUrl('detail_uri', detailUri);
   if (typeof t.detailHash !== 'string' || !HASH_HEX.test(t.detailHash)) throw new Error('detail_hash must be 64 hex characters (the sha256 of the bytes detail_uri serves).');
   const maxOutputTokens = wholeNumber('max_output_tokens', t.maxOutputTokens, Number.MAX_SAFE_INTEGER);
@@ -286,7 +299,7 @@ export interface AdvertUpdateParams extends BuildCommon {
 export async function buildAdvertPost(ctx: IdentityContext, p: AdvertPostParams): Promise<AdvertBuild> {
   const { lucid, provider, deployment } = ctx;
   const { detailHash } = detailHashFor(p.terms.detailUri, p.terms.detailHash);
-  const terms = checkAdvertTerms({ ...p.terms, detailHash });
+  const terms = checkAdvertTerms({ ...p.terms, detailHash }, 'identity');
   await chainClock(provider);
   const window = windowAt(p.nowMs ?? Date.now(), p.validMinutes);
   const walletKeyHash = paymentKeyHashOf(p.changeAddress);
@@ -324,7 +337,7 @@ export async function buildAdvertUpdate(ctx: IdentityContext, p: AdvertUpdatePar
   const window = windowAt(p.nowMs ?? Date.now(), p.validMinutes);
   const wallet = await walletOf(lucid, p.changeAddress);
   const { utxo, advert: old, ref } = await readAdvertUtxo(ctx, p.advertRef);
-  const terms = checkAdvertTerms({ ...advertTermsOf(old), ...Object.fromEntries(Object.entries(termChanges).filter(([, v]) => v !== undefined)) });
+  const terms = checkAdvertTerms({ ...advertTermsOf(old), ...Object.fromEntries(Object.entries(termChanges).filter(([, v]) => v !== undefined)) }, 'identity');
   const advertisedAt = Math.max(old.advertised_at, advertisedAtOf(window));
   const advert = advertDatumOf(terms, { supplierPkh: old.supplier_pkh, agentId: old.agent_id, advertisedAt, status: status ?? old.status });
   if (advert.status === 'Active') await checkListingRule(provider, deployment, advert, ref, window);

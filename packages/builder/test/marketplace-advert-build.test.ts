@@ -62,7 +62,7 @@ describe('vector advert post (identity layout)', () => {
       [{ endpointUrl: 'https://agent.example#a' }, /endpoint_url must not contain a fragment \(#\)/],
       [{ endpointUrl: 'https://u:p@agent.example' }, /endpoint_url must not carry credentials/],
       [{ endpointUrl: 'https://10.1.2.3' }, /endpoint_url points at a private or reserved address/],
-      [{ endpointUrl: `https://agent.example/${'a'.repeat(43)}` }, /endpoint_url is 65 bytes as UTF-8; an advert field holds at most 64/],
+      [{ capabilityId: `demo.${'c'.repeat(60)}` }, /capability_id is 65 bytes as UTF-8; an advert field holds at most 64/],
       [{ detailUri: 'http://agent.example/agent.json', detailHash: 'ab'.repeat(32) }, /detail_uri must be an https URL/],
       [{ model: 'echo\nv1' }, /model must not contain control characters or line breaks/],
       [{ capabilityId: 'llm.chat.v1' }, /capability_id llm\.chat\.v1 is in a fleet namespace/],
@@ -73,6 +73,16 @@ describe('vector advert post (identity layout)', () => {
     for (const [over, why] of refused) await assert.rejects(post([agentRecord()], over), why, JSON.stringify(over, (_, v) => (typeof v === 'bigint' ? v.toString() : v)));
     assert.equal(datumOf((await post([agentRecord()], { maxProcessingMs: MIN_PROCESSING_MS_FLOOR })).txCbor).max_processing_ms, 60_001, 'the floor itself');
     assert.equal(datumOf((await post([agentRecord()], { priceLovelace: 9_998_000_000n })).txCbor).price_lovelace, 9_998_000_000n, 'the cap itself');
+  });
+  test('endpoint_url and detail_uri hold 256 bytes in the identity layout (its encoder splits longer bytestrings): 256 is written, 257 refused', async () => {
+    const url = (bytes: number) => `https://agent.example/${'a'.repeat(bytes - 22)}`;
+    assert.equal(Buffer.byteLength(url(256)), 256);
+    const endpoint = datumOf((await post([agentRecord()], { endpointUrl: url(256) })).txCbor);
+    assert.equal(endpoint.endpoint_url, url(256), 'the 256-byte endpoint is in the datum, read back whole');
+    await assert.rejects(post([agentRecord()], { endpointUrl: url(257) }), /endpoint_url is 257 bytes as UTF-8; an identity-layout advert holds at most 256 in it/);
+    const detail = datumOf((await post([agentRecord()], { detailUri: url(256), detailHash: 'ab'.repeat(32) })).txCbor);
+    assert.equal(detail.detail_uri, url(256));
+    await assert.rejects(post([agentRecord()], { detailUri: url(257), detailHash: 'ab'.repeat(32) }), /detail_uri is 257 bytes as UTF-8; an identity-layout advert holds at most 256 in it/);
   });
   test('a detail_uri needs its detail_hash ("" counts as not given); without one the hash is that of no bytes; nothing is fetched', async () => {
     for (const detailHash of [undefined, '']) {

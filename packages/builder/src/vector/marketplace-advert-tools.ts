@@ -13,7 +13,7 @@ import { withJson } from './marketplace-indexer.js';
 import type { AdvertLayout } from './marketplace-indexer.js';
 import type { AdvertDatum } from './marketplace-datum.js';
 import { buildPostAdvert, buildRetireAdvert } from './marketplace-advert.js';
-import { advertLayoutAt, buildAdvertPost, buildAdvertUpdate, buildAdvertRetire } from './marketplace-advert-build.js';
+import { advertLayoutAt, buildAdvertPost, buildAdvertUpdate, buildAdvertRetire, IDENTITY_URL_BYTES_MAX } from './marketplace-advert-build.js';
 import type { DetailHashSource } from './marketplace-advert-build.js';
 import { identityOnly } from './marketplace-build-tools.js';
 import type { MaybeDeploymentFor } from './marketplace-build-tools.js';
@@ -27,9 +27,13 @@ const HASH_SOURCE: Record<DetailHashSource, string> = {
   given: 'as given',
   empty: 'the sha256 of no bytes (no detail URI)',
 };
-const TEXT_LIMITS = 'capability_id, model, endpoint_url and detail_uri each hold at most 64 bytes of UTF-8; endpoint_url and detail_uri must be https URLs, and endpoint_url has no whitespace, query or fragment';
-/** The terms rules of both layouts (checkAdvertTerms), as the tool descriptions state them. */
-const TERMS_RULES = 'Terms that buyers could not hire or that a supplier template cannot serve are refused: a text field over 64 bytes of UTF-8, a fleet capability id, an endpoint that is not https or that has whitespace, a query or a fragment (jobs go to <endpoint_url>/v1/job), a processing window outside 60,001 ms to 24 h, and price + both bonds above 10,000 AP3X. A detail_uri needs your detail_hash: this server fetches nothing.';
+const URL_RULES = 'endpoint_url and detail_uri must be https URLs, and endpoint_url has no whitespace, query or fragment';
+const TEXT_LIMITS = `capability_id, model, endpoint_url and detail_uri each hold at most 64 bytes of UTF-8; ${URL_RULES}`;
+const IDENTITY_TEXT_LIMITS = `capability_id and model hold at most 64 bytes of UTF-8 each, endpoint_url and detail_uri at most ${IDENTITY_URL_BYTES_MAX}; ${URL_RULES}`;
+/** The terms rules (checkAdvertTerms) as the tool descriptions state them, after the field sizes of the layout. */
+const RULES_TAIL = 'a fleet capability id, an endpoint that is not https or that has whitespace, a query or a fragment (jobs go to <endpoint_url>/v1/job), a processing window outside 60,001 ms to 24 h, and price + both bonds above 10,000 AP3X. A detail_uri needs your detail_hash: this server fetches nothing.';
+const LEGACY_TERMS_RULES = `Terms that buyers could not hire or that a supplier template cannot serve are refused: a text field over 64 bytes of UTF-8, ${RULES_TAIL}`;
+const TERMS_RULES = `Terms that buyers could not hire or that a supplier template cannot serve are refused: a capability_id or model over 64 bytes of UTF-8, an endpoint_url or detail_uri over ${IDENTITY_URL_BYTES_MAX}, ${RULES_TAIL}`;
 /** The supplier template serves only the advert its ADVERT_REF names (agent/src/routes/custom.ts), so every new advert needs it set. */
 const ADVERT_REF_COPY = 'set your supplier runtime\'s ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names (after a Retire and a new Post, ADVERT_REF must change to the new ref).';
 const RETIRED_COPY = 'after this confirms, the supplier runtime\'s ADVERT_REF names a consumed advert; to list the supplier again, post a new advert with vector_build_marketplace_advert_post and set ADVERT_REF to the new advert_ref.';
@@ -42,14 +46,16 @@ const termFields = {
   max_output_tokens: z.number().int().min(0).describe("Largest output the supplier commits to, in tokens (0 if not token-based)"),
   max_processing_ms: z.number().int().min(MIN_PROCESSING_MS_FLOOR).max(MAX_PROCESSING_MS_CEILING).describe("Processing window in milliseconds, from 60001 to 86400000 (24 h): how long the supplier has to submit a job. A vector-agent-template supplier needs at least its SERVICE_TIMEOUT_MS + 60000 (180000 with the default)"),
   price_lovelace: z.number().int().min(0).describe("Price per job in lovelace (1 AP3X = 1000000); price + both bonds is at most 10,000 AP3X"),
-  endpoint_url: z.string().min(1).describe("https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)"),
   detail_hash: z.string().regex(/^(?:[0-9a-fA-F]{64})?$/, 'expected 64 hex characters, or ""').optional().describe("sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used"),
 };
+const ENDPOINT_RULES = 'without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)';
+const legacyEndpoint = z.string().min(1).describe(`https URL of your supplier runtime, at most 64 bytes, ${ENDPOINT_RULES}`);
+const identityEndpoint = z.string().min(1).max(IDENTITY_URL_BYTES_MAX).describe(`https URL of your supplier runtime, at most ${IDENTITY_URL_BYTES_MAX} bytes, ${ENDPOINT_RULES}`);
 
 const ADVERT_TIPS = [
   'The agent record must list the supplier key with the transaction purpose and the capability (vector_build_identity_update), be independent (no parent) and be Active',
   'The supplier key must sign: pass the transaction to its holder after the wallet (vector_signer_sign)',
-  TEXT_LIMITS,
+  IDENTITY_TEXT_LIMITS,
   'The wallet needs the deposit plus about 1 AP3X for the fee; an update also needs one pure output of at least 5 AP3X as collateral',
 ];
 
@@ -102,9 +108,10 @@ export function registerMarketplaceAdvertTools(server: McpServer, checkRateLimit
       supplier_key_hash: zKeyHash("The supplier key that claims and submits the jobs (default your wallet's key)").optional(),
       capability_id: z.string().min(1).describe(`${CAPABILITY_ID}; the agent's record must list it`),
       ...termFields,
+      endpoint_url: identityEndpoint,
       supplier_bond_lovelace: z.number().int().min(0).describe("Supplier bond in lovelace: a buyer locks price + both bonds per job, and on Accept the supplier receives price + supplier bond"),
       buyer_bond_lovelace: z.number().int().min(0).describe("Buyer bond in lovelace; it returns to the buyer on Accept"),
-      detail_uri: z.string().optional().describe("Optional https URL of your manifest (agent.json), at most 64 bytes (default none); requires detail_hash"),
+      detail_uri: z.string().max(IDENTITY_URL_BYTES_MAX).optional().describe(`Optional https URL of your manifest (agent.json), at most ${IDENTITY_URL_BYTES_MAX} bytes (default none); requires detail_hash`),
       deposit_lovelace: z.number().int().min(0).optional().describe("The AP3X the advert locks, in lovelace (default 2 AP3X, raised to the ledger minimum); it returns on retirement"),
       valid_minutes: zValidMinutes,
     },
@@ -140,8 +147,8 @@ export function registerMarketplaceAdvertTools(server: McpServer, checkRateLimit
       max_processing_ms: termFields.max_processing_ms.optional(), price_lovelace: termFields.price_lovelace.optional(),
       supplier_bond_lovelace: z.number().int().min(0).optional().describe("Supplier bond in lovelace"),
       buyer_bond_lovelace: z.number().int().min(0).optional().describe("Buyer bond in lovelace"),
-      endpoint_url: termFields.endpoint_url.optional(),
-      detail_uri: z.string().optional().describe("The new https URL of your manifest, at most 64 bytes (\"\" for none); a new detail_uri requires its detail_hash"),
+      endpoint_url: identityEndpoint.optional(),
+      detail_uri: z.string().max(IDENTITY_URL_BYTES_MAX).optional().describe(`The new https URL of your manifest, at most ${IDENTITY_URL_BYTES_MAX} bytes ("" for none); a new detail_uri requires its detail_hash`),
       detail_hash: termFields.detail_hash,
       status: z.enum(['Active', 'Retired']).optional().describe('The new status (default unchanged)'),
       deposit_lovelace: z.number().int().min(0).optional().describe("The AP3X of the new advert output, in lovelace (default what the advert holds, raised to the ledger minimum)"),
@@ -203,11 +210,12 @@ export function registerMarketplaceAdvertTools(server: McpServer, checkRateLimit
 
   server.tool(
     "vector_build_marketplace_post_advert",
-    "Legacy layout, until the switch date. Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace with a legacy-layout advert, which names no agent DID (for the identity layout use vector_build_marketplace_advert_post): posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert with vector_build_marketplace_advert_retire. " + TERMS_RULES + " Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key; once the Post confirms, " + ADVERT_REF_COPY + " The transaction is valid for 5 minutes. " + SIGN_COPY,
+    "Legacy layout, until the switch date. Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace with a legacy-layout advert, which names no agent DID (for the identity layout use vector_build_marketplace_advert_post): posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert with vector_build_marketplace_advert_retire. " + LEGACY_TERMS_RULES + " Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key; once the Post confirms, " + ADVERT_REF_COPY + " The transaction is valid for 5 minutes. " + SIGN_COPY,
     {
       changeAddress: z.string().describe("Your supplier wallet address: its key becomes the advert's supplier key, the only key that can retire the advert. Get it from vector_signer_get_address."),
       capability_id: z.string().min(1).describe(CAPABILITY_ID),
       ...termFields,
+      endpoint_url: legacyEndpoint,
       supplier_bond_lovelace: z.number().int().min(0).default(1_000_000).describe("Supplier bond in lovelace (default 1000000). A buyer locks price + both bonds per job; on Accept the supplier receives price + supplier bond. It is also the advert's deposit, raised to 2 units"),
       buyer_bond_lovelace: z.number().int().min(0).default(1_000_000).describe("Buyer bond in lovelace (default 1000000); it returns to the buyer on Accept"),
       detail_uri: z.string().default('').describe("Optional https URL of your manifest (agent.json), at most 64 bytes; requires detail_hash"),
