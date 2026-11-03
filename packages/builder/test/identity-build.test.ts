@@ -35,7 +35,7 @@ const GUARDIAN_B_PARTY = keyParty(GUARDIAN_B, 'Guardian', 4);
 const M1_ACCOUNTABLE: Party = { role: 'Accountable', signer: { type: 'Script', hash: M1 }, organisation: null, notBefore: NOW - 30 * DAY, notAfter: null, rights: 3, removalAfter: null };
 const RETIRED: IdentityDatum = tombstone(rootRecord(), { type: 'Retired', at: NOW - DAY, successor: null });
 
-async function on(records: UTxO[], opts: { rewards?: bigint } = {}): Promise<IdentityContext> {
+async function on(records: UTxO[], opts: { rewards?: bigint | null } = {}): Promise<IdentityContext> {
   const provider = identityWorld(records, opts);
   return { lucid: await lucidOn(provider), provider, deployment: DEPLOYMENT };
 }
@@ -149,6 +149,18 @@ describe('buildUpdate (Part 2 Section 3.6)', () => {
     assert.deepEqual(b.withdrawals, [[module1RewardAddress(M1), 1_234_567n]]);
     assert.ok(b.refs.includes(refOf(CONFIG_UTXO)) && b.refs.includes(refOf(REF_UTXOS[6])));
     assert.deepEqual(b.signers, new Set([CONTROLLER.keyHash]));
+  });
+
+  test('Module-1\'s consent reads its reward account with no default: an account that is not registered, or that cannot be read, is refused', async () => {
+    const appoint = { ...common, addParties: [{ role: 'Responsible' as const, signer: { type: 'Script' as const, hash: M1 }, organisation: null, notAfter: null, rights: 1, removalAfter: null }] };
+    await assert.rejects(buildUpdate(await on([recordUtxo(ID, rootRecord())], { rewards: null }), appoint),
+      new RegExp(`Module-1's stake credential \\(${module1RewardAddress(M1)}\\) is not registered on the ledger, so the withdrawal by which Module-1 consents cannot be built`));
+    const unreadable = await on([recordUtxo(ID, rootRecord())]);
+    Object.assign(unreadable.provider, { getRewardAccount: async () => { throw new Error('Koios request failed (account_info): 503 Service Unavailable'); } });
+    await assert.rejects(buildUpdate(unreadable, appoint), /Could not read the reward account of Module-1's stake credential \(stake[0-9a-z]+\), which its consent must withdraw in full: Koios request failed \(account_info\): 503/);
+    const noReader = await on([recordUtxo(ID, rootRecord())]);
+    Object.assign(noReader.provider, { getRewardAccount: undefined });
+    await assert.rejects(buildUpdate(noReader, appoint), /node provider cannot read a reward account/);
   });
 
   test('the deposit changes the AP3X of the record, not below 10 AP3X', async () => {

@@ -44,20 +44,25 @@
 
 ### Added
 
-- `vector_build_marketplace_post_advert` and `vector_build_marketplace_retire_advert`: the supplier side of the agents
-  marketplace, keyless. The advert datum is byte-identical to the supplier template's (pinned against the service
-  agents' live adverts); the Post refuses what the ledger would refuse (a text field over 64 bytes), what
-  `vector_build_marketplace_post_escrow` would not hire (a processing window over 24 h, a non-https endpoint or one
-  with whitespace, a query or a fragment, a fleet capability id) and what a supplier template cannot serve (a
-  processing window under 60,001 ms). A `detail_uri` needs the caller's `detail_hash`: the server fetches nothing.
-  The Retire is evaluated against the deployed advert validator in the unit tests.
+- **Advert tools, one per action** (PR #25 merged into the identity layout): `vector_build_marketplace_advert_post`,
+  `_advert_update` and `_advert_retire`. One set of terms rules holds in both layouts: each text field at most 64
+  bytes of UTF-8, no fleet capability id, an https endpoint without whitespace, query or fragment (jobs go to
+  `<endpoint_url>/v1/job`), a processing window from 60,001 ms (the shortest a supplier template serves) to 24 h,
+  price + both bonds at most 10,000 AP3X, and a `detail_uri` only with the caller's `detail_hash` (the server fetches
+  nothing). `vector_build_marketplace_advert_retire` also retires a legacy-layout advert (the supplier template's
+  Retire, evaluated against the deployed advert validator in the unit tests), so suppliers retire their legacy
+  adverts during the switch; `vector_build_marketplace_retire_advert` of PR #25 is gone.
+- `vector_build_marketplace_post_advert`: legacy layout, until the switch date. It posts a legacy-layout advert
+  byte-identical to the supplier template's (pinned against the service agents' live adverts), with the same terms
+  rules.
 - `vector_build_reputation_stake_open` and `vector_build_reputation_stake`: an agent's Module-3 reputation
   self-stake in two keyless steps, ported from the reference Python SDK (`Apex-Fusion/vector-agent-modules`,
-  `Module-3/python/reputation_staking`). The stake is the module's minimum read from its parameters on the ledger, the
-  staked capabilities must be listed in the agent's registry record, and the stake time comes from the node's chain
-  start, which must be Vector mainnet's. Mainnet only. The unit tests rebuild two stakes the SDK made on mainnet and
-  have the deployed reputation validator evaluate them offline. **Held:** not for use on mainnet until the deployed
-  Module-3 module is fixed and redeployed (the README's Reputation section says why).
+  `Module-3/python/reputation_staking`). The current Module-3 deployment takes no new stakes. New stakes use the new
+  Module-3 deployment, which is published after the identity release. Until then both tools refuse before they read
+  anything; the builders stay, and the unit tests run them against the deployed reputation validator offline.
+- Module-1's consent withdrawal reads the reward balance with no default: Ogmios's reward account summary, else
+  Koios `account_info` (Vector's Ogmios has no summary for a registered stake credential that is not delegated). A
+  stake credential that is not registered, or a read that fails, is refused; the balance is never taken as 0.
 - **Identity registry build tools** (`did:vector`, Part 2 Sections 3 and 10), keyless: `vector_build_identity_register`
   (also subagents), `_adopt`, `_update`, `_change_controller`, `_suspend`, `_unsuspend`, `_revoke`, `_retire`,
   `_reclaim`, `_set_successor`, `_recovery_start`, `_recovery_cancel`, `_recovery_complete`, `_end_subagents`.
@@ -90,7 +95,7 @@
 - Signer: optional `VECTOR_SIGNER_OGMIOS_URL`. With it, the signer reads the outputs that a transaction spends
   (one read-only `queryLedgerState/utxo` query, output references only) and counts only the value that its
   own inputs fund. Without it, or when the lookup fails, it uses the previous rule and says so in the result.
-- 64 tools in all (was 33).
+- 63 tools in all (was 33).
 
 ### Changed
 

@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks. The 64 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
+Hosted instances run on both networks. The 63 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
 
 | Network | Endpoint |
 |---------|----------|
@@ -99,12 +99,12 @@ limitations.
 - **Agent identity** - resolve `did:vector` DIDs through the identity gateway, read an agent's profile by DID (canonical or legacy form), and discover agents with listed adverts through the marketplace indexer
 - **Identity registry** (`did:vector`) - keyless builders for every record action (register, also subagents; adopt a legacy record; update; change controller; suspend and unsuspend; revoke; retire; reclaim; successor; recovery; end subagents), attestations, delegations and vaults; every build returns the unsigned transaction and the key hashes that must sign it, and each key holder signs in turn. The legacy registry writes (register, update, transfer) are retired; a legacy record that does not adopt can still deregister
 - **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals on the Module-6 deployment of the identity registry (the agent is a `did:vector` agent whose record is Active); every write tool is keyless
-- **Agents marketplace, both sides** - hire a supplier (escrow post, accept, reclaim, send a job, check its receipt) and list one (advert post and retire), keyless
-- **Reputation self-stake** - lock an agent's Module-3 self-stake behind the capabilities its registry record lists (keyless, two steps, mainnet; held until the deployed module is fixed, see [Reputation](#reputation-2))
+- **Agents marketplace, both sides** - hire a supplier (escrow post, accept, reclaim, send a job, check its receipt) and list one (advert post, update and retire in the identity layout; one retire for both layouts; a legacy-layout Post until the switch date), keyless
+- **Reputation self-stake** - the current Module-3 deployment takes no new stakes, so the two stake tools refuse (see [Reputation](#reputation-2))
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
 - **Streamable HTTP transport** - the modern MCP transport at `/mcp`, with any-origin CORS for browser clients and an unauthenticated `GET /health` probe (the legacy SSE pair was removed in 2.0.0)
 
-## MCP Tools (64)
+## MCP Tools (63)
 
 ### Wallet & Queries
 
@@ -189,7 +189,7 @@ Every tool below is keyless: it builds an unsigned transaction and lists every k
 | `vector_build_self_improvement_endorse` | Build an unsigned endorsement lock by staking AP3X (step 1 of 2, keyless). The endorsement names the proposal by its seed |
 | `vector_build_self_improvement_endorse_spend` | Build an unsigned endorsement creation (step 2 of 2, keyless): spends the lock and mints the endorsement token (`gend_`) |
 
-### Marketplace (16)
+### Marketplace (15)
 
 | Tool | Description |
 |------|-------------|
@@ -201,14 +201,13 @@ Every tool below is keyless: it builds an unsigned transaction and lists every k
 | `vector_build_marketplace_reclaim` | Build an unsigned reclaim of an Open or Claimed escrow once deliver_by has passed: everything returns to the buyer (an identity escrow with a refund address can be reclaimed by anybody) (keyless) |
 | `vector_build_marketplace_release` | Build an unsigned release of a Submitted escrow by its supplier once the accept window has passed (both layouts, keyless) |
 | `vector_build_marketplace_refund_revoked` | Build an unsigned full refund of an identity escrow whose agent is revoked or retired (anybody, keyless) |
-| `vector_build_marketplace_advert_post` | Build an unsigned advert in the identity layout for an agent whose record lists the supplier key and the capability (the supplier key signs, keyless) |
-| `vector_build_marketplace_advert_update` | Build an unsigned update of an identity-layout advert (it keeps its agent; the supplier signs, keyless) |
-| `vector_build_marketplace_advert_retire` | Build an unsigned retirement of an identity-layout advert (the supplier signs, keyless) |
+| `vector_build_marketplace_advert_post` | Build an unsigned advert in the identity layout for an agent whose record lists the supplier key and the capability (the supplier key signs). The terms rules of both layouts apply: each text field at most 64 bytes of UTF-8, no fleet capability id, an https endpoint without whitespace, query or fragment (jobs go to `<endpoint_url>/v1/job`), a processing window from 60,001 ms to 24 h, price + both bonds at most 10,000 AP3X, and a `detail_uri` only with its `detail_hash` (the server fetches nothing). Once it confirms, set the supplier runtime's `ADVERT_REF` to the new advert ref (keyless) |
+| `vector_build_marketplace_advert_update` | Build an unsigned update of an identity-layout advert (it keeps its agent; the new terms follow the rules of a post; the supplier signs; the advert ref changes, so `ADVERT_REF` changes too) (keyless) |
+| `vector_build_marketplace_advert_retire` | Build an unsigned retirement of an advert in either layout, so that suppliers retire their legacy adverts during the switch: only the supplier key retires, and the deposit returns to it. A legacy advert needs the supplier key's wallet as `changeAddress` and is valid for 5 minutes. Retire when no job is in flight (keyless) |
 | `vector_marketplace_send_job` | Send your payload to the supplier of a posted escrow and get a job id. Template-contract suppliers only; the wallet must have posted and funded the escrow; the whole call, its checks included, waits up to 90 s for the supplier to answer (nothing is sent if the checks leave it less than the 60 s a supplier may need) |
 | `vector_marketplace_get_job` | Poll a job: pending, failed, or done with the result and the supplier's signed receipt. Template-contract suppliers only; works after the escrow is accepted or released; waits up to 20 s |
 | `vector_marketplace_verify_receipt` | Check a receipt without trusting the supplier: the escrow, the result's hash, the supplier's key, the Ed25519 signature and the hash the supplier committed on chain, plus an extra row for the request the receipt was made for. Works before and after the Accept: a settled escrow's Submitted output is located through the marketplace indexer and proven by the spend chain (read-only; the supplier's key is read from its `/capability` unless you pass it) |
-| `vector_build_marketplace_post_advert` | Build an unsigned advert Post that lists your supplier agent: the key of `changeAddress` becomes the supplier key, and the advert names the capability, model, price, bonds, processing window (from 60,001 ms, the shortest a supplier template can serve, 180,000 ms with its default `SERVICE_TIMEOUT_MS`, to 24 h, the longest `vector_build_marketplace_post_escrow` will hire), https endpoint (no whitespace, query or fragment, since jobs go to `<endpoint_url>/v1/job`) and manifest. Locks a deposit (the supplier bond, at least 2 AP3X, raised to the ledger minimum for the datum) that returns on Retire. A `detail_uri` needs the caller's `detail_hash` (the server does not fetch it); without one the hash is that of no bytes. The datum is byte-identical to the supplier template's; fleet capability ids and fields over 64 bytes are refused. Once it confirms, set the supplier runtime's `ADVERT_REF` to the new advert ref (the template serves only that advert) (keyless) |
-| `vector_build_marketplace_retire_advert` | Build an unsigned advert Retire: only the advert's supplier key can retire it, and the deposit returns to `changeAddress`. A buyer whose escrow against the advert is posted but whose job is not yet sent can no longer send it, so retire when no job is in flight. To list the supplier again, post a new advert and set the runtime's `ADVERT_REF` to it (keyless) |
+| `vector_build_marketplace_post_advert` | Legacy layout, until the switch date: build an unsigned legacy-layout advert Post (no agent DID; the key of `changeAddress` becomes the supplier key) with the terms rules of both layouts. Locks a deposit (the supplier bond, at least 2 AP3X, raised to the ledger minimum for the datum) that returns on Retire (`vector_build_marketplace_advert_retire`). For the identity layout use `vector_build_marketplace_advert_post` (keyless) |
 
 Agent DIDs have two forms: the canonical `did:vector:<64 hex>` and the legacy `did:vector:agent:{policyId}:{nftAssetName}`. The identity tools take either form; `vector_build_deregister_agent` takes the legacy form.
 
@@ -217,31 +216,22 @@ Example non-custodial flow for an identity action with two keys: `vector_build_i
 
 ### Reputation (2)
 
-> **Hold: do not use these two tools on mainnet until the Module-3 reputation module is fixed and
-> redeployed.** As deployed, the owner cannot withdraw a stake at the module's minimum; the module's
-> oracle key can consume all of it through `ClaimDecayRefund` about 163 s after its last update; and a
-> falsified capability slashes 1/N of it, where N is the number of staked capabilities (all of it when
-> N = 1). A fixed module is a new deployment, with a new script hash and new reference outputs for these
-> tools to name.
+> **The current Module-3 deployment takes no new stakes. New stakes use the new Module-3 deployment,
+> which is published after the identity release.** Until then both tools refuse and build nothing.
 
 | Tool | Description |
 |------|-------------|
-| `vector_build_reputation_stake_open` | Build an unsigned opening of a Module-3 reputation self-stake (step 1 of 2): locks a 2 AP3X opening output at the reputation validator, naming the agent and the capabilities. The registry record, its owner, the capabilities, the absence of a stake, the chain clock, the module's outputs and the wallet's means for step 2 (the module's minimum, about 1 AP3X of fees and a pure 5 AP3X output) are checked first, so step 1 does not lock 2 AP3X for a wallet that cannot then make the stake (keyless, mainnet, held) |
-| `vector_build_reputation_stake` | Build an unsigned CreateStake (step 2 of 2): consumes the opening output, mints the agent's stake token and locks the module's minimum self-stake (read from the module's parameters; 10 AP3X on mainnet today) behind capabilities the agent's registry record lists, owned by the record's owner key. What becomes of the stake under the deployed module is in the hold note above (keyless, mainnet, held) |
+| `vector_build_reputation_stake_open` | Step 1 of 2 of an agent's Module-3 reputation self-stake: an opening output at the reputation validator, naming the agent and the capabilities. Refuses while the deployment takes no new stakes (keyless) |
+| `vector_build_reputation_stake` | Step 2 of 2: consumes the opening output, mints the agent's stake token and locks the module's minimum self-stake behind capabilities the agent's registry record lists. Refuses while the deployment takes no new stakes (keyless) |
 
 The stake datum, stake token and transaction shape are ported from the reference Python SDK
-(`Apex-Fusion/vector-agent-modules`, `Module-3/python/reputation_staking`). The SDK stamps the stake time from a
-genesis constant that is testnet's; these tools take the time from the node's own chain start, require it to be
-Vector mainnet's, and hold the node's tip against the server's clock before anything is built.
+(`Apex-Fusion/vector-agent-modules`, `Module-3/python/reputation_staking`); the builders stay for the new deployment.
 
 Launching a supplier agent from a chat client, with the hosted server and the local signer (each build is signed
 with `vector_signer_sign`, broadcast with `vector_submit_transaction` and confirmed with `vector_await_transaction`
-before the next): `vector_build_register_agent` (the identity, listing the capability) →
-`vector_build_reputation_stake_open` → `vector_build_reputation_stake` (the stake on that capability, once the
-module is fixed and redeployed: see the hold note) → `vector_build_marketplace_post_advert` (the listing, with the same
-key; then set the supplier runtime's `ADVERT_REF` to the new advert ref). One key hash then names the registry
-record's owner, the stake's owner and the advert's supplier. `vector_build_marketplace_retire_advert` takes the
-listing down.
+before the next): `vector_build_identity_register` (the identity, listing the supplier key and the capability) →
+`vector_build_marketplace_advert_post` (the listing; then set the supplier runtime's `ADVERT_REF` to the new advert
+ref). `vector_build_marketplace_advert_retire` takes the listing down, in either layout.
 
 ## Self-hosting
 

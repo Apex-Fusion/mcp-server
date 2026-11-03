@@ -1,10 +1,10 @@
 // packages/builder/src/vector/marketplace.ts
 // The marketplace family, as registerVectorTools sees it: one entry that registers every marketplace tool. Four files, one per
-// family: the read tools (marketplace-read-tools.ts: indexer and Koios, plus the advert's manifest), the keyless build tools
-// (marketplace-build-tools.ts: escrow post, accept, reclaim, release and refund of a revoked agent, and the identity-marketplace
-// advert), the transport tools (marketplace-transport-tools.ts: send a job, poll it, check its receipt; the only ones that call a
-// supplier) and the supplier's legacy advert tools (marketplace-advert-tools.ts: advert post and retire). Same conventions as
-// agent-network.ts.
+// family: the read tools (marketplace-read-tools.ts: indexer and Koios, plus the advert's manifest), the keyless escrow build tools
+// (marketplace-build-tools.ts: escrow post, accept, reclaim, release and refund of a revoked agent), the transport tools
+// (marketplace-transport-tools.ts: send a job, poll it, check its receipt; the only ones that call a supplier) and the supplier's
+// advert tools (marketplace-advert-tools.ts: post, update and retire, and the legacy Post until the switch date). Same conventions
+// as agent-network.ts.
 // What the families share lives in marketplace-shared.ts. What is decided here is what they share at registration: the caller's
 // rate limiter (one budget of calls per minute for all marketplace tools of an identity), the node the build and transport tools
 // talk to, and the identity deployment (Part 2 Section 9.6: the tools read and spend both escrow layouts; without a deployment they
@@ -39,5 +39,5 @@ export function registerMarketplaceTools(
   registerMarketplaceReadTools(server, gate, deploymentFor);
   registerMarketplaceBuildTools(server, gate, provider, deploymentFor);
   registerMarketplaceTransportTools(server, gate, provider, deploymentFor);
-  registerMarketplaceAdvertTools(server, gate, provider);
+  registerMarketplaceAdvertTools(server, gate, provider, deploymentFor);
 }

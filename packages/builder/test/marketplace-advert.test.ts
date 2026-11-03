@@ -1,8 +1,9 @@
 // packages/builder/test/marketplace-advert.test.ts
-// The supplier side of an advert: the datum writer, the Post and the Retire. Parity is held against the supplier template's own
-// transactions on mainnet (advert-stake-golden.fixture.ts): the same datum bytes, deposit and validity range for each of the service
-// agents' Posts, and for the Retire the same output to the supplier, validity range and reference script, with the deployed advert
-// validator evaluating the built transaction (uplc-node.fixture.ts). No network is touched: Koios is stubbed, and any other fetch fails.
+// The legacy-layout advert: the datum writer, the Post (legacy layout, until the switch date) and the Retire. Parity is held against the
+// supplier template's own transactions on mainnet (advert-stake-golden.fixture.ts): the same datum bytes, deposit and validity range for
+// each of the service agents' Posts, and for the Retire the same output to the supplier, validity range and reference script, with the
+// deployed advert validator evaluating the built transaction (uplc-node.fixture.ts). The terms rules that both layouts share
+// (checkAdvertTerms) are covered here, through planPostAdvert. No network is touched: Koios is stubbed, and any other fetch fails.
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML, Constr, Data, getAddressDetails, validatorToScriptHash } from '@lucid-evolution/lucid';
@@ -16,7 +17,7 @@ import {
 import { decodeAdvertDatum, encodeAdvertDatum, formatOutRef } from '../src/vector/marketplace-datum.ts';
 import type { AdvertDatum } from '../src/vector/marketplace-datum.ts';
 import { planPostAdvert, buildPostAdvert, advertOutputZero, planRetireAdvert, buildRetireAdvert } from '../src/vector/marketplace-advert.ts';
-import type { AdvertTerms } from '../src/vector/marketplace-advert.ts';
+import type { AdvertTerms } from '../src/vector/marketplace-advert-build.ts';
 import { planPostEscrow } from '../src/vector/marketplace-build.ts';
 import { ROUTES } from '../src/vector/marketplace-transport.ts';
 import { ADVERT_DATUM_HEX } from './fixtures/marketplace.fixture.ts';
@@ -322,6 +323,9 @@ describe('buildRetireAdvert', () => {
     assert.ok(unsigned(r.txCbor));
     assert.equal(r.advertRef, RETIRED_REF);
     assert.equal(r.returnLovelace, 2_017_080n);
+    assert.deepEqual(r.advert, RETIRED_ADVERT, 'the advert it ends');
+    assert.deepEqual([r.validFrom, r.validTo], [RETIRE_NOW - 60_000, RETIRE_NOW + 300_000]);
+    assert.deepEqual(r.requiredSigners, [{ keyHash: RETIRED_ADVERT.supplier_pkh, roles: ['supplier key (the advert names it; the advert validator needs its signature)', 'wallet (inputs, fee and collateral)'] }]);
     assert.equal(validatorToScriptHash(ADVERT_SCRIPT_UTXO.scriptRef!), ADVERT_SCRIPT_HASH);
     assert.deepEqual({ txHash: ADVERT_SCRIPT_UTXO.txHash, outputIndex: ADVERT_SCRIPT_UTXO.outputIndex }, ADVERT_REF_UTXO);
   });

@@ -161,22 +161,35 @@ describe('the transport reads an identity escrow and its advert', () => {
 describe('the identity advert tools', () => {
   const advertArgs = {
     changeAddress: supplierEnterprise, did: AGENT_DID, capability_id: IDENTITY_ADVERT.capability_id, model: 'echo-v1', max_output_tokens: 256,
-    max_processing_ms: 60_000, price_lovelace: 2_000_000, supplier_bond_lovelace: 1_000_000, buyer_bond_lovelace: 1_000_000, endpoint_url: 'https://agent.example',
+    max_processing_ms: 180_000, price_lovelace: 2_000_000, supplier_bond_lovelace: 1_000_000, buyer_bond_lovelace: 1_000_000, endpoint_url: 'https://agent.example',
   };
+  // The shared fixture advert's 60,000 ms window is below what a supplier template serves; an update starts from an advert the tools could post.
+  const hireable = () => advertUtxo({ ...IDENTITY_ADVERT, max_processing_ms: 180_000 });
   test('advert post, update and retire build with the supplier key as a signer (buildText answers)', async () => {
-    node = identityWorld([agentRecord(), supplierWallet, advertUtxo()]);
+    node = identityWorld([agentRecord(), supplierWallet, hireable()]);
     const posted = await call('vector_build_marketplace_advert_post', advertArgs);
-    assert.ok(posted.startsWith('# Advert Post Built (Unsigned, Not Submitted)\n'), posted.slice(0, 400));
-    assert.deepEqual([jsonOf(posted).did, jsonOf(posted).status, jsonOf(posted).required_signers[0].key_hash], [AGENT_DID, 'Active', SUPPLIER_PKH]);
+    assert.ok(posted.startsWith('# Advert Post Built (Unsigned, Not Submitted)\n\n**Layout:** identity (the advert names its agent)\n'), posted.slice(0, 400));
+    assert.match(posted, /\*\*Supplier runtime:\*\* once this confirms, set your supplier runtime's ADVERT_REF to this advert_ref and restart it/);
+    assert.deepEqual([jsonOf(posted).layout, jsonOf(posted).did, jsonOf(posted).status, jsonOf(posted).required_signers[0].key_hash], ['identity', AGENT_DID, 'Active', SUPPLIER_PKH]);
     const updated = await call('vector_build_marketplace_advert_update', { changeAddress: supplierEnterprise, advert_ref: ADVERT_REF, price_lovelace: 2_500_000 });
     assert.ok(updated.startsWith('# Advert Update Built (Unsigned, Not Submitted)\n'), updated.slice(0, 400));
+    assert.ok(updated.includes(`**Replaces:** \`${ADVERT_REF}\`\n`));
+    assert.equal(jsonOf(updated).spent_ref, ADVERT_REF);
     const retired = await call('vector_build_marketplace_advert_retire', { changeAddress: supplierEnterprise, advert_ref: ADVERT_REF });
-    assert.ok(retired.startsWith('# Advert Retirement Built (Unsigned, Not Submitted)\n'), retired.slice(0, 400));
-    assert.equal(jsonOf(retired).paid_to, supplierEnterprise);
+    assert.ok(retired.startsWith('# Advert Retirement Built (Unsigned, Not Submitted)\n\n**Layout:** identity (the advert names its agent)\n'), retired.slice(0, 400));
+    assert.deepEqual([jsonOf(retired).layout, jsonOf(retired).spent_ref, jsonOf(retired).paid_to], ['identity', ADVERT_REF, supplierEnterprise]);
   });
-  test('a detail_uri needs its detail_hash, and the tools need the deployment', async () => {
-    node = identityWorld([agentRecord(), supplierWallet]);
-    assert.match(await call('vector_build_marketplace_advert_post', { ...advertArgs, detail_uri: 'https://agent.example/manifest.json' }), /^Failed to build advert post: detail_hash is needed with a detail_uri/);
+  test('the terms rules of both layouts apply: a window a supplier template cannot serve and an endpoint with a query are refused', async () => {
+    node = identityWorld([agentRecord(), supplierWallet, hireable()]);
+    assert.match(await call('vector_build_marketplace_advert_post', { ...advertArgs, max_processing_ms: 60_000 }), /^Failed to build advert post: max_processing_ms must be a whole number from 60001/);
+    assert.match(await call('vector_build_marketplace_advert_post', { ...advertArgs, endpoint_url: 'https://agent.example/?k=1' }), /^Failed to build advert post: endpoint_url must not contain a query/);
+    assert.match(await call('vector_build_marketplace_advert_update', { changeAddress: supplierEnterprise, advert_ref: ADVERT_REF, max_processing_ms: 60_000 }), /^Failed to build advert update: max_processing_ms must be a whole number from 60001/);
+  });
+  test('a detail_uri needs its detail_hash, and the post and the update need the deployment; the retire of an identity advert too', async () => {
+    node = identityWorld([agentRecord(), supplierWallet, hireable()]);
+    assert.match(await call('vector_build_marketplace_advert_post', { ...advertArgs, detail_uri: 'https://agent.example/manifest.json' }), /^Failed to build advert post: detail_hash is required with a detail_uri/);
     assert.match(await tools(null)('vector_build_marketplace_advert_post', advertArgs), /The identity registry is not configured on this server/);
+    assert.match(await tools(null)('vector_build_marketplace_advert_update', { changeAddress: supplierEnterprise, advert_ref: ADVERT_REF, price_lovelace: 2_500_000 }), /The identity registry is not configured on this server/);
+    assert.match(await tools(null)('vector_build_marketplace_advert_retire', { changeAddress: supplierEnterprise, advert_ref: ADVERT_REF }), /^Failed to build advert retirement: UTxO [0-9a-f]{64}#0 is not at the legacy advert address, and this server cannot read an identity-marketplace advert\. The identity registry is not configured on this server/);
   });
 });

@@ -1,6 +1,6 @@
 // packages/builder/src/vector/marketplace-build-tools.ts
-// The marketplace build tools: keyless builders for the unsigned escrow Post, Accept, Reclaim, Release and RefundRevoked, and for the
-// identity-marketplace advert (post, update, retire). Each takes a wallet address only and returns unsigned CBOR for the local signer
+// The marketplace escrow build tools: keyless builders for the unsigned escrow Post, Accept, Reclaim, Release and RefundRevoked (the
+// advert tools are in marketplace-advert-tools.ts). Each takes a wallet address only and returns unsigned CBOR for the local signer
 // with every key hash that must sign; nothing here signs or submits. The node they build against comes from `providerFor` and the
 // identity deployment from `deploymentFor`, so the entry point decides them (and a test can hand in its own). The escrow tools work in
 // both layouts (Part 2 Section 9.6): a legacy advert or escrow needs no deployment; an identity-marketplace one needs it.
@@ -13,14 +13,11 @@ import { lucidForAddress } from './build.js';
 import { withJson } from './marketplace-indexer.js';
 import { buildPostEscrow, buildAccept, buildReclaim, buildRelease, buildRefundRevoked, supplierPayoutRaised } from './marketplace-build.js';
 import type { EscrowSpendBuild } from './marketplace-build.js';
-import { buildAdvertPost, buildAdvertUpdate, buildAdvertRetire, EMPTY_DETAIL_HASH } from './marketplace-advert-build.js';
-import type { AdvertBuild, AdvertTerms } from './marketplace-advert-build.js';
 import { text, fail, cell, isoOrRaw, signersLine, signersJson, SIGN_COPY, ACCEPT_WINDOW_S, RELEASE_TAKE } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
 import { IdentityConfigError, NOT_CONFIGURED } from './identity-deployment.js';
 import type { IdentityDeployment } from './identity-deployment.js';
-import { identifierOf } from './identity-chain.js';
-import { zChangeAddress, zDid, zKeyHash, zValidMinutes, buildText } from './identity-shared.js';
+import { zChangeAddress, zValidMinutes, buildText } from './identity-shared.js';
 
 /** The server's identity deployment, or null before it has one: the marketplace tools serve the legacy layout without it. */
 export type MaybeDeploymentFor = () => IdentityDeployment | null;
@@ -28,7 +25,7 @@ export type MaybeDeploymentFor = () => IdentityDeployment | null;
 /** A payout below the minimum output is raised to it (planAccept, planReclaim); the signer is told, as it is shown more than the datum owes. */
 const raised = (flag: boolean): string => (flag ? ' (raised to the 1-unit minimum)' : '');
 /** The deployment for a tool that serves only the identity layout. */
-function identityOnly(deploymentFor: MaybeDeploymentFor): IdentityDeployment {
+export function identityOnly(deploymentFor: MaybeDeploymentFor): IdentityDeployment {
   const deployment = deploymentFor();
   if (!deployment) throw new IdentityConfigError(NOT_CONFIGURED);
   return deployment;
@@ -37,49 +34,6 @@ function identityOnly(deploymentFor: MaybeDeploymentFor): IdentityDeployment {
 const agentLine = (did: string | null): string => (did === null ? '' : `**Agent:** ${did} (the escrow names it; its receipt must name it too)\n`);
 /** What the escrow spends share in their JSON block. */
 const spendJson = (r: EscrowSpendBuild) => ({ escrow_ref: r.escrowRef, layout: r.layout, agent_did: r.agentDid, tx_hash: r.txHash, required_signers: signersJson(r.requiredSigners) });
-
-const zLovelace = (what: string) => z.number().int().min(0).describe(`${what}, in lovelace (1 AP3X = 1,000,000)`);
-const zAdvertRef = z.string().describe("The advert '<txid>#<index>'");
-const ADVERT_TIPS = [
-  'The agent record must list the supplier key with the transaction purpose and the capability (vector_build_identity_update), be independent (no parent) and be Active',
-  'The supplier key must sign: pass the transaction to its holder after the wallet (vector_signer_sign)',
-  'The wallet needs the deposit plus about 1 AP3X for the fee; update and retire also need one pure output of at least 5 AP3X as collateral',
-];
-
-/** The facts of an advert build. */
-function advertFacts(r: AdvertBuild, deployment: IdentityDeployment): Array<[string, string]> {
-  const a = r.advert;
-  return [
-    ['Agent', `${r.did} (the advert's agent)`],
-    ['Supplier key hash', `\`${a.supplier_pkh}\``],
-    ['Capability', `\`${cell(a.capability_id)}\` · model ${cell(a.model)}`],
-    ['Price', `${lovelaceToAda(a.price_lovelace)} AP3X · bonds: supplier ${lovelaceToAda(a.supplier_bond_lovelace)}, buyer ${lovelaceToAda(a.buyer_bond_lovelace)}`],
-    ['Processing window', `${a.max_processing_ms} ms · max output tokens ${a.max_output_tokens}`],
-    ['Endpoint', cell(a.endpoint_url, 200)],
-    ['Status', a.status],
-    r.paidTo === null
-      ? ['Advert output', `${r.advertRef ?? '-'} at ${deployment.advert.address}, deposit ${lovelaceToAda(r.depositLovelace)} AP3X`]
-      : ['Deposit back', `${lovelaceToAda(r.depositLovelace)} AP3X to ${r.paidTo}`],
-  ];
-}
-const advertJson = (r: AdvertBuild) => ({
-  advert_ref: r.advertRef, did: r.did, agent_id: r.agentId, supplier_pkh: r.advert.supplier_pkh, capability_id: r.advert.capability_id, status: r.advert.status,
-  advertised_at: r.advert.advertised_at, deposit_lovelace: r.depositLovelace, paid_to: r.paidTo,
-});
-
-/** Advert terms from the tool's fields; `detail_hash` defaults to the hash of an empty manifest when there is no detail_uri. */
-function termsFrom(a: {
-  capability_id: string; model: string; max_output_tokens: number; max_processing_ms: number; price_lovelace: number; supplier_bond_lovelace: number;
-  buyer_bond_lovelace: number; endpoint_url: string; detail_uri?: string; detail_hash?: string;
-}): AdvertTerms {
-  const detailUri = a.detail_uri ?? '';
-  if (detailUri !== '' && a.detail_hash === undefined) throw new Error('detail_hash is needed with a detail_uri: it is the sha256 of the manifest there, which buyers check.');
-  return {
-    capabilityId: a.capability_id, model: a.model, maxOutputTokens: a.max_output_tokens, maxProcessingMs: a.max_processing_ms,
-    priceLovelace: BigInt(a.price_lovelace), supplierBondLovelace: BigInt(a.supplier_bond_lovelace), buyerBondLovelace: BigInt(a.buyer_bond_lovelace),
-    endpointUrl: a.endpoint_url, detailUri, detailHash: (a.detail_hash ?? EMPTY_DETAIL_HASH).toLowerCase(),
-  };
-}
 
 export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit: RateGate, providerFor: () => Provider, deploymentFor: MaybeDeploymentFor) {
   server.tool(
@@ -249,95 +203,6 @@ export function registerMarketplaceBuildTools(server: McpServer, checkRateLimit:
           'The wallet needs about 1 AP3X for the fee and one pure output of at least 5 AP3X as collateral',
         ]);
       }
-    },
-  );
-
-  const advertFields = {
-    capability_id: z.string().min(1).max(64).describe("The capability id the advert offers; the agent's record must list it"),
-    model: z.string().min(1).max(64).describe('The model or product name'),
-    max_output_tokens: z.number().int().min(0).describe('The most output tokens of a job'),
-    max_processing_ms: z.number().int().min(1).describe('How long a job may take, in ms (at most 86,400,000: a Post locks the buyer\'s funds for that window)'),
-    price_lovelace: zLovelace('The price of a job'),
-    supplier_bond_lovelace: zLovelace('The supplier bond (the buyer funds it; it goes to the supplier on Accept)'),
-    buyer_bond_lovelace: zLovelace('The buyer bond (returns to the buyer on Accept)'),
-    endpoint_url: z.string().min(1).max(256).describe('The https URL buyers send jobs to'),
-    detail_uri: z.string().max(256).optional().describe('Where the manifest is (default none)'),
-    detail_hash: z.string().regex(/^[0-9a-fA-F]{64}$/).optional().describe('The sha256 of the manifest at detail_uri, 64 hex characters (needed with detail_uri; default the hash of an empty file)'),
-  };
-
-  server.tool(
-    "vector_build_marketplace_advert_post",
-    "Build an UNSIGNED transaction that posts an identity-marketplace advert (Part 2 Section 6.2): the advert names the agent (did:vector) whose record lists the supplier key with the transaction purpose and the capability. The builder checks the listing rule on chain (the record is live, independent and Active, and lists the key and the capability), so the indexer lists the advert. The supplier key must sign (the listing rule needs its signature). Takes no key material.",
-    {
-      changeAddress: zChangeAddress,
-      did: zDid('the agent the advert offers'),
-      supplier_key_hash: zKeyHash("The supplier key that claims and submits the jobs (default your wallet's key)").optional(),
-      ...advertFields,
-      deposit_lovelace: zLovelace('The AP3X the advert locks (default 2 AP3X, raised to the ledger minimum); it returns on retirement').optional(),
-      valid_minutes: zValidMinutes,
-    },
-    async (a) => {
-      const limited = checkRateLimit(); if (limited) return limited;
-      try {
-        const deployment = identityOnly(deploymentFor);
-        const provider = providerFor();
-        const lucid = await lucidForAddress(provider, a.changeAddress);
-        const r = await buildAdvertPost({ lucid, provider, deployment }, {
-          changeAddress: a.changeAddress, agentId: identifierOf(a.did), supplierPkh: a.supplier_key_hash?.toLowerCase(), terms: termsFrom(a),
-          depositLovelace: a.deposit_lovelace === undefined ? undefined : BigInt(a.deposit_lovelace), validMinutes: a.valid_minutes,
-        });
-        return text(buildText('Advert Post Built', advertFacts(r, deployment), r, advertJson(r)));
-      } catch (err) { return fail('build advert post', err, ADVERT_TIPS); }
-    },
-  );
-
-  server.tool(
-    "vector_build_marketplace_advert_update",
-    "Build an UNSIGNED UpdateAdvert of an identity-marketplace advert: changes the fields you pass and keeps the others; the supplier key and the agent stay (the contract keeps them), advertised_at moves to now. An advert that stays Active must still pass the listing rule; status Retired takes it off the market but keeps the output. The supplier key signs. Takes no key material.",
-    {
-      changeAddress: zChangeAddress,
-      advert_ref: zAdvertRef,
-      capability_id: advertFields.capability_id.optional(), model: advertFields.model.optional(), max_output_tokens: advertFields.max_output_tokens.optional(),
-      max_processing_ms: advertFields.max_processing_ms.optional(), price_lovelace: advertFields.price_lovelace.optional(),
-      supplier_bond_lovelace: advertFields.supplier_bond_lovelace.optional(), buyer_bond_lovelace: advertFields.buyer_bond_lovelace.optional(),
-      endpoint_url: advertFields.endpoint_url.optional(), detail_uri: advertFields.detail_uri, detail_hash: advertFields.detail_hash,
-      status: z.enum(['Active', 'Retired']).optional().describe('The new status (default unchanged)'),
-      deposit_lovelace: zLovelace('The AP3X of the new advert output (default what the advert holds, raised to the ledger minimum)').optional(),
-      valid_minutes: zValidMinutes,
-    },
-    async (a) => {
-      const limited = checkRateLimit(); if (limited) return limited;
-      try {
-        const deployment = identityOnly(deploymentFor);
-        const provider = providerFor();
-        const lucid = await lucidForAddress(provider, a.changeAddress);
-        const big = (n: number | undefined) => (n === undefined ? undefined : BigInt(n));
-        const r = await buildAdvertUpdate({ lucid, provider, deployment }, {
-          changeAddress: a.changeAddress, advertRef: a.advert_ref, validMinutes: a.valid_minutes, depositLovelace: big(a.deposit_lovelace),
-          changes: {
-            capabilityId: a.capability_id, model: a.model, maxOutputTokens: a.max_output_tokens, maxProcessingMs: a.max_processing_ms,
-            priceLovelace: big(a.price_lovelace), supplierBondLovelace: big(a.supplier_bond_lovelace), buyerBondLovelace: big(a.buyer_bond_lovelace),
-            endpointUrl: a.endpoint_url, detailUri: a.detail_uri, detailHash: a.detail_hash?.toLowerCase(), status: a.status,
-          },
-        });
-        return text(buildText('Advert Update Built', advertFacts(r, deployment), r, advertJson(r)));
-      } catch (err) { return fail('build advert update', err, ADVERT_TIPS); }
-    },
-  );
-
-  server.tool(
-    "vector_build_marketplace_advert_retire",
-    "Build an UNSIGNED RetireAdvert of an identity-marketplace advert: spends the advert and pays its deposit to the supplier key (to your wallet when its key is the supplier key). The supplier key signs. Takes no key material.",
-    { changeAddress: zChangeAddress, advert_ref: zAdvertRef, valid_minutes: zValidMinutes },
-    async ({ changeAddress, advert_ref, valid_minutes }) => {
-      const limited = checkRateLimit(); if (limited) return limited;
-      try {
-        const deployment = identityOnly(deploymentFor);
-        const provider = providerFor();
-        const lucid = await lucidForAddress(provider, changeAddress);
-        const r = await buildAdvertRetire({ lucid, provider, deployment }, { changeAddress, advertRef: advert_ref, validMinutes: valid_minutes });
-        return text(buildText('Advert Retirement Built', advertFacts(r, deployment), r, advertJson(r)));
-      } catch (err) { return fail('build advert retirement', err, ADVERT_TIPS); }
     },
   );
 }

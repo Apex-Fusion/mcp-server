@@ -1833,7 +1833,7 @@
     }
   },
   "vector_build_marketplace_advert_post": {
-    "description": "Build an UNSIGNED transaction that posts an identity-marketplace advert (Part 2 Section 6.2): the advert names the agent (did:vector) whose record lists the supplier key with the transaction purpose and the capability. The builder checks the listing rule on chain (the record is live, independent and Active, and lists the key and the capability), so the indexer lists the advert. The supplier key must sign (the listing rule needs its signature). Takes no key material.",
+    "description": "Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace with an identity-layout advert (Part 2 Section 6.2): the advert names the agent (did:vector) whose record lists the supplier key with the transaction purpose and the capability, and the capability, model, price, bonds, processing window and https endpoint that buyers' jobs go to. It locks a deposit that returns when you retire the advert. The builder checks the listing rule on chain (the record is live, independent and Active, and lists the key and the capability), so the indexer lists the advert. Terms that buyers could not hire or that a supplier template cannot serve are refused: a text field over 64 bytes of UTF-8, a fleet capability id, an endpoint that is not https or that has whitespace, a query or a fragment (jobs go to <endpoint_url>/v1/job), a processing window outside 60,001 ms to 24 h, and price + both bonds above 10,000 AP3X. A detail_uri needs your detail_hash: this server fetches nothing. The supplier key must sign (the listing rule needs its signature). Once the Post confirms, buyers can hire it with vector_build_marketplace_post_escrow; set your supplier runtime's ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names (after a Retire and a new Post, ADVERT_REF must change to the new ref). Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1853,228 +1853,7 @@
           "pattern": "^[0-9a-fA-F]{56}$"
         },
         "capability_id": {
-          "description": "The capability id the advert offers; the agent's record must list it",
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64
-        },
-        "model": {
-          "description": "The model or product name",
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64
-        },
-        "max_output_tokens": {
-          "description": "The most output tokens of a job",
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "max_processing_ms": {
-          "description": "How long a job may take, in ms (at most 86,400,000: a Post locks the buyer's funds for that window)",
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9007199254740991
-        },
-        "price_lovelace": {
-          "description": "The price of a job, in lovelace (1 AP3X = 1,000,000)",
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "supplier_bond_lovelace": {
-          "description": "The supplier bond (the buyer funds it; it goes to the supplier on Accept), in lovelace (1 AP3X = 1,000,000)",
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "buyer_bond_lovelace": {
-          "description": "The buyer bond (returns to the buyer on Accept), in lovelace (1 AP3X = 1,000,000)",
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "endpoint_url": {
-          "description": "The https URL buyers send jobs to",
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 256
-        },
-        "detail_uri": {
-          "description": "Where the manifest is (default none)",
-          "type": "string",
-          "maxLength": 256
-        },
-        "detail_hash": {
-          "description": "The sha256 of the manifest at detail_uri, 64 hex characters (needed with detail_uri; default the hash of an empty file)",
-          "type": "string",
-          "pattern": "^[0-9a-fA-F]{64}$"
-        },
-        "deposit_lovelace": {
-          "description": "The AP3X the advert locks (default 2 AP3X, raised to the ledger minimum); it returns on retirement, in lovelace (1 AP3X = 1,000,000)",
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "valid_minutes": {
-          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 59
-        }
-      },
-      "required": [
-        "changeAddress",
-        "did",
-        "capability_id",
-        "model",
-        "max_output_tokens",
-        "max_processing_ms",
-        "price_lovelace",
-        "supplier_bond_lovelace",
-        "buyer_bond_lovelace",
-        "endpoint_url"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
-  "vector_build_marketplace_advert_retire": {
-    "description": "Build an UNSIGNED RetireAdvert of an identity-marketplace advert: spends the advert and pays its deposit to the supplier key (to your wallet when its key is the supplier key). The supplier key signs. Takes no key material.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "changeAddress": {
-          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
-          "type": "string"
-        },
-        "advert_ref": {
-          "description": "The advert '<txid>#<index>'",
-          "type": "string"
-        },
-        "valid_minutes": {
-          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 59
-        }
-      },
-      "required": [
-        "changeAddress",
-        "advert_ref"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
-  "vector_build_marketplace_advert_update": {
-    "description": "Build an UNSIGNED UpdateAdvert of an identity-marketplace advert: changes the fields you pass and keeps the others; the supplier key and the agent stay (the contract keeps them), advertised_at moves to now. An advert that stays Active must still pass the listing rule; status Retired takes it off the market but keeps the output. The supplier key signs. Takes no key material.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "changeAddress": {
-          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
-          "type": "string"
-        },
-        "advert_ref": {
-          "description": "The advert '<txid>#<index>'",
-          "type": "string"
-        },
-        "capability_id": {
-          "description": "The capability id the advert offers; the agent's record must list it",
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64
-        },
-        "model": {
-          "description": "The model or product name",
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64
-        },
-        "max_output_tokens": {
-          "description": "The most output tokens of a job",
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "max_processing_ms": {
-          "description": "How long a job may take, in ms (at most 86,400,000: a Post locks the buyer's funds for that window)",
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9007199254740991
-        },
-        "price_lovelace": {
-          "description": "The price of a job, in lovelace (1 AP3X = 1,000,000)",
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "supplier_bond_lovelace": {
-          "description": "The supplier bond (the buyer funds it; it goes to the supplier on Accept), in lovelace (1 AP3X = 1,000,000)",
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "buyer_bond_lovelace": {
-          "description": "The buyer bond (returns to the buyer on Accept), in lovelace (1 AP3X = 1,000,000)",
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "endpoint_url": {
-          "description": "The https URL buyers send jobs to",
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 256
-        },
-        "detail_uri": {
-          "description": "Where the manifest is (default none)",
-          "type": "string",
-          "maxLength": 256
-        },
-        "detail_hash": {
-          "description": "The sha256 of the manifest at detail_uri, 64 hex characters (needed with detail_uri; default the hash of an empty file)",
-          "type": "string",
-          "pattern": "^[0-9a-fA-F]{64}$"
-        },
-        "status": {
-          "description": "The new status (default unchanged)",
-          "type": "string",
-          "enum": [
-            "Active",
-            "Retired"
-          ]
-        },
-        "deposit_lovelace": {
-          "description": "The AP3X of the new advert output (default what the advert holds, raised to the ledger minimum), in lovelace (1 AP3X = 1,000,000)",
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "valid_minutes": {
-          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 59
-        }
-      },
-      "required": [
-        "changeAddress",
-        "advert_ref"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
-  "vector_build_marketplace_post_advert": {
-    "description": "Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace: posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert. Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key; once the Post confirms, set your supplier runtime's ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names (after a Retire and a new Post, ADVERT_REF must change to the new ref). The transaction is valid for 5 minutes. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "changeAddress": {
-          "description": "Your supplier wallet address: its key becomes the advert's supplier key, the only key that can retire the advert. Get it from vector_signer_get_address.",
-          "type": "string"
-        },
-        "capability_id": {
-          "description": "Capability id, at most 64 bytes, outside the fleet namespaces llm.text.generate.*, llm.chat.*, ocr.page.extract.* and audio.synthesize.* (for example research.summary.v1). A reputation stake names the same id.",
+          "description": "Capability id, at most 64 bytes, outside the fleet namespaces llm.text.generate.*, llm.chat.*, ocr.page.extract.* and audio.synthesize.* (for example research.summary.v1); the agent's record must list it",
           "type": "string",
           "minLength": 1
         },
@@ -2096,10 +1875,233 @@
           "maximum": 86400000
         },
         "price_lovelace": {
-          "description": "Price per job in lovelace (1 AP3X = 1000000)",
+          "description": "Price per job in lovelace (1 AP3X = 1000000); price + both bonds is at most 10,000 AP3X",
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
+        },
+        "endpoint_url": {
+          "description": "https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
+          "type": "string",
+          "minLength": 1
+        },
+        "detail_hash": {
+          "description": "sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used",
+          "type": "string",
+          "pattern": "^(?:[0-9a-fA-F]{64})?$"
+        },
+        "supplier_bond_lovelace": {
+          "description": "Supplier bond in lovelace: a buyer locks price + both bonds per job, and on Accept the supplier receives price + supplier bond",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "buyer_bond_lovelace": {
+          "description": "Buyer bond in lovelace; it returns to the buyer on Accept",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "detail_uri": {
+          "description": "Optional https URL of your manifest (agent.json), at most 64 bytes (default none); requires detail_hash",
+          "type": "string"
+        },
+        "deposit_lovelace": {
+          "description": "The AP3X the advert locks, in lovelace (default 2 AP3X, raised to the ledger minimum); it returns on retirement",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did",
+        "capability_id",
+        "model",
+        "max_output_tokens",
+        "max_processing_ms",
+        "price_lovelace",
+        "endpoint_url",
+        "supplier_bond_lovelace",
+        "buyer_bond_lovelace"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_marketplace_advert_retire": {
+    "description": "Build an UNSIGNED transaction that retires your supplier advert on the Vector agents marketplace, in either layout: it consumes the advert and returns its deposit to the supplier key. Only the advert's supplier key can retire it, and that key signs. An identity-layout advert: the deposit goes to your wallet when its key is the supplier key, else to the supplier key's enterprise address. A legacy-layout advert (suppliers retire these during the switch): changeAddress must be the supplier key's wallet, the deposit returns to it, and the transaction is valid for 5 minutes, as the supplier template builds it. Once it confirms, buyers can no longer hire the advert, and a buyer whose escrow against it is posted but whose job is not yet sent can no longer send it (that buyer reclaims everything after deliver_by): retire when no job is in flight. After it confirms, the supplier runtime's ADVERT_REF names a consumed advert: to list the supplier again, post a new advert and set ADVERT_REF to its ref. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "advert_ref": {
+          "description": "The advert '<txid>#<index>'",
+          "type": "string"
+        },
+        "valid_minutes": {
+          "description": "Identity layout only: minutes from now until the transaction expires (default 30, at most 59). A legacy-layout Retire is valid for 5 minutes",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "advert_ref"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_marketplace_advert_update": {
+    "description": "Build an UNSIGNED UpdateAdvert of an identity-layout advert: changes the fields you pass and keeps the others; the supplier key and the agent stay (the contract keeps them), advertised_at moves to now. The new terms follow the rules of a Post: Terms that buyers could not hire or that a supplier template cannot serve are refused: a text field over 64 bytes of UTF-8, a fleet capability id, an endpoint that is not https or that has whitespace, a query or a fragment (jobs go to <endpoint_url>/v1/job), a processing window outside 60,001 ms to 24 h, and price + both bonds above 10,000 AP3X. A detail_uri needs your detail_hash: this server fetches nothing. An advert that stays Active must still pass the listing rule; status Retired takes it off the market but keeps the output (vector_build_marketplace_advert_retire returns the deposit). The supplier key signs. The update writes a new advert output, so once it confirms, set your supplier runtime's ADVERT_REF to the new advert_ref. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "advert_ref": {
+          "description": "The advert '<txid>#<index>'",
+          "type": "string"
+        },
+        "capability_id": {
+          "description": "Capability id, at most 64 bytes, outside the fleet namespaces llm.text.generate.*, llm.chat.*, ocr.page.extract.* and audio.synthesize.* (for example research.summary.v1); the agent's record must list it",
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "description": "Model or service version the supplier runs, at most 64 bytes",
+          "type": "string",
+          "minLength": 1
+        },
+        "max_output_tokens": {
+          "description": "Largest output the supplier commits to, in tokens (0 if not token-based)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_processing_ms": {
+          "description": "Processing window in milliseconds, from 60001 to 86400000 (24 h): how long the supplier has to submit a job. A vector-agent-template supplier needs at least its SERVICE_TIMEOUT_MS + 60000 (180000 with the default)",
+          "type": "integer",
+          "minimum": 60001,
+          "maximum": 86400000
+        },
+        "price_lovelace": {
+          "description": "Price per job in lovelace (1 AP3X = 1000000); price + both bonds is at most 10,000 AP3X",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "supplier_bond_lovelace": {
+          "description": "Supplier bond in lovelace",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "buyer_bond_lovelace": {
+          "description": "Buyer bond in lovelace",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "endpoint_url": {
+          "description": "https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
+          "type": "string",
+          "minLength": 1
+        },
+        "detail_uri": {
+          "description": "The new https URL of your manifest, at most 64 bytes (\"\" for none); a new detail_uri requires its detail_hash",
+          "type": "string"
+        },
+        "detail_hash": {
+          "description": "sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used",
+          "type": "string",
+          "pattern": "^(?:[0-9a-fA-F]{64})?$"
+        },
+        "status": {
+          "description": "The new status (default unchanged)",
+          "type": "string",
+          "enum": [
+            "Active",
+            "Retired"
+          ]
+        },
+        "deposit_lovelace": {
+          "description": "The AP3X of the new advert output, in lovelace (default what the advert holds, raised to the ledger minimum)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "advert_ref"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_marketplace_post_advert": {
+    "description": "Legacy layout, until the switch date. Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace with a legacy-layout advert, which names no agent DID (for the identity layout use vector_build_marketplace_advert_post): posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert with vector_build_marketplace_advert_retire. Terms that buyers could not hire or that a supplier template cannot serve are refused: a text field over 64 bytes of UTF-8, a fleet capability id, an endpoint that is not https or that has whitespace, a query or a fragment (jobs go to <endpoint_url>/v1/job), a processing window outside 60,001 ms to 24 h, and price + both bonds above 10,000 AP3X. A detail_uri needs your detail_hash: this server fetches nothing. Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key; once the Post confirms, set your supplier runtime's ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names (after a Retire and a new Post, ADVERT_REF must change to the new ref). The transaction is valid for 5 minutes. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your supplier wallet address: its key becomes the advert's supplier key, the only key that can retire the advert. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "capability_id": {
+          "description": "Capability id, at most 64 bytes, outside the fleet namespaces llm.text.generate.*, llm.chat.*, ocr.page.extract.* and audio.synthesize.* (for example research.summary.v1)",
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "description": "Model or service version the supplier runs, at most 64 bytes",
+          "type": "string",
+          "minLength": 1
+        },
+        "max_output_tokens": {
+          "description": "Largest output the supplier commits to, in tokens (0 if not token-based)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_processing_ms": {
+          "description": "Processing window in milliseconds, from 60001 to 86400000 (24 h): how long the supplier has to submit a job. A vector-agent-template supplier needs at least its SERVICE_TIMEOUT_MS + 60000 (180000 with the default)",
+          "type": "integer",
+          "minimum": 60001,
+          "maximum": 86400000
+        },
+        "price_lovelace": {
+          "description": "Price per job in lovelace (1 AP3X = 1000000); price + both bonds is at most 10,000 AP3X",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "endpoint_url": {
+          "description": "https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
+          "type": "string",
+          "minLength": 1
+        },
+        "detail_hash": {
+          "description": "sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used",
+          "type": "string",
+          "pattern": "^(?:[0-9a-fA-F]{64})?$"
         },
         "supplier_bond_lovelace": {
           "description": "Supplier bond in lovelace (default 1000000). A buyer locks price + both bonds per job; on Accept the supplier receives price + supplier bond. It is also the advert's deposit, raised to 2 units",
@@ -2115,18 +2117,9 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
-        "endpoint_url": {
-          "description": "https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
-          "type": "string",
-          "minLength": 1
-        },
         "detail_uri": {
           "description": "Optional https URL of your manifest (agent.json), at most 64 bytes; requires detail_hash",
           "default": "",
-          "type": "string"
-        },
-        "detail_hash": {
-          "description": "sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used",
           "type": "string"
         }
       },
@@ -2250,29 +2243,8 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_build_marketplace_retire_advert": {
-    "description": "Build an UNSIGNED transaction that retires your supplier advert on the Vector agents marketplace: consumes the advert and returns its deposit to changeAddress. Only the advert's supplier key can retire it. Once it confirms, buyers can no longer hire the advert, and a buyer whose escrow against it is posted but whose job is not yet sent can no longer send it (that buyer reclaims everything after deliver_by): retire when no job is in flight. After it confirms, the supplier runtime's ADVERT_REF names a consumed advert: to list the supplier again, post a new advert and set ADVERT_REF to its ref. Takes no key material. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "changeAddress": {
-          "description": "The supplier wallet address whose key the advert names. Get it from vector_signer_get_address.",
-          "type": "string"
-        },
-        "advert_ref": {
-          "description": "Advert '<txid>#<index>', as vector_build_marketplace_post_advert returned it",
-          "type": "string"
-        }
-      },
-      "required": [
-        "changeAddress",
-        "advert_ref"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
   "vector_build_reputation_stake": {
-    "description": "Do not use on mainnet until the Module-3 reputation module is fixed and redeployed. Build an UNSIGNED transaction that creates your agent's reputation self-stake on Vector (step 2 of 2): consumes the opening output from vector_build_reputation_stake_open, mints the agent's stake token and locks the module's minimum self-stake (read from the module's parameters on the ledger; 10 units on mainnet today) behind the named capabilities, with your key as its owner. As deployed, the owner cannot withdraw a stake at the module's minimum; the module's oracle key can consume all of it through ClaimDecayRefund about 163 s after its last update; and a falsified capability slashes 1/N of it, where N is the number of staked capabilities (all of it when N = 1). The stake's time is the ledger's tip: sign and submit before the Valid until time the result shows. Mainnet only. Takes no key material. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "The current Module-3 deployment takes no new stakes. New stakes use the new Module-3 deployment, which is published after the identity release. Until then this tool refuses and builds nothing. It builds step 2 of 2 of your agent's reputation self-stake on Vector: an UNSIGNED transaction that consumes the opening output from vector_build_reputation_stake_open, mints the agent's stake token and locks the module's minimum self-stake (read from the module's parameters on the ledger) behind the named capabilities, with your key as its owner. Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2281,7 +2253,7 @@
           "type": "string"
         },
         "agent_id": {
-          "description": "Agent DID: did:vector:agent:{policyId}:{nftAssetName}, as vector_build_register_agent returned it",
+          "description": "Agent DID in the legacy registry form: did:vector:agent:{policyId}:{nftAssetName}",
           "type": "string"
         },
         "capabilities": {
@@ -2308,7 +2280,7 @@
     }
   },
   "vector_build_reputation_stake_open": {
-    "description": "Do not use on mainnet until the Module-3 reputation module is fixed and redeployed. Build an UNSIGNED transaction that opens a reputation self-stake for your registered agent on Vector (step 1 of 2): locks a 2-unit opening output at the reputation (Module-3) validator, naming the agent and the capabilities to stake on. The validator mints a stake token only when it consumes an output of its own, so step 2, vector_build_reputation_stake, consumes this one and the 2 units return as change. Checked first: the agent's registry record lists every capability, changeAddress is the record's owner (the same key a supplier's adverts name), the agent has no stake yet, the node's clock is Vector mainnet's, and the wallet also holds what step 2 needs (the module's minimum, about 1 unit of fees and a pure 5-unit output for collateral). An agent that already has an opening output is pointed at it instead. As deployed, the owner cannot withdraw a stake at the module's minimum; the module's oracle key can consume all of it through ClaimDecayRefund about 163 s after its last update; and a falsified capability slashes 1/N of it, where N is the number of staked capabilities (all of it when N = 1). Mainnet only. Takes no key material. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "The current Module-3 deployment takes no new stakes. New stakes use the new Module-3 deployment, which is published after the identity release. Until then this tool refuses and builds nothing. It builds step 1 of 2 of a reputation self-stake for your registered agent on Vector: an UNSIGNED transaction that locks a 2-unit opening output at the reputation (Module-3) validator, naming the agent and the capabilities to stake on; step 2 is vector_build_reputation_stake. Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2317,7 +2289,7 @@
           "type": "string"
         },
         "agent_id": {
-          "description": "Agent DID: did:vector:agent:{policyId}:{nftAssetName}, as vector_build_register_agent returned it",
+          "description": "Agent DID in the legacy registry form: did:vector:agent:{policyId}:{nftAssetName}",
           "type": "string"
         },
         "capabilities": {

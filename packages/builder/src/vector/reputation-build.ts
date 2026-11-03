@@ -37,6 +37,15 @@ import { cell } from './marketplace-shared.js';
 // From vector-agent-modules Module-3/deploy/mainnet/deploy_state.json (network "vector-mainnet"), each checked against the live chain
 // on 2026-10-21 (Koios utxo_info and script_info). Inlined, as the marketplace's are: the Docker image ships only build/.
 
+/**
+ * Whether the deployment these builders name takes new stakes. It does not: the stake tools refuse with NO_NEW_STAKES and build
+ * nothing (registerReputationTools takes the setting, so that tests run the build path). The builders stay, so that the move to the
+ * new Module-3 deployment can reuse them.
+ */
+export const REPUTATION_TAKES_NEW_STAKES = false;
+/** The refusal of the stake tools while the deployment takes no new stakes. */
+export const NO_NEW_STAKES = 'The current Module-3 deployment takes no new stakes. New stakes use the new Module-3 deployment, which is published after the identity release.';
+
 /** The reputation validator: one script, both the minting policy of the stake token and the script credential of the stake address. */
 export const REPUTATION_SCRIPT_HASH = '5168e1871cfdb1e55c18ee173acbcdce092044a48bc2e23f3ba35093';
 export const REPUTATION_ADDRESS = 'addr1w9gk3cv8rn7mre2urrhpwwkteh8qjgzy5j9u9c3l8w34pyc76uluq';
@@ -194,7 +203,7 @@ export function stakedCapabilities(requested: unknown, record: Pick<RegistryReco
     const hex = fromText(cap);
     if (out.includes(hex)) throw new Error(`Capability ${cell(cap)} is named twice.`);
     if (!listed.includes(hex)) {
-      throw new Error(`Capability ${cell(cap)} is not in the registry record of ${agentId}, which lists: ${listed.map((h) => cell(capabilityText(h), 64)).join(', ') || '(none)'}. The validator accepts only capabilities the record lists; add it with vector_build_update_agent first, or stake on listed ones.`);
+      throw new Error(`Capability ${cell(cap)} is not in the registry record of ${agentId}, which lists: ${listed.map((h) => cell(capabilityText(h), 64)).join(', ') || '(none)'}. The validator accepts only capabilities the record lists; stake on listed ones.`);
     }
     out.push(hex);
   }

@@ -12,6 +12,7 @@ import type { DeployedScript, IdentityDeployment, RefName } from '../../src/vect
 import { encodeIdentityDatum, utf8Hex } from '../../src/vector/identity-codec.ts';
 import type { IdentityDatum, Party } from '../../src/vector/identity-codec.ts';
 import { allowlistRoot, keyHashOf } from '../../src/vector/identity-rules.ts';
+import type { RewardAccount } from '@apexfusion/vector-mcp-shared/provider';
 
 /** 2026-11-15T12:00:00Z: the time of every build in the tests. */
 export const NOW = Date.UTC(2026, 10, 15, 12, 0, 0);
@@ -97,11 +98,13 @@ export function recordUtxo(id: string, record: IdentityDatum, lovelace = 10_000_
 
 /**
  * A node that holds the wallet, the reference scripts, the configuration record (unless `config: false`) and `extra`. Its reward
- * accounts hold `rewards` (default 0), which a Module-1 consent withdraws in full.
+ * accounts are registered and hold `rewards` (default 0), which a Module-1 consent withdraws in full; `rewards: null` makes them not
+ * registered.
  */
-export function identityWorld(extra: UTxO[] = [], opts: { config?: boolean; rewards?: bigint } = {}): FixtureProvider {
+export function identityWorld(extra: UTxO[] = [], opts: { config?: boolean; rewards?: bigint | null } = {}): FixtureProvider {
   const provider = new FixtureProvider([...FIXTURE_UTXOS, ...REF_UTXOS, ...(opts.config === false ? [] : [CONFIG_UTXO]), ...extra]);
-  return Object.assign(provider, { getDelegation: async () => ({ poolId: null, rewards: opts.rewards ?? 0n }) });
+  const account: RewardAccount = opts.rewards === null ? { registered: false, source: 'koios' } : { registered: true, rewards: opts.rewards ?? 0n, source: 'ogmios' };
+  return Object.assign(provider, { getRewardAccount: async () => account });
 }
 
 /** Lucid bound to the fixture wallet. */

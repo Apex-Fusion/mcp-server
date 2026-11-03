@@ -3,9 +3,8 @@
 // (advert-stake-golden.fixture.ts): the same opening datum, stake datum, stake token, redeemers, reference inputs and validity range,
 // from the same agent, owner, capabilities and tip, and the deployed reputation validator evaluating each built transaction against the
 // ledger state those stakes were made in (uplc-node.fixture.ts). Each "verdict" test pairs an accepted twin with the rejected case: the
-// SDK's testnet clock, a capability the registry record does not list. The tool text about the stake is pinned the same way: a decrease
-// below the module's minimum is rejected, and the module's oracle key consumes all of a stake through ClaimDecayRefund once its activity
-// window (about 163 s as deployed) has passed. No network is touched.
+// SDK's testnet clock, a capability the registry record does not list. An exit path of an existing stake is pinned the same way: the
+// deployed validator accepts a DecreaseStake down to the module's minimum and rejects one below it. No network is touched.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -152,7 +151,7 @@ describe('the stake datum and token, byte for byte against the SDK\'s', () => {
 });
 
 describe('one key across identity, advert and stake', () => {
-  test('Advocate: the registry record\'s owner (registered by vector_build_register_agent), the stake\'s owner and the advert\'s supplier are one key hash', () => {
+  test('Advocate: the legacy registry record\'s owner, the stake\'s owner and the advert\'s supplier are one key hash', () => {
     assert.equal(STAKE_A.registry.txHash, REGISTRATION_TX);
     const owner = recordOf(STAKE_A).ownerPkh;
     assert.equal(decodeStakeDatum(STAKE_A.stakeDatumHex).owner_pkh, owner);
@@ -281,7 +280,7 @@ describe('buildStake (step 2): the deployed validator accepts what the SDK built
     await assert.doesNotReject(handBuiltStake(STAKE_A, (plan) => plan.datumHex, [fromText(STAKE_A.capabilities[0])]), 'the twin: the record\'s capability, accepted');
     await assert.rejects(handBuiltStake(STAKE_A, (plan) => plan.datumHex, [fromText('data_analysis')]), /failed script execution/);
   });
-  test('what the tool text says about withdrawal: the deployed validator refuses to decrease a stake below the minimum, and allows it above', async () => {
+  test('an exit path of an existing stake: the deployed validator accepts a DecreaseStake down to the module\'s minimum, and rejects one below it', async () => {
     const c = STAKE_A;
     const live = decodeStakeDatum(c.stakeDatumHex);
     const unit = stakeTokenUnit(c.agentDidHex);
@@ -298,48 +297,6 @@ describe('buildStake (step 2): the deployed validator accepts what the SDK built
     };
     await assert.rejects(decrease(10_000_000n, 1_000_000n), /failed script execution/, 'a stake at the minimum (10 units) cannot be decreased');
     await assert.doesNotReject(decrease(11_000_000n, 1_000_000n), 'down to the minimum it can');
-  });
-  test('what the tool text says about decay: the module\'s oracle key consumes all of a stake at the minimum through ClaimDecayRefund about 163 s after its last update', async () => {
-    // The module's configuration as deployed: the oracle key (deploy_state wallet_vkey_hash, the key the refs token policy is locked to)
-    // and the treasury script (the SDK's TREASURY_SCRIPT_HASH). A decay that drops the stake below the minimum burns the token and must
-    // send the treasury its share; nothing sends the rest to the owner. The parameters' epoch_length (900) and activity_window (180) are
-    // compared with POSIX milliseconds: decay opens once (now - last_updated) / 900 > 180, at 162.9 s.
-    const ORACLE = '151cadb75179beb35c094c4d05aed5cf9ac1ef5295e5161ac4141de4';
-    const oracleAddress = credentialToAddress('Mainnet', { type: 'Key', hash: ORACLE });
-    const treasury = credentialToAddress('Mainnet', { type: 'Script', hash: 'ab1aad52c4774e5da9f2c0fa1a4d07220a0bdd57ee3dce9be860dac6' });
-    const c = STAKE_A;
-    const live = decodeStakeDatum(c.stakeDatumHex);
-    const unit = stakeTokenUnit(c.agentDidHex);
-    const stake: UTxO = { txHash: c.tx.txHash, outputIndex: 0, address: REPUTATION_ADDRESS, assets: { lovelace: 10_000_000n, [unit]: 1n }, datum: c.stakeDatumHex };
-    const oracleWallet: UTxO = { txHash: 'f1'.repeat(32), outputIndex: 0, address: oracleAddress, assets: { lovelace: 20_000_000n } };
-    const decay = async (afterMs: number, treasuryLovelace: bigint) => {
-      const at = live.last_updated + afterMs;
-      const node = uplcEvaluatingProvider([oracleWallet, stake, ...MODULE], (at - ZERO) / 1000);
-      await ensureSlotConfig(node);
-      const lucid = await lucidForAddress(node, oracleAddress);
-      return lucid.newTx().readFrom(MODULE).collectFrom([stake], Data.to(new Constr(4, []))) // StakeAction.ClaimDecayRefund
-        .mintAssets({ [unit]: -1n }, Data.to(new Constr(1, []))) // StakeMintAction.BurnStakeToken
-        .pay.ToAddress(treasury, { lovelace: treasuryLovelace })
-        .addSignerKey(ORACLE).validFrom(at).validTo(at + 600_000).complete({ localUPLCEval: false });
-    };
-    // At + 200 s: 222 epochs, 42 past the window; decay 10 x 1% x 42 = 4.2 units, 5% of it (0.21) to the collector, 3.99 to the treasury.
-    await assert.rejects(decay(150_000, 3_990_000n), /failed script execution/, 'rejected at last_updated + 150 s');
-    await assert.rejects(decay(162_000, 3_990_000n), /failed script execution/, 'still rejected at + 162 s');
-    await assert.doesNotReject(decay(163_000, 3_990_000n), 'accepted at + 163 s');
-    const accepted = await decay(200_000, 3_990_000n);
-    await assert.rejects(decay(200_000, 3_989_999n), /failed script execution/, 'the treasury\'s share is the rule: one lovelace short is rejected');
-    const outs = txOf(accepted.toCBOR()).body().outputs();
-    const sent: Array<[string, bigint]> = [];
-    for (let i = 0; i < outs.len(); i++) sent.push([outs.get(i).address().to_bech32(), BigInt(outs.get(i).amount().coin().toString())]);
-    assert.deepEqual(sent[0], [treasury, 3_990_000n], 'the treasury output');
-    assert.ok(sent.slice(1).every(([address]) => address === oracleAddress), 'every other output is the oracle\'s: the collector fee and the rest of the stake');
-    const fee = BigInt(txOf(accepted.toCBOR()).body().fee().toString());
-    const inputs = inputRefs(accepted.toCBOR()).reduce((sum, ref) => sum + (ref === `${stake.txHash}#0` ? 10_000_000n : ref === `${oracleWallet.txHash}#0` ? 20_000_000n : 0n), 0n);
-    const toOracle = sent.slice(1).reduce((sum, [, l]) => sum + l, 0n);
-    assert.equal(toOracle, inputs - 3_990_000n - fee, 'the oracle takes everything the treasury does not');
-    assert.ok(toOracle >= 10_000_000n - 3_990_000n - fee, 'including the rest of the stake (6.01 units, the 0.21 collector fee among them), less the fee');
-    assert.ok(!sent.some(([address]) => address === c.ownerAddress), 'nothing goes to the owner');
-    assert.deepEqual(minted(accepted.toCBOR()), { [unit]: '-1' }, 'the stake token is burned');
   });
 });
 

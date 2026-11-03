@@ -742,11 +742,11 @@ describe('the build tools\' error text and rate limit', () => {
 });
 
 describe('registration', () => {
-  test('registers exactly the three read tools, the eight build tools, the three transport tools and the two legacy advert tools', () => {
+  test('registers exactly the three read tools, the five escrow build tools, the three transport tools and the four advert tools', () => {
     const all = [
       'vector_build_marketplace_accept', 'vector_build_marketplace_advert_post', 'vector_build_marketplace_advert_retire', 'vector_build_marketplace_advert_update',
       'vector_build_marketplace_post_advert', 'vector_build_marketplace_post_escrow', 'vector_build_marketplace_reclaim', 'vector_build_marketplace_refund_revoked',
-      'vector_build_marketplace_release', 'vector_build_marketplace_retire_advert',
+      'vector_build_marketplace_release',
       'vector_marketplace_get_job', 'vector_marketplace_get_supplier', 'vector_marketplace_list_capabilities', 'vector_marketplace_list_suppliers',
       'vector_marketplace_send_job', 'vector_marketplace_verify_receipt',
     ];

@@ -27,7 +27,8 @@ import { startServer, stopServer, ServerContext } from '../setup.ts';
  */
 // The identity registry slice (did:vector, Part 2 Section 10) took the list from 37 to 62: it removed the legacy register, update
 // and transfer tools and added 14 identity registry, 4 attestation, 2 delegation, 3 vault and 5 marketplace build tools. The Module-6
-// deployment on the identity registry took it to 64: a critique and an endorsement each take a lock and a creation step.
+// deployment on the identity registry took it to 64: a critique and an endorsement each take a lock and a creation step. One retire
+// tool for both advert layouts took it to 63: vector_build_marketplace_advert_retire also retires a legacy advert.
 const EXPECTED_TOOLS = [
   'vector_await_transaction',
   'vector_build_attestation_attest',
@@ -62,7 +63,6 @@ const EXPECTED_TOOLS = [
   'vector_build_marketplace_reclaim',
   'vector_build_marketplace_refund_revoked',
   'vector_build_marketplace_release',
-  'vector_build_marketplace_retire_advert',
   'vector_build_reputation_stake',
   'vector_build_reputation_stake_open',
   'vector_build_self_improvement_critique',

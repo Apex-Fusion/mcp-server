@@ -6,6 +6,7 @@ import type { LucidEvolution, Provider, TxSignBuilder, UTxO } from '@lucid-evolu
 import { Constr, Data } from '@lucid-evolution/lucid';
 import { deriveNftAssetName } from '@apexfusion/vector-mcp-shared/tx';
 import type { VectorUnsignedBuildResult } from '@apexfusion/vector-mcp-shared/types';
+import type { OgmiosProvider, RewardAccount } from '@apexfusion/vector-mcp-shared/provider';
 import { toBuildResult } from './build.js';
 import { ensureSlotConfig, paymentKeyHashOf, ChainClockError } from './gov-build.js';
 import type { SlotClockProvider } from './gov-build.js';
@@ -220,22 +221,32 @@ export async function requireConfigRecord(provider: Provider, deployment: Identi
   return config;
 }
 
+/** A node provider that reads a reward account with no default: OgmiosProvider.getRewardAccount. */
+export type RewardAccountReader = Pick<OgmiosProvider, 'getRewardAccount'>;
+const readsRewardAccounts = (provider: Provider): provider is Provider & RewardAccountReader =>
+  typeof (provider as Provider & Partial<RewardAccountReader>).getRewardAccount === 'function';
+
 /**
  * What a transaction needs so that Module-1 consents to becoming a party (`ok(Script{M1})`, Part 2 Sections 3.2 and 3.8): the
  * configuration record as a reference input, the reference script of identity_party, and a withdrawal from Module-1's stake
  * credential with the Consent redeemer. The ledger accepts a withdrawal only of the WHOLE reward balance, and anybody can add to that
- * account, so the balance is read from the chain (Provider.getDelegation) and withdrawn in full. The withdraw handler of Module-1 then
- * checks the consent rules.
+ * account, so the balance is read from the chain with no default (getRewardAccount: Ogmios's reward account summary, else Koios
+ * account_info, because Script(M1) is never delegated and Vector's Ogmios has no summary for a registered credential that is not
+ * delegated) and withdrawn in full. A stake credential that is not registered is refused. The withdraw handler of Module-1 then checks
+ * the consent rules.
  */
 export async function module1Consent(provider: Provider, deployment: IdentityDeployment, config: ConfigRecord): Promise<{ refs: UTxO[]; rewardAddress: string; redeemer: string; amount: bigint }> {
   const script = await readRefScript(provider, deployment, 'module1', config.m1);
   const rewardAddress = module1RewardAddress(config.m1);
-  let amount: bigint;
-  try { amount = (await provider.getDelegation(rewardAddress)).rewards; } catch (err) {
-    throw new Error(`Could not read the reward balance of Module-1's stake credential, which its consent must withdraw in full: ${errorText(err)}`);
+  if (!readsRewardAccounts(provider)) throw new Error("This server's node provider cannot read a reward account, so the balance that Module-1's consent must withdraw in full is unknown; nothing was built.");
+  let account: RewardAccount;
+  try { account = await provider.getRewardAccount({ type: 'Script', hash: config.m1 }, rewardAddress); } catch (err) {
+    throw new Error(`Could not read the reward account of Module-1's stake credential (${rewardAddress}), which its consent must withdraw in full: ${errorText(err)}`);
   }
-  if (typeof amount !== 'bigint' || amount < 0n) throw new Error("The node did not report a usable reward balance of Module-1's stake credential.");
-  return { refs: [config.utxo, script], rewardAddress, redeemer: MODULE1_CONSENT_REDEEMER, amount };
+  if (!account.registered) {
+    throw new Error(`Module-1's stake credential (${rewardAddress}) is not registered on the ledger, so the withdrawal by which Module-1 consents cannot be built: the stake credential must be registered first. Nothing was built.`);
+  }
+  return { refs: [config.utxo, script], rewardAddress, redeemer: MODULE1_CONSENT_REDEEMER, amount: account.rewards };
 }
 
 /** Does any of these signers name Module-1? */
