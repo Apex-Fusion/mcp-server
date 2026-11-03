@@ -116,12 +116,16 @@ limitations.
 
 ### Transactions
 
+Each build tool here and under Smart Contracts lists the key hashes that must sign the transaction (the wallet key, and any key that the
+transaction names as a required signer) before the unsigned CBOR, and as `required_signers` in its JSON block, as the identity and
+marketplace tools do. The ledger refuses a transaction that is submitted without these signatures.
+
 | Tool | Description |
 |------|-------------|
 | `vector_build_send_apex` | Build an unsigned AP3X transfer (keyless - sign with the local signer) |
 | `vector_build_send_tokens` | Build an unsigned native-token transfer (keyless) |
 | `vector_build_transaction` | Build an unsigned multi-output transaction (keyless, never submits) |
-| `vector_dry_run` | Simulate a transaction without submitting - estimate fees and validate |
+| `vector_dry_run` | Simulate a transaction without submitting - validate it and show its fee (the fee that a given transaction declares, or the fee of the transaction built from outputs) |
 | `vector_submit_transaction` | Broadcast an already-signed transaction (for example one signed by the local signer) |
 | `vector_await_transaction` | Wait for a submitted transaction to be confirmed on-chain |
 
@@ -137,7 +141,7 @@ limitations.
 | Tool | Description |
 |------|-------------|
 | `vector_resolve_did` | Resolve a `did:vector` DID (canonical or legacy form, optional `versionId`/`versionTime`) through the identity gateway; returns the HTTP status and the DID resolution result unchanged (no wallet needed) |
-| `vector_get_agent_profile` | Get an agent's profile by DID: a canonical DID through the identity gateway (profile, effective status, keys, record output), a legacy DID from the legacy registry (no wallet needed) |
+| `vector_get_agent_profile` | Get an agent's profile by DID: a canonical DID through the identity gateway (profile, effective status, keys, record output; the registration time is the block time of the transaction that first minted the identifier), a legacy DID from the legacy registry (no wallet needed) |
 | `vector_discover_agents` | Discover agents with a listed advert, from the marketplace indexer; filter by capability (no wallet needed) |
 | `vector_build_deregister_agent` | Build an unsigned deregistration of a legacy record that does not adopt - burns its token and returns the deposit (keyless) |
 

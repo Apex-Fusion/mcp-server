@@ -158,6 +158,28 @@ describe('vector_get_agent_profile', () => {
     assert.equal(json.origin, 'native');
     assert.deepStrictEqual(json.keys.map((k: { id: string; controller: boolean }) => [k.id, k.controller]), [[`#${CONTROLLER}`, true], [`#${LISTED}`, false]]);
   });
+  test('the registration time is the block time of the minting transaction, not the record\'s created_at (the end of its validity window)', async () => {
+    // As on mainnet: the block at 15:38:28Z, and created_at = the upper bound of a 30-minute validity window.
+    const BLOCK_TIME = '2026-11-03T15:38:28Z';
+    const WINDOW_END = '2026-11-03T16:08:19Z';
+    const meta = { ...RESULT.didDocumentMetadata, created: BLOCK_TIME, vectorProfile: { ...RESULT.didDocumentMetadata.vectorProfile, createdAt: WINDOW_END } };
+    gateway = { status: 200, body: JSON.stringify({ ...RESULT, didDocumentMetadata: meta }) };
+    stub();
+    const t = await call('vector_get_agent_profile', { agent_id: DID });
+    const registered = t.split('\n').filter((l) => l.startsWith('**Registered:**'));
+    assert.equal(registered.length, 1);
+    assert.ok(registered[0].includes(BLOCK_TIME), registered[0]);
+    assert.ok(!registered[0].includes(WINDOW_END), 'the end of the validity window is not the registration time');
+    const json = JSON.parse(t.slice(t.lastIndexOf('```json\n') + 8, t.lastIndexOf('\n```')));
+    assert.equal(json.created, BLOCK_TIME);
+    assert.equal(json.profile.createdAt, WINDOW_END, 'the record\'s own created_at stays in the profile, as the gateway gives it');
+    // Without a block time from the gateway, the record's created_at is not shown in its place.
+    const { created: _dropped, ...withoutCreated } = meta;
+    gateway = { status: 200, body: JSON.stringify({ ...RESULT, didDocumentMetadata: withoutCreated }) };
+    stub();
+    const none = (await call('vector_get_agent_profile', { agent_id: DID })).split('\n').find((l) => l.startsWith('**Registered:**'));
+    assert.ok(none !== undefined && !none.includes(WINDOW_END), String(none));
+  });
 
   test('a deactivated DID shows as such, with its listed keys and no document', async () => {
     const meta = { ...RESULT.didDocumentMetadata, deactivated: true, vectorStatus: { status: 'revoked', effective: 'revoked' } };
