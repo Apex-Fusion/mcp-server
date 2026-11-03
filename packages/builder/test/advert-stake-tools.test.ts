@@ -12,7 +12,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerMarketplaceTools } from '../src/vector/marketplace.ts';
 import { registerReputationTools } from '../src/vector/reputation-tools.ts';
 import { RateLimiter } from '../src/vector/rate-limiter.ts';
-import { ADVERT_ADDRESS } from '../src/vector/marketplace-constants.ts';
+import { ADVERT_ADDRESS, ESCROW_SWITCH_SLOT } from '../src/vector/marketplace-constants.ts';
+import { LEGACY_ADVERT_REFUSAL } from '../src/vector/marketplace-build.ts';
 import { decodeAdvertDatum } from '../src/vector/marketplace-datum.ts';
 import { stakeTokenUnit, NO_NEW_STAKES, VECTOR_MAINNET_ZERO_TIME_MS } from '../src/vector/reputation-build.ts';
 import { SIGN_COPY } from '../src/vector/marketplace-shared.ts';
@@ -82,7 +83,7 @@ describe('vector_build_marketplace_post_advert', () => {
     stubKoios([]);
     node = new FixtureProvider(supplierWallet);
     const t = await call('vector_build_marketplace_post_advert', postArgs());
-    assert.ok(t.startsWith('# Unsigned Advert Post Built (Not Submitted)\n\n**Layout:** legacy, until the switch date (for the identity layout use vector_build_marketplace_advert_post)\n'), t.slice(0, 300));
+    assert.ok(t.startsWith('# Unsigned Advert Post Built (Not Submitted)\n\n**Layout:** legacy, until the escrow switch (slot 37226741, 2026-11-03T13:25:41Z); for the identity layout use vector_build_marketplace_advert_post\n'), t.slice(0, 300));
     const j = jsonOf(t);
     assert.match(t, new RegExp(`\\*\\*Advert ref \\(after submit\\):\\*\\* \`${j.tx_hash}#0\``));
     assert.match(t, new RegExp(`\\*\\*Supplier key:\\*\\* \`${ADVOCATE.supplier_pkh}\` \\(the key of changeAddress; only it can retire the advert\\)`));
@@ -124,6 +125,33 @@ describe('vector_build_marketplace_post_advert', () => {
     assert.equal(none.detail_hash_source, 'empty');
     assert.deepEqual(requested, []);
   });
+  test('from the escrow switch slot on, it refuses with the text that names vector_build_marketplace_advert_post, before it reads the wallet', async () => {
+    assert.equal(LEGACY_ADVERT_REFUSAL, 'From the escrow switch (slot 37226741, 2026-11-03T13:25:41Z) on, new adverts use the identity layout only, so no new legacy-layout advert is built. ' +
+      'Post an identity-layout advert with vector_build_marketplace_advert_post: it names the agent (did:vector) whose record lists your supplier key and the capability. ' +
+      'To take a legacy advert off the market and get its deposit back, use vector_build_marketplace_advert_retire.');
+    for (const slot of [ESCROW_SWITCH_SLOT, ESCROW_SWITCH_SLOT + 86_400]) {
+      // Nothing but the tip may be read: the parameters and the wallet throw.
+      node = Object.assign(new FixtureProvider(supplierWallet), {
+        getNetworkTip: async () => ({ slot, hash: '' }),
+        getProtocolParameters: async () => { throw new Error('the node was asked for its parameters'); },
+        getUtxos: async () => { throw new Error('the wallet was read'); },
+      });
+      assert.equal(await call('vector_build_marketplace_post_advert', postArgs()), `Failed to build advert post: ${LEGACY_ADVERT_REFUSAL}`, `tip at slot ${slot}`);
+    }
+    assert.deepEqual(requested, [], 'nothing is fetched');
+  });
+  test('one slot before the escrow switch it still builds the legacy advert', async () => {
+    node = Object.assign(new FixtureProvider(supplierWallet), { getNetworkTip: async () => ({ slot: ESCROW_SWITCH_SLOT - 1, hash: '' }) });
+    const t = await call('vector_build_marketplace_post_advert', postArgs());
+    assert.ok(t.startsWith('# Unsigned Advert Post Built (Not Submitted)\n'), t.slice(0, 300));
+    assert.equal(jsonOf(t).layout, 'legacy');
+  });
+  test('a node that cannot give its tip is a refusal that names no endpoint, and nothing is built', async () => {
+    node = Object.assign(new FixtureProvider(supplierWallet), { getNetworkTip: async () => { throw new Error('connect ECONNREFUSED https://ogmios.internal.example'); } });
+    const t = await call('vector_build_marketplace_post_advert', postArgs());
+    assert.match(t, /^Failed to build advert post: Could not read the chain tip from the node, so it is not known whether the escrow switch \(slot 37226741, 2026-11-03T13:25:41Z\) has passed: node request failed \(network error or timeout\)\n/);
+    assert.ok(!t.includes('ogmios.internal.example') && !t.includes('Unsigned TX CBOR'));
+  });
 });
 
 const ZERO = VECTOR_MAINNET_ZERO_TIME_MS;
@@ -153,6 +181,14 @@ describe('vector_build_marketplace_advert_retire, a legacy-layout advert', () =>
     node = uplcEvaluatingProvider([{ ...ADVERT_RETIRE.wallet, address: STAKE_A.ownerAddress }, ADVERT_RETIRE.advert, advertScript], nowSlot());
     const t = await call('vector_build_marketplace_advert_retire', { changeAddress: STAKE_A.ownerAddress, advert_ref: RETIRE_REF });
     assert.match(t, /^Failed to build advert retirement: This advert names supplier key [0-9a-f]{56}, not the key of changeAddress; only its supplier can retire it\./);
+  });
+  test('the escrow switch does not stop it: a legacy advert retires at a tip past the switch slot', async () => {
+    stubKoios([advertRow()]);
+    const n = uplcEvaluatingProvider([ADVERT_RETIRE.wallet, ADVERT_RETIRE.advert, advertScript], ESCROW_SWITCH_SLOT + 86_400);
+    node = n;
+    const t = await call('vector_build_marketplace_advert_retire', { changeAddress: ADVERT_RETIRE.wallet.address, advert_ref: RETIRE_REF });
+    assert.ok(t.startsWith('# Advert Retirement Built (Unsigned, Not Submitted)\n\n**Layout:** legacy (the advert names no agent)\n'), t.slice(0, 300));
+    assert.equal(n.evaluations.length, 1, 'the deployed advert validator accepted it');
   });
 });
 

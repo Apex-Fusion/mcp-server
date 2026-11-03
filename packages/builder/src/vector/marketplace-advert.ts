@@ -1,7 +1,8 @@
 // packages/builder/src/vector/marketplace-advert.ts
 // Keyless building of the legacy-layout advert (the 13-field advert of the marketplace before the identity registry): the Post that
-// lists a supplier (legacy layout, until the switch date) and the Retire that takes a legacy listing down and returns its deposit
-// (vector_build_marketplace_advert_retire uses it for a legacy advert, so that suppliers retire their legacy adverts during the switch).
+// lists a supplier (refused from the escrow switch on, ESCROW_SWITCH_SLOT) and the Retire that takes a legacy listing down and returns
+// its deposit (vector_build_marketplace_advert_retire uses it for a legacy advert, before and after the switch, so that suppliers retire
+// their legacy adverts during the drain).
 // Each builder returns UNSIGNED CBOR; the supplier signs on its local signer. The plan functions are pure: they decide what a
 // transaction must say, so the same numbers can be shown before signing and unit-tested without a chain.
 //
@@ -25,7 +26,7 @@ import { encodeAdvertDatum, formatOutRef, parseOutRef } from './marketplace-datu
 import type { AdvertDatum } from './marketplace-datum.js';
 import { readAdvert } from './marketplace-indexer.js';
 import { nodeFailure } from './marketplace-lineage.js';
-import { reserveCollateralInputs, assertCollateral, assertWalletIs } from './marketplace-build.js';
+import { reserveCollateralInputs, assertCollateral, assertWalletIs, assertBeforeEscrowSwitch, LEGACY_ADVERT_REFUSAL } from './marketplace-build.js';
 import { checkAdvertTerms, detailHashFor } from './marketplace-advert-build.js';
 import type { AdvertTerms, DetailHashSource } from './marketplace-advert-build.js';
 import { signedByResult, SignerList } from './identity-chain.js';
@@ -36,7 +37,7 @@ const errorText = (err: unknown) => (err instanceof Error ? err.message : String
 const ErrorWithCause = Error as new (message?: string, options?: { cause?: unknown }) => Error;
 const KEY_HASH_HEX = /^[0-9a-f]{56}$/;
 
-// ─── Post (legacy layout, until the switch date) ───────────────────────────
+// ─── Post (legacy layout, refused from the escrow switch on) ────────────────
 
 export interface PostAdvertPlan {
   datum: AdvertDatum; datumHex: string;
@@ -99,13 +100,15 @@ export type PostAdvertBuild = VectorUnsignedBuildResult & {
 
 /**
  * Builds the unsigned Post of a legacy-layout advert at output 0 of a new transaction, naming the key of `changeAddress` as its
- * supplier. Nothing is signed or submitted, and nothing is fetched (detailHashFor: a detail URI needs the caller's detail_hash). The
+ * supplier. Refused (LEGACY_ADVERT_REFUSAL) once the node's tip has reached the escrow switch: from then on new adverts use the identity
+ * layout. Nothing is signed or submitted, and nothing is fetched (detailHashFor: a detail URI needs the caller's detail_hash). The
  * wallet must be the one bound to changeAddress. The Post leaves the wallet's smallest pure 5-unit output alone when it can.
  */
 export async function buildPostAdvert(
   lucid: LucidEvolution, provider: Provider,
   p: { changeAddress: string; terms: Omit<AdvertTerms, 'detailHash'> & { detailHash?: string }; nowMs?: number },
 ): Promise<PostAdvertBuild> {
+  await assertBeforeEscrowSwitch(provider, LEGACY_ADVERT_REFUSAL);
   const supplierPkh = paymentKeyHashOf(p.changeAddress);
   const nowMs = p.nowMs ?? Date.now();
   const { detailHash, source: detailHashSource } = detailHashFor(p.terms.detailUri, p.terms.detailHash);

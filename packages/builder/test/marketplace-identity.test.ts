@@ -13,6 +13,7 @@ import {
   SUPPLIER_PKH, advertUtxo, agentRecord, chainFake, escrowUtxo, identityEscrow, keyAddress, listedRow, submitted, supplierEnterprise,
 } from './fixtures/escrow-identity.fixture.ts';
 import { ESCROW_OPEN_DATUM_HEX, ESCROW_REF as LEGACY_REF } from './fixtures/marketplace.fixture.ts';
+import { ESCROW_SWITCH_SLOT } from '../src/vector/marketplace-constants.ts';
 import { escrowAt, koiosFor, SUBMIT_TX as LEGACY_SUBMIT_TX, SUPPLIER_ADDRESS as LEGACY_SUPPLIER_ADDRESS } from './fixtures/escrow-koios.fixture.ts';
 import { REF_SCRIPT_UTXO, evaluatingProvider } from './fixtures/escrow-node.fixture.ts';
 import { FIXTURE_TOKEN_UNIT } from './fixtures/fixture-provider.ts';
@@ -285,6 +286,14 @@ describe('the legacy escrow keeps its rules', () => {
     assert.ok(provider.evaluations.length > 0, 'the node evaluates the legacy script');
     assert.ok(outputsOf(r.txCbor).some((o) => o.address === LEGACY_SUPPLIER_ADDRESS && o.lovelace === 2_200_000n));
     assert.deepEqual(requiredSigners(r.txCbor), [getAddressDetails(LEGACY_SUPPLIER_ADDRESS).paymentCredential!.hash]);
+  });
+  test('the escrow switch does not stop it: a legacy escrow is released at a tip past the switch slot', async () => {
+    await ensureSlotConfig(new FixtureProvider([]));
+    const { provider, k } = legacyWorld([supplier]);
+    provider.getNetworkTip = async () => ({ slot: ESCROW_SWITCH_SLOT + 86_400, hash: '' });
+    const r = await buildRelease(await lucidForAddress(provider, LEGACY_SUPPLIER_ADDRESS), provider, KOIOS, { changeAddress: LEGACY_SUPPLIER_ADDRESS, escrowRef: LEGACY_REF, nowMs: SUBMITTED_AT + 700_000, deployment: DEPLOYMENT }, k.f);
+    assert.equal(r.layout, 'legacy');
+    assert.ok(outputsOf(r.txCbor).some((o) => o.address === LEGACY_SUPPLIER_ADDRESS && o.lovelace === 2_200_000n));
   });
   test('RefundRevoked of a legacy escrow is refused: it has no such redeemer', async () => {
     const { provider, k } = legacyWorld([{ txHash: '0a'.repeat(32), outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 100_000_000n } }]);

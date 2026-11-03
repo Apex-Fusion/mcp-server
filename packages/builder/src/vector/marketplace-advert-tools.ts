@@ -1,9 +1,10 @@
 // packages/builder/src/vector/marketplace-advert-tools.ts
 // The marketplace advert tools: keyless builders for the supplier side. The identity-layout advert (Part 2 Section 6.2): post, update
-// and retire; the retire takes a legacy-layout advert too, so that suppliers retire their legacy adverts during the switch. And the
-// legacy Post (legacy layout, until the switch date). Both layouts follow one set of terms rules (checkAdvertTerms). Each tool takes a
-// wallet address only and returns unsigned CBOR for the local signer; nothing here signs or submits. The node they build against comes
-// from `providerFor` and the identity deployment from `deploymentFor`, so the entry point decides them (and a test can hand in its own).
+// and retire; the retire takes a legacy-layout advert too, so that suppliers retire their legacy adverts during the drain. And the
+// legacy Post (legacy layout), refused from the escrow switch on (ESCROW_SWITCH_SLOT). Both layouts follow one set of terms rules
+// (checkAdvertTerms). Each tool takes a wallet address only and returns unsigned CBOR for the local signer; nothing here signs or
+// submits. The node they build against comes from `providerFor` and the identity deployment from `deploymentFor`, so the entry point
+// decides them (and a test can hand in its own).
 import { z } from "zod/v4";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Provider } from '@lucid-evolution/lucid';
@@ -17,6 +18,7 @@ import { advertLayoutAt, buildAdvertPost, buildAdvertUpdate, buildAdvertRetire, 
 import type { DetailHashSource } from './marketplace-advert-build.js';
 import { identityOnly } from './marketplace-build-tools.js';
 import type { MaybeDeploymentFor } from './marketplace-build-tools.js';
+import { escrowSwitchPassed, ESCROW_SWITCH_NAME, LEGACY_ADVERT_REFUSAL } from './marketplace-build.js';
 import { ADVERT_ADDRESS, MAX_PROCESSING_MS_CEILING, MIN_PROCESSING_MS_FLOOR } from './marketplace-constants.js';
 import { text, fail, cell, isoOrRaw, SIGN_COPY } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
@@ -210,7 +212,7 @@ export function registerMarketplaceAdvertTools(server: McpServer, checkRateLimit
 
   server.tool(
     "vector_build_marketplace_post_advert",
-    "Legacy layout, until the switch date. Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace with a legacy-layout advert, which names no agent DID (for the identity layout use vector_build_marketplace_advert_post): posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert with vector_build_marketplace_advert_retire. " + LEGACY_TERMS_RULES + " Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key; once the Post confirms, " + ADVERT_REF_COPY + " The transaction is valid for 5 minutes. " + SIGN_COPY,
+    "Legacy layout, refused from " + ESCROW_SWITCH_NAME + " on: from then on new adverts use the identity layout, so use vector_build_marketplace_advert_post (the advert names your agent's did:vector DID). Before the switch, it builds an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace with a legacy-layout advert, which names no agent DID: posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert with vector_build_marketplace_advert_retire (also after the switch). " + LEGACY_TERMS_RULES + " Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow until the switch, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key; once the Post confirms, " + ADVERT_REF_COPY + " The transaction is valid for 5 minutes. " + SIGN_COPY,
     {
       changeAddress: z.string().describe("Your supplier wallet address: its key becomes the advert's supplier key, the only key that can retire the advert. Get it from vector_signer_get_address."),
       capability_id: z.string().min(1).describe(CAPABILITY_ID),
@@ -224,6 +226,8 @@ export function registerMarketplaceAdvertTools(server: McpServer, checkRateLimit
       const limited = checkRateLimit(); if (limited) return limited;
       try {
         const provider = providerFor();
+        // From the escrow switch on, no wallet can make this tool build: it refuses before it reads one (buildPostAdvert checks again).
+        if (await escrowSwitchPassed(provider)) return text(`Failed to build advert post: ${LEGACY_ADVERT_REFUSAL}`);
         const lucid = await lucidForAddress(provider, changeAddress);
         const r = await buildPostAdvert(lucid, provider, {
           changeAddress,
@@ -237,7 +241,7 @@ export function registerMarketplaceAdvertTools(server: McpServer, checkRateLimit
         const warning = r.collateralKept ? '' : '\n**Warning:** no pure 5-unit output was kept aside; a supplier needs one as collateral to Claim, Submit and Retire, so make sure the wallet still has one afterwards (the change of this Post counts if it is a pure output of at least 5 units).';
         // The advert's text fields are the caller's, and each tool shows them on one line: they go through cell().
         const md = `# Unsigned Advert Post Built (Not Submitted)\n\n` +
-          `**Layout:** legacy, until the switch date (for the identity layout use vector_build_marketplace_advert_post)\n` +
+          `**Layout:** legacy, until ${ESCROW_SWITCH_NAME}; for the identity layout use vector_build_marketplace_advert_post\n` +
           `**Advert ref (after submit):** \`${r.advertRef}\`\n` +
           `**Supplier key:** \`${d.supplier_pkh}\` (the key of changeAddress; only it can retire the advert)\n` +
           `**Capability:** \`${cell(d.capability_id)}\`, model \`${cell(d.model)}\`, up to ${d.max_output_tokens} output tokens\n` +

@@ -16,14 +16,14 @@ import {
 import type { KoiosFake, SpentOutputs } from './fixtures/escrow-koios.fixture.ts';
 import {
   ADVERT_ADDRESS, ESCROW_ADDRESS, ESCROW_REF_UTXO, ESCROW_SCRIPT_HASH, DELIVER_BY_BUFFER_MS, ACCEPT_WINDOW_MS, MARKETPLACE_MIN_FEE,
-  MAX_PROCESSING_MS_CEILING, COLLATERAL_MIN_LOVELACE,
+  MAX_PROCESSING_MS_CEILING, COLLATERAL_MIN_LOVELACE, ESCROW_SWITCH_SLOT, ESCROW_SWITCH_AT,
 } from '../src/vector/marketplace-constants.ts';
 import { ensureSlotConfig, paymentKeyHashOf as govPaymentKeyHashOf } from '../src/vector/gov-build.ts';
 import { decodeAdvertDatum, decodeEscrowDatum, encodeEscrowDatum, formatOutRef, promptHashForPayload } from '../src/vector/marketplace-datum.ts';
 import type { EscrowDatum } from '../src/vector/marketplace-datum.ts';
 import {
   planPostEscrow, buildPostEscrow, reserveCollateralInputs, planAccept, planReclaim, paymentKeyHashOf, enterpriseAddressOf,
-  assertEscrowIsOutputZero, buildAccept, buildReclaim, supplierPayoutRaised,
+  assertEscrowIsOutputZero, buildAccept, buildReclaim, supplierPayoutRaised, escrowSwitchPassed, legacyEscrowRefusal, ESCROW_SWITCH_NAME,
 } from '../src/vector/marketplace-build.ts';
 
 const OWN_PKH = getAddressDetails(OWN_ADDRESS).paymentCredential!.hash;
@@ -535,6 +535,52 @@ describe('buildPostEscrow (offline)', () => {
     // A lucid whose builder puts another payment first, so the escrow lands at output 1 and escrow_ref would point at the wrong output.
     const rogue = { ...lucid, newTx: () => lucid.newTx().pay.ToAddress(OWN_ADDRESS, { lovelace: 1_500_000n }) } as LucidEvolution;
     await assert.rejects(() => buildPostEscrow(rogue, provider, { changeAddress: OWN_ADDRESS, advertRef: ADVERT_REF, payload: 'hello', nowMs: NOW }, koiosFake().f), /output 0/);
+  });
+});
+
+describe('the escrow switch (Part 2 Section 9.6)', () => {
+  const tipNode = (getNetworkTip: () => Promise<unknown>) => Object.assign(new FixtureProvider(FIXTURE_UTXOS), { getNetworkTip });
+  const at = (slot: unknown) => tipNode(async () => ({ slot, hash: '' }));
+
+  test('the switch slot is 2026-11-03T13:25:41Z on Vector mainnet, and the texts name both', () => {
+    const ZERO_TIME_MS = 1_756_485_600_000; // Vector mainnet's chain start (FixtureProvider.getSystemStartMs)
+    assert.equal(ESCROW_SWITCH_SLOT, 37_226_741);
+    assert.equal(Date.parse(ESCROW_SWITCH_AT), ZERO_TIME_MS + ESCROW_SWITCH_SLOT * 1000);
+    assert.equal(new Date(ZERO_TIME_MS + ESCROW_SWITCH_SLOT * 1000).toISOString(), '2026-11-03T13:25:41.000Z');
+    assert.equal(ESCROW_SWITCH_NAME, 'the escrow switch (slot 37226741, 2026-11-03T13:25:41Z)');
+  });
+  test('escrowSwitchPassed: a tip at the switch slot or after it has passed it, a tip one slot before it has not', async () => {
+    for (const slot of [0, ESCROW_SWITCH_SLOT - 1]) assert.equal(await escrowSwitchPassed(at(slot)), false, `slot ${slot}`);
+    for (const slot of [ESCROW_SWITCH_SLOT, ESCROW_SWITCH_SLOT + 1, 2 * ESCROW_SWITCH_SLOT]) assert.equal(await escrowSwitchPassed(at(slot)), true, `slot ${slot}`);
+  });
+  test('a tip that the node cannot give, or that is not a slot, is an error that names no endpoint', async () => {
+    const unknown = 'Could not read the chain tip from the node, so it is not known whether the escrow switch (slot 37226741, 2026-11-03T13:25:41Z) has passed: ';
+    const failsWith = (message: string) => (err: unknown) => { assert.ok(err instanceof Error); assert.equal(err.message, message); return true; };
+    await assert.rejects(escrowSwitchPassed(tipNode(async () => { throw new Error('connect ECONNREFUSED https://ogmios.internal.example'); })),
+      failsWith(`${unknown}node request failed (network error or timeout)`));
+    await assert.rejects(escrowSwitchPassed(tipNode(async () => { throw new Error('Ogmios request failed (queryNetwork/tip): network error at https://ogmios.internal.example'); })),
+      failsWith(`${unknown}Ogmios request failed (queryNetwork/tip): network error`));
+    await assert.rejects(escrowSwitchPassed(Object.assign(new FixtureProvider([]), { getNetworkTip: undefined })), failsWith(`${unknown}node request failed (network error or timeout)`));
+    for (const slot of [Number.NaN, -1, 1.5, String(ESCROW_SWITCH_SLOT), undefined, null]) {
+      await assert.rejects(escrowSwitchPassed(at(slot)), failsWith('The node did not report a usable chain tip, so it is not known whether the escrow switch (slot 37226741, 2026-11-03T13:25:41Z) has passed.'));
+    }
+  });
+  test('buildPostEscrow refuses a legacy advert from the switch slot on, before it asks Koios who created the advert; one slot before, it builds', async () => {
+    for (const slot of [ESCROW_SWITCH_SLOT, ESCROW_SWITCH_SLOT + 86_400]) {
+      const node = at(slot);
+      const k = koiosFake();
+      await assert.rejects(buildPostEscrow(await lucidForAddress(node, OWN_ADDRESS), node, { changeAddress: OWN_ADDRESS, advertRef: ADVERT_REF, payload: 'hello', nowMs: NOW }, k.f), (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.equal(err.message, legacyEscrowRefusal(ADVERT_REF));
+        return true;
+      });
+      assert.equal(utxoInfoCalls(k), 1, 'the advert is read: its layout decides');
+      assert.equal(txInfoCalls(k), 0, 'the author check is not reached');
+    }
+    const before = at(ESCROW_SWITCH_SLOT - 1);
+    const r = await buildPostEscrow(await lucidForAddress(before, OWN_ADDRESS), before, { changeAddress: OWN_ADDRESS, advertRef: ADVERT_REF, payload: 'hello', nowMs: NOW }, koiosFake().f);
+    assert.equal(r.layout, 'legacy');
+    assert.equal(outputs(r.txCbor)[0].address, ESCROW_ADDRESS);
   });
 });
 

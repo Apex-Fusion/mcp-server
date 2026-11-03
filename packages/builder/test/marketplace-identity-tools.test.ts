@@ -10,6 +10,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerMarketplaceTools } from '../src/vector/marketplace.ts';
 import { RateLimiter } from '../src/vector/rate-limiter.ts';
 import { canonicalize, sha256Utf8Hex } from '../src/vector/marketplace-datum.ts';
+import { ESCROW_SWITCH_SLOT } from '../src/vector/marketplace-constants.ts';
 import { getJob } from '../src/vector/marketplace-transport.ts';
 import { DEPLOYMENT, LISTED, OWN_ADDRESS, identityWorld } from './fixtures/identity-world.ts';
 import {
@@ -67,6 +68,13 @@ describe('the escrow tools in the identity layout', () => {
     const j = jsonOf(t);
     assert.deepEqual([j.layout, j.agent_id, j.did], ['identity', AGENT_ID, AGENT_DID]);
     assert.deepEqual(j.required_signers, [{ key_hash: OWN_PKH, roles: ['buyer (wallet: inputs, fee and collateral)'] }]);
+  });
+  test('vector_build_marketplace_post_escrow: the escrow switch does not touch the identity layout; an identity advert is hired at a tip past the switch slot', async () => {
+    node = Object.assign(identityWorld([agentRecord()]), { getNetworkTip: async () => ({ slot: ESCROW_SWITCH_SLOT + 86_400, hash: '' }) });
+    globalThis.fetch = chainFake({ live: [advertUtxo()], listed: [listedRow()] }).f;
+    const t = await call('vector_build_marketplace_post_escrow', { changeAddress: OWN_ADDRESS, advert_ref: ADVERT_REF, payload: PAYLOAD });
+    assert.ok(t.startsWith('# Unsigned Escrow Post Built (Not Submitted)\n'), t.slice(0, 300));
+    assert.deepEqual([jsonOf(t).layout, jsonOf(t).did], ['identity', AGENT_DID]);
   });
   test('vector_build_marketplace_reclaim: anybody, a full refund to the escrow\'s refund address', async () => {
     const posted = identityEscrow(Date.now() - 3_600_000);

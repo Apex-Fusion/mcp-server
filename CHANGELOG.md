@@ -11,6 +11,12 @@
 - **Two escrow and advert layouts during the drain** (Part 2 Section 6): the marketplace tools read both the legacy
   layouts and the identity-marketplace layouts (escrow: `agent_id` and `refund`; advert: `agent_id`), and every
   post refuses an escrow above the 10,000 AP3X value cap (payment + both bonds).
+- **The escrow switch** (Part 2 Section 9.6): from mainnet slot 37226741 (2026-11-03T13:25:41Z,
+  `ESCROW_SWITCH_SLOT`), compared with the chain tip as the agents-marketplace gateway compares it, the builders
+  create identity-layout adverts and escrows only. `vector_build_marketplace_post_escrow` refuses a legacy-layout
+  advert, and `vector_build_marketplace_post_advert` refuses before it reads the wallet. The refusals name the
+  identity-layout tool to use (`vector_build_marketplace_advert_post`). Accept, reclaim and release of legacy escrows,
+  and the retire of legacy adverts, stay until the drain ends. A chain tip that the node cannot give is a refusal.
 - **`vector_build_message_agent` is retired** (Part 2 Section 10 of the identity registry plan). Its builder,
   the label-674 constant and the `metadataStr` helper are removed.
 - **`vector_discover_agents` reads the marketplace indexer** (`/suppliers`, which applies the listing rule)
@@ -54,9 +60,9 @@
   nothing). `vector_build_marketplace_advert_retire` also retires a legacy-layout advert (the supplier template's
   Retire, evaluated against the deployed advert validator in the unit tests), so suppliers retire their legacy
   adverts during the switch; `vector_build_marketplace_retire_advert` of PR #25 is gone.
-- `vector_build_marketplace_post_advert`: legacy layout, until the switch date. It posts a legacy-layout advert
-  byte-identical to the supplier template's (pinned against the service agents' live adverts), with the same terms
-  rules.
+- `vector_build_marketplace_post_advert`: legacy layout, refused from the escrow switch on (see Breaking). Before
+  the switch, it posts a legacy-layout advert byte-identical to the supplier template's (pinned against the service
+  agents' live adverts), with the same terms rules.
 - `vector_build_reputation_stake_open` and `vector_build_reputation_stake`: an agent's Module-3 reputation
   self-stake in two keyless steps, ported from the reference Python SDK (`Apex-Fusion/vector-agent-modules`,
   `Module-3/python/reputation_staking`). The current Module-3 deployment takes no new stakes. New stakes use the new
