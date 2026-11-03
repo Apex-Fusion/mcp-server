@@ -1,8 +1,8 @@
 {
   "name": "@apexfusion/vector-mcp-signer",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "type": "module",
-  "description": "Local signing companion for the Vector MCP server. Holds the key; no network.",
+  "description": "Local signing companion for the Vector MCP server. Holds the key; no network access unless VECTOR_SIGNER_OGMIOS_URL turns on one read-only input lookup.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

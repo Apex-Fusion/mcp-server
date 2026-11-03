@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 3.0.0 - 2026-11-03
+
+The identity release (PR #26) and the escrow switch (PR #27). The builder adds keyless tools for the `did:vector`
+identity registry: records, attestations, delegations and vaults. The marketplace tools read and spend both escrow
+and advert layouts. From the escrow switch (mainnet slot 37226741) on, they create identity-layout adverts and
+escrows only. The legacy registry writes and `vector_build_message_agent` are retired. The signer adds
+`vector_signer_get_public_key`, accepts partly signed transactions, and can count only the value that its own inputs
+fund. All packages, `server.json` and both advertised MCP server identities are at 3.0.0. The marketplace tools of
+PRs #20 to #24 (read, escrow build and transport) came after 2.0.0 without entries of their own; this version
+includes them.
 
 ### Breaking
 
@@ -103,7 +112,7 @@
 - Signer: optional `VECTOR_SIGNER_OGMIOS_URL`. With it, the signer reads the outputs that a transaction spends
   (one read-only `queryLedgerState/utxo` query, output references only) and counts only the value that its
   own inputs fund. Without it, or when the lookup fails, it uses the previous rule and says so in the result.
-- 63 tools in all (was 33).
+- 63 tools in all (33 before PR #25 and the identity release; 24 in 2.0.0).
 
 ### Changed
 
@@ -112,6 +121,8 @@
 - Signer: `vector_signer_sign` and `vector_signer_decode_transaction` accept a partly signed transaction. The
   witnesses of other keys stay byte for byte and in their order; this key gets exactly one witness.
 - Signer: the audit log records the outflow rule of each decision (`rule`: `own-inputs` or `all-outputs`).
+- All package versions, `server.json` and both advertised MCP server identities move to 3.0.0 (one shared
+  version).
 
 ## 2.0.0 - 2026-08-17
 
