@@ -17,8 +17,9 @@ import { readAdvert } from './marketplace-indexer.js';
 import type { AdvertRead } from './marketplace-indexer.js';
 import { formatOutRef, parseOutRef, wirePayloadFor } from './marketplace-datum.js';
 import type { AdvertDatum, EscrowDatum } from './marketplace-datum.js';
-import { koiosFailure } from './marketplace-lineage.js';
+import { koiosFailure, isIdentityEscrow } from './marketplace-lineage.js';
 import { cell } from './marketplace-shared.js';
+import type { IdentityDeployment } from './identity-deployment.js';
 
 // ─── Routes ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 export interface Route {
@@ -136,22 +137,28 @@ export function jsonObject(text: string): Record<string, unknown> | null {
 }
 
 /**
- * The advert whose endpoint serves the escrow whose Post output is `posted`, read with readAdvert at the advert script address from
- * the same Koios. Refused, naming the escrow and saying nothing was sent:
+ * The advert whose endpoint serves the escrow whose Post output is `posted`, read with readAdvert at the advert script address of the
+ * escrow's layout from the same Koios: a legacy escrow's advert at the legacy advert address, an identity-marketplace escrow's at the
+ * advert address of `o.deployment`, where it must name the escrow's agent (UpdateAdvert keeps agent_id). Refused, naming the escrow and
+ * saying nothing was sent:
  * - for a send, an advert that is Retired, spent (its supplier retired or replaced it: the endpoint it names is not one to send a
  *   payload to now) or of a spent status Koios does not report. A poll sends the supplier nothing it does not have, and the endpoint
  *   of a spent or retired advert is still where the job went, so a poll reads the advert whatever its state;
+ * - an advert of the other layout, or one that names another agent than the escrow;
  * - an endpoint that is not an https URL, and a capability that is not a template-contract one (this release).
  */
 export async function readTargetAdvert(
   posted: EscrowDatum, koiosUrl: string, fetchImpl: typeof fetch,
-  o: { refuse: (why: string) => Error; forSend: boolean },
+  o: { refuse: (why: string) => Error; forSend: boolean; deployment?: IdentityDeployment | null },
 ): Promise<AdvertDatum> {
   const { refuse } = o;
   const advertRef = formatOutRef(posted.advert_ref.txHash, posted.advert_ref.index);
+  const identity = isIdentityEscrow(posted);
   let read: AdvertRead;
-  try { read = await readAdvert(advertRef, fetchImpl, koiosUrl); } catch (err) { throw refuse(`its advert ${advertRef} could not be read (${koiosFailure(err)}).`); }
+  try { read = await readAdvert(advertRef, fetchImpl, koiosUrl, o.deployment?.advert.address ?? null); } catch (err) { throw refuse(`its advert ${advertRef} could not be read (${koiosFailure(err)}).`); }
   if ('error' in read) throw refuse(read.error);
+  if (identity !== (read.layout === 'identity')) throw refuse(`its advert ${advertRef} is ${read.layout === 'identity' ? 'an identity-marketplace' : 'a legacy'} advert, and the escrow is ${identity ? 'an identity-marketplace' : 'a legacy'} one.`);
+  if (identity && read.agentId !== posted.agent_id) throw refuse(`its advert ${advertRef} names another agent than the escrow.`);
   if (o.forSend) {
     if (read.advert.status !== 'Active') throw refuse(`its advert ${advertRef} is ${read.advert.status}.`);
     if (read.spent) throw refuse(`its advert ${advertRef} has been spent (its supplier retired or replaced it).`);

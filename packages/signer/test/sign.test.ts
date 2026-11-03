@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as CML from '@anastasia-labs/cardano-multiplatform-lib-nodejs';
-import { signTransaction } from '../src/sign.ts';
+import { publicKeyOf, signTransaction } from '../src/sign.ts';
 import { MnemonicKeySource } from '../src/keysource.ts';
 import { decodeTransaction } from '../src/decode.ts';
 // /tx is an explicitly allowed pure subpath (boundary.test.ts's own
@@ -519,5 +519,103 @@ describe('key material is never emitted', () => {
       const message = err instanceof Error ? err.message : String(err);
       assert.ok(!message.includes(KEY));
     }
+  });
+});
+
+// --- Partly signed transactions ---------------------------------------------
+//
+// A transaction with inputs of two parties needs a witness of each key. The
+// builder returns it unsigned; each key holder adds a witness in turn. These
+// tests run that round trip with the real signing function and two real keys.
+describe('a partly signed transaction: the 2-party round trip', () => {
+  const PARTY_1 = new MnemonicKeySource(TEST_MNEMONIC).load();
+  const PARTY_2 = new MnemonicKeySource(TEST_MNEMONIC, 1).load();
+
+  /** One input of each party; each party gets its own value back, less the fee that party 2 pays. */
+  function twoPartyTx(): string {
+    const inputs = CML.TransactionInputList.new();
+    inputs.add(CML.TransactionInput.new(CML.TransactionHash.from_hex('aa'.repeat(32)), 0n));
+    inputs.add(CML.TransactionInput.new(CML.TransactionHash.from_hex('bb'.repeat(32)), 1n));
+    const outputs = CML.TransactionOutputList.new();
+    outputs.add(CML.TransactionOutput.new(CML.Address.from_bech32(PARTY_1.address), CML.Value.from_coin(10_000_000n)));
+    outputs.add(CML.TransactionOutput.new(CML.Address.from_bech32(PARTY_2.address), CML.Value.from_coin(489_800_000n)));
+    const body = CML.TransactionBody.new(inputs, outputs, 200_000n);
+    return CML.Transaction.new(body, CML.TransactionWitnessSet.new(), true, undefined).to_cbor_hex();
+  }
+  const witnessesOf = (cborHex: string): CML.Vkeywitness[] => {
+    const list = CML.Transaction.from_cbor_hex(cborHex).witness_set().vkeywitnesses();
+    return Array.from({ length: list?.len() ?? 0 }, (_, i) => list!.get(i));
+  };
+  const keyHex = (w: CML.Vkeywitness) => Buffer.from(w.vkey().to_raw_bytes()).toString('hex');
+  const verifies = (w: CML.Vkeywitness, txHashHex: string) =>
+    w.vkey().verify(CML.TransactionHash.from_hex(txHashHex).to_raw_bytes(), w.ed25519_signature());
+
+  test('party 1 signs, then party 2: both witnesses verify, in signing order, and the first is byte-for-byte unchanged', () => {
+    const unsigned = twoPartyTx();
+    const first = signTransaction(unsigned, PARTY_1.privateKeyBech32);
+    const second = signTransaction(first.signedCborHex, PARTY_2.privateKeyBech32);
+
+    assert.equal(second.txHashHex, first.txHashHex, 'the body, and so the hash, never changes');
+    assert.equal(second.txHashHex, decodeTransaction(unsigned).txHashHex);
+    const [w1, w2, ...rest] = witnessesOf(second.signedCborHex);
+    assert.equal(rest.length, 0);
+    assert.equal(keyHex(w1), publicKeyOf(PARTY_1.privateKeyBech32).publicKeyHex);
+    assert.equal(keyHex(w2), publicKeyOf(PARTY_2.privateKeyBech32).publicKeyHex);
+    assert.equal(w1.to_cbor_hex(), witnessesOf(first.signedCborHex)[0].to_cbor_hex(), 'party 1\'s witness is kept exactly');
+    assert.ok(verifies(w1, second.txHashHex) && verifies(w2, second.txHashHex));
+  });
+
+  test('the other order gives the same two witnesses, the other way round', () => {
+    const unsigned = twoPartyTx();
+    const viaOne = signTransaction(signTransaction(unsigned, PARTY_1.privateKeyBech32).signedCborHex, PARTY_2.privateKeyBech32);
+    const viaTwo = signTransaction(signTransaction(unsigned, PARTY_2.privateKeyBech32).signedCborHex, PARTY_1.privateKeyBech32);
+    assert.deepStrictEqual(witnessesOf(viaTwo.signedCborHex).map((w) => w.to_cbor_hex()), witnessesOf(viaOne.signedCborHex).map((w) => w.to_cbor_hex()).reverse());
+  });
+
+  test('a key that signs again changes nothing: still one witness per key, in the same place', () => {
+    const both = signTransaction(signTransaction(twoPartyTx(), PARTY_1.privateKeyBech32).signedCborHex, PARTY_2.privateKeyBech32);
+    const again = signTransaction(both.signedCborHex, PARTY_1.privateKeyBech32);
+    assert.deepStrictEqual(witnessesOf(again.signedCborHex).map((w) => w.to_cbor_hex()), witnessesOf(both.signedCborHex).map((w) => w.to_cbor_hex()));
+  });
+
+  test('a stale witness of this key is replaced in its place; the witnesses of other keys keep their bytes and order', () => {
+    const tx = CML.Transaction.from_cbor_hex(twoPartyTx());
+    const hash = CML.hash_transaction(tx.body()).to_raw_bytes();
+    const other1 = CML.PrivateKey.generate_ed25519();
+    const other2 = CML.PrivateKey.generate_ed25519();
+    const own = CML.PrivateKey.from_bech32(PARTY_1.privateKeyBech32);
+    const list = CML.VkeywitnessList.new();
+    list.add(CML.Vkeywitness.new(other1.to_public(), other1.sign(hash)));
+    list.add(CML.Vkeywitness.new(own.to_public(), own.sign(new Uint8Array([1, 2, 3])))); // a signature over other bytes
+    list.add(CML.Vkeywitness.new(other2.to_public(), other2.sign(hash)));
+    list.add(CML.Vkeywitness.new(own.to_public(), own.sign(new Uint8Array([4, 5, 6])))); // a second stale copy
+    const witnessSet = tx.witness_set();
+    witnessSet.set_vkeywitnesses(list);
+    const stale = CML.Transaction.new(tx.body(), witnessSet, true, undefined).to_cbor_hex();
+    const before = witnessesOf(stale);
+
+    const signed = signTransaction(stale, PARTY_1.privateKeyBech32);
+    const after = witnessesOf(signed.signedCborHex);
+    assert.equal(after.length, 3, 'the two stale copies of this key become one witness');
+    assert.equal(after[0].to_cbor_hex(), before[0].to_cbor_hex());
+    assert.equal(keyHex(after[1]), keyHex(before[1]));
+    assert.ok(verifies(after[1], signed.txHashHex), 'the witness of this key now verifies');
+    assert.equal(after[2].to_cbor_hex(), before[2].to_cbor_hex());
+  });
+});
+
+describe('publicKeyOf', () => {
+  test('gives the 32-byte public key and the key hash that the address of the key uses as its payment credential', () => {
+    const identity = new MnemonicKeySource(TEST_MNEMONIC).load();
+    const { publicKeyHex, keyHashHex } = publicKeyOf(identity.privateKeyBech32);
+    assert.match(publicKeyHex, /^[0-9a-f]{64}$/);
+    assert.match(keyHashHex, /^[0-9a-f]{56}$/);
+    assert.equal(keyHashHex, CML.Address.from_bech32(identity.address).payment_cred()!.as_pub_key()!.to_hex());
+    assert.equal(publicKeyHex, Buffer.from(CML.PrivateKey.from_bech32(identity.privateKeyBech32).to_public().to_raw_bytes()).toString('hex'));
+  });
+
+  test('never echoes an invalid key', () => {
+    const rejected = 'this-key-value-must-never-appear-in-the-thrown-message';
+    assert.throws(() => publicKeyOf(rejected), (err: Error) => /Invalid private key/.test(err.message) && !err.message.includes(rejected));
   });
 });

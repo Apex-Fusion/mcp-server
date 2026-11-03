@@ -1,8 +1,9 @@
 // packages/builder/test/marketplace-advert.test.ts
-// The supplier side of an advert: the datum writer, the Post and the Retire. Parity is held against the supplier template's own
-// transactions on mainnet (advert-stake-golden.fixture.ts): the same datum bytes, deposit and validity range for each of the service
-// agents' Posts, and for the Retire the same output to the supplier, validity range and reference script, with the deployed advert
-// validator evaluating the built transaction (uplc-node.fixture.ts). No network is touched: Koios is stubbed, and any other fetch fails.
+// The legacy-layout advert: the datum writer, the Post (legacy layout, until the switch date) and the Retire. Parity is held against the
+// supplier template's own transactions on mainnet (advert-stake-golden.fixture.ts): the same datum bytes, deposit and validity range for
+// each of the service agents' Posts, and for the Retire the same output to the supplier, validity range and reference script, with the
+// deployed advert validator evaluating the built transaction (uplc-node.fixture.ts). The terms rules that both layouts share
+// (checkAdvertTerms) are covered here, through planPostAdvert. No network is touched: Koios is stubbed, and any other fetch fails.
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML, Constr, Data, getAddressDetails, validatorToScriptHash } from '@lucid-evolution/lucid';
@@ -11,12 +12,12 @@ import { lucidForAddress } from '../src/vector/build.ts';
 import { ensureSlotConfig } from '../src/vector/gov-build.ts';
 import {
   ADVERT_ADDRESS, ADVERT_REF_UTXO, ADVERT_SCRIPT_HASH, ADVERT_DEPOSIT_FLOOR_LOVELACE, EMPTY_DETAIL_HASH, MARKETPLACE_MIN_FEE,
-  MAX_PROCESSING_MS_CEILING, MIN_PROCESSING_MS_FLOOR, DELIVER_BY_BUFFER_MS,
+  MAX_ESCROW_LOVELACE, MAX_PROCESSING_MS_CEILING, MIN_PROCESSING_MS_FLOOR, DELIVER_BY_BUFFER_MS,
 } from '../src/vector/marketplace-constants.ts';
 import { decodeAdvertDatum, encodeAdvertDatum, formatOutRef } from '../src/vector/marketplace-datum.ts';
 import type { AdvertDatum } from '../src/vector/marketplace-datum.ts';
 import { planPostAdvert, buildPostAdvert, advertOutputZero, planRetireAdvert, buildRetireAdvert } from '../src/vector/marketplace-advert.ts';
-import type { AdvertTerms } from '../src/vector/marketplace-advert.ts';
+import type { AdvertTerms } from '../src/vector/marketplace-advert-build.ts';
 import { planPostEscrow } from '../src/vector/marketplace-build.ts';
 import { ROUTES } from '../src/vector/marketplace-transport.ts';
 import { ADVERT_DATUM_HEX } from './fixtures/marketplace.fixture.ts';
@@ -106,6 +107,14 @@ describe('planPostAdvert', () => {
       refuses({ detailUri: `https://h.example/${'p'.repeat(50)}` }, /detail_uri is 68 bytes/);
       assert.doesNotThrow(() => planPostAdvert({ ...TERMS, capabilityId: 'a'.repeat(64) }, SUPPLIER, NOW), 'exactly 64 is fine');
     });
+    test('endpoint_url and detail_uri hold 64 bytes in the legacy layout (its encoder writes each field as one bytestring): 64 is written, 65 refused', () => {
+      const url = (bytes: number) => `https://h.example/${'p'.repeat(bytes - 18)}`;
+      assert.equal(Buffer.byteLength(url(64)), 64);
+      assert.equal(planPostAdvert({ ...TERMS, endpointUrl: url(64) }, SUPPLIER, NOW).datum.endpoint_url, url(64));
+      refuses({ endpointUrl: url(65) }, /endpoint_url is 65 bytes as UTF-8; an advert field holds at most 64 \(the marketplace writes each field as one bytestring/);
+      assert.equal(planPostAdvert({ ...TERMS, detailUri: url(64) }, SUPPLIER, NOW).datum.detail_uri, url(64));
+      refuses({ detailUri: url(65) }, /detail_uri is 65 bytes as UTF-8; an advert field holds at most 64/);
+    });
     test('text UTF-8 does not carry unchanged, control characters and line breaks', () => {
       refuses({ model: 'a\ud800b' }, /model is not text that UTF-8 carries unchanged/);
       refuses({ model: '\ufeffmodel' }, /model is not text that UTF-8 carries unchanged/);
@@ -141,7 +150,7 @@ describe('planPostAdvert', () => {
       refuses({ endpointUrl: `https://x.example${String.fromCharCode(0xa0)}` }, /endpoint_url must not contain whitespace/);
       refuses({ endpointUrl: 'https://x.example/api?key=1' }, /must not contain a query/);
     });
-    test('a processing window under 60,001 ms or over 24 h, and numbers that are not whole lovelace or milliseconds', () => {
+    test('a processing window under 60,001 ms or over 24 h, numbers that are not whole lovelace or milliseconds, and price + bonds above the value cap', () => {
       refuses({ maxProcessingMs: MAX_PROCESSING_MS_CEILING + 1 }, /max_processing_ms is 86400001, more than 86400000 \(24 h\)/);
       // A supplier template starts only with ADVERT_MAX_PROCESSING_MS >= SERVICE_TIMEOUT_MS (at least 1 ms) + 60 s, and refuses jobs for a
       // smaller window: 60,000 ms is one millisecond short of what any template supplier can serve.
@@ -153,6 +162,9 @@ describe('planPostAdvert', () => {
       refuses({ maxOutputTokens: -1 }, /max_output_tokens must be a whole number from 0/);
       refuses({ priceLovelace: -1n }, /price_lovelace must be a whole number of lovelace from 0/);
       refuses({ buyerBondLovelace: BigInt(Number.MAX_SAFE_INTEGER) + 1n }, /check the unit/);
+      const bonds = TERMS.supplierBondLovelace + TERMS.buyerBondLovelace;
+      refuses({ priceLovelace: MAX_ESCROW_LOVELACE - bonds + 1n }, /above the 10000000000 lovelace \(10,000 AP3X\) value cap of an escrow \(F-29\)/);
+      assert.doesNotThrow(() => planPostAdvert({ ...TERMS, priceLovelace: MAX_ESCROW_LOVELACE - bonds }, SUPPLIER, NOW), 'the cap itself is accepted');
     });
     test('a detail hash that is not 32 bytes of hex, and a supplier key that is not one', () => {
       refuses({ detailHash: 'ab' }, /detail_hash must be 64 hex characters/);
@@ -179,7 +191,7 @@ describe('planPostAdvert', () => {
   });
   test('an advert it accepts is one vector_build_marketplace_post_escrow hires, at every window and price it allows', () => {
     for (const maxProcessingMs of [MIN_PROCESSING_MS_FLOOR, 180_000, 300_000, MAX_PROCESSING_MS_CEILING]) {
-      for (const [price, sBond, bBond] of [[0n, 0n, 0n], [200_000n, 1_000_000n, 1_000_000n], [BigInt(Number.MAX_SAFE_INTEGER), BigInt(Number.MAX_SAFE_INTEGER), BigInt(Number.MAX_SAFE_INTEGER)]]) {
+      for (const [price, sBond, bBond] of [[0n, 0n, 0n], [200_000n, 1_000_000n, 1_000_000n], [MAX_ESCROW_LOVELACE - 2_000_000n, 1_000_000n, 1_000_000n]]) {
         const plan = planPostAdvert({ ...TERMS, maxProcessingMs, priceLovelace: price, supplierBondLovelace: sBond, buyerBondLovelace: bBond }, SUPPLIER, NOW);
         const hire = planPostEscrow(plan.datum, `${'cd'.repeat(32)}#0`, OTHER_PKH, 'a payload', NOW + 1_000);
         assert.equal(hire.deliverBy, NOW + 1_000 + maxProcessingMs + DELIVER_BY_BUFFER_MS, `window ${maxProcessingMs}, price ${price}`);
@@ -319,6 +331,9 @@ describe('buildRetireAdvert', () => {
     assert.ok(unsigned(r.txCbor));
     assert.equal(r.advertRef, RETIRED_REF);
     assert.equal(r.returnLovelace, 2_017_080n);
+    assert.deepEqual(r.advert, RETIRED_ADVERT, 'the advert it ends');
+    assert.deepEqual([r.validFrom, r.validTo], [RETIRE_NOW - 60_000, RETIRE_NOW + 300_000]);
+    assert.deepEqual(r.requiredSigners, [{ keyHash: RETIRED_ADVERT.supplier_pkh, roles: ['supplier key (the advert names it; the advert validator needs its signature)', 'wallet (inputs, fee and collateral)'] }]);
     assert.equal(validatorToScriptHash(ADVERT_SCRIPT_UTXO.scriptRef!), ADVERT_SCRIPT_HASH);
     assert.deepEqual({ txHash: ADVERT_SCRIPT_UTXO.txHash, outputIndex: ADVERT_SCRIPT_UTXO.outputIndex }, ADVERT_REF_UTXO);
   });

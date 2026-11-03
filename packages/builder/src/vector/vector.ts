@@ -16,6 +16,7 @@ import { registerAgentNetworkTools } from './agent-network.js';
 import { registerSelfImprovementTools } from './self-improvement.js';
 import { registerMarketplaceTools } from './marketplace.js';
 import { registerReputationTools } from './reputation-tools.js';
+import { registerIdentityFamily } from './identity-family.js';
 import type { VectorDryRunResult } from '@apexfusion/vector-mcp-shared/types';
 import {
   lucidForAddress, buildSendApex, buildSendTokens, buildMultiOutput,
@@ -721,9 +722,12 @@ Sign locally with vector_signer_sign { txCbor }, then broadcast with vector_subm
     }
   );
 
-  // Agent network tools (register, discover, message, profile) live in agent-network.ts
+  // Agent identity read tools (resolve a DID, profile, discovery) and the legacy deregistration live in agent-network.ts
   // to isolate C (Cardano WASM) imports from tsc's complex type inference
   registerAgentNetworkTools(server, identity);
+
+  // Identity registry, attestation, delegation and vault build tools (did:vector): identity-family.ts is the entry
+  registerIdentityFamily(server, identity);
 
   // Self-Improvement Module tools (Module 6)
   registerSelfImprovementTools(server, identity);

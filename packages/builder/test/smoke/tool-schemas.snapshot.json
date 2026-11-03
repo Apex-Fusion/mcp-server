@@ -21,6 +21,427 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
+  "vector_build_attestation_attest": {
+    "description": "Build an UNSIGNED transaction that issues an attestation about a registered agent (Part 2 Section 4): a claim by an issuer key about the subject, anchored by the SHA-256 digest of a document. It mints the attestation token named from a seed output of your wallet (the identifier is known before you sign) and locks a deposit of at least 5 AP3X; the issuer takes it back by withdrawal. The issuer key always signs. With issuer_did the issuer is a registered agent: its record must be Active and list the issuer key with the assertion purpose. With solicited the subject's controller co-signs. Every answer gives the COSE Sig_structure for its issued_at: to add an envelope signature, the issuer signs those bytes with its Ed25519 key and builds again with the same issued_at and envelope_sig. Types principal_binding (4) and approval (5) need a salted digest: SHA-256(salt ++ document). The salt stays off-chain with the document, so the owner can delete both. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "subject": {
+          "description": "The DID of the agent that the attestation is about (its record can be live or ended): did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "issuer": {
+          "description": "The issuer key: it signs the attestation and its envelope: an Ed25519 public key, 64 hex characters (vector_signer_get_public_key shows yours)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "issuer_did": {
+          "description": "The DID of the issuer, when the issuer is a registered agent (its record must be Active and list the issuer key with the assertion purpose): did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "att_type": {
+          "description": "The type: identity (0), provenance (1), software (2), environment (3), principal_binding (4), approval (5) or other (15). Software and environment need valid_until.",
+          "type": "string",
+          "enum": [
+            "identity",
+            "provenance",
+            "software",
+            "environment",
+            "principal_binding",
+            "approval",
+            "other"
+          ]
+        },
+        "digest": {
+          "description": "The SHA-256 of the document (64 hex). Types principal_binding (4) and approval (5) need a salted digest: SHA-256(salt ++ document). The salt stays off-chain with the document, so the owner can delete both.",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "format": {
+          "description": "The CoAP Content-Format number of the document, e.g. 50 for application/json (default: unspecified)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "profile": {
+          "description": "The hash of the profile or type URI of the document (64 hex)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "locator": {
+          "description": "Where the document can be fetched, e.g. an https URL: 1 to 256 bytes of UTF-8 (default: none)",
+          "type": "string",
+          "minLength": 1
+        },
+        "valid_from": {
+          "description": "When the claim starts to hold (default: unspecified); at or before valid_until (POSIX milliseconds)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "valid_until": {
+          "description": "When the claim stops holding: at or after issued_at and at most 366 days after it. Required for software and environment (POSIX milliseconds)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "solicited": {
+          "description": "true when the subject asked for the attestation: the subject's controller co-signs (default false)",
+          "type": "boolean"
+        },
+        "links": {
+          "description": "Up to 4 links to other attestations. To correct an attestation, issue a new one that supersedes it, then revoke the old one.",
+          "maxItems": 4,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "rel": {
+                "description": "supersedes, depends_on, corroborates or disputes",
+                "type": "string",
+                "enum": [
+                  "supersedes",
+                  "depends_on",
+                  "corroborates",
+                  "disputes"
+                ]
+              },
+              "target": {
+                "description": "The identifier of the other attestation (64 hex)",
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{64}$"
+              }
+            },
+            "required": [
+              "rel",
+              "target"
+            ]
+          }
+        },
+        "deposit": {
+          "description": "AP3X that the attestation locks (default 5, the minimum; more when the ledger minimum of the output is higher)",
+          "type": "number",
+          "minimum": 5
+        },
+        "issued_at": {
+          "description": "Fixes issued_at, which is the end of the validity window: a whole second (a multiple of 1000) within the coming hour. Pass the issued_at of an earlier build to add its envelope signature. valid_minutes has no effect then (POSIX milliseconds)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "envelope_sig": {
+          "description": "The issuer's Ed25519 signature (64 bytes, 128 hex) over the sig_structure of an earlier build. Needs that build's issued_at; the builder checks the signature",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{128}$"
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "subject",
+        "issuer",
+        "att_type",
+        "digest"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_attestation_contest": {
+    "description": "Build an UNSIGNED transaction in which the subject of an attestation publishes its reply (Part 2 Section 4.1): the attestation's contested field points to the reply (a URI and its SHA-256), and a later reply replaces an earlier one. It works on active, revoked and already contested attestations. The subject's controller signs. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "attestation": {
+          "description": "The attestation: its identifier (the token name, 64 hex) that the attest build returned",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "uri": {
+          "description": "Where the subject's reply is, e.g. an https URL: 1 to 256 bytes of UTF-8",
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "description": "The SHA-256 of the reply (64 hex)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "attestation",
+        "uri",
+        "sha256"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_attestation_revoke": {
+    "description": "Build an UNSIGNED transaction that revokes an active attestation (Part 2 Section 4.1): its status becomes revoked at the start of the validity window with the reason code; nothing else changes. The issuer key signs, or for a registered issuer the controller of its record (by). Ninety days later the issuer can withdraw the deposit. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "attestation": {
+          "description": "The attestation: its identifier (the token name, 64 hex) that the attest build returned",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "reason": {
+          "description": "The reason code (default 0, unspecified). Common codes: 1 keyCompromise, 3 affiliationChanged, 4 superseded, 5 cessationOfOperation, 9 privilegeWithdrawn. The contract takes any whole number",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "by": {
+          "description": "Who signs for the issuer of a registered issuer's attestation: 'issuer' (the issuer key, while the issuer record lists it with the assertion purpose) or 'controller' (the controller of the issuer record). Default: the issuer key while it is listed, else the controller. Without an issuer record only the issuer key can sign.",
+          "type": "string",
+          "enum": [
+            "issuer",
+            "controller"
+          ]
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "attestation"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_attestation_withdraw": {
+    "description": "Build an UNSIGNED transaction that withdraws an attestation (Part 2 Section 4.1): it burns the attestation token and returns the deposit to your wallet. This is possible 90 days after the revocation, or 90 days after valid_until; before then the tool names the date. The issuer key signs, or for a registered issuer the controller of its record (by). Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "attestation": {
+          "description": "The attestation: its identifier (the token name, 64 hex) that the attest build returned",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "by": {
+          "description": "Who signs for the issuer of a registered issuer's attestation: 'issuer' (the issuer key, while the issuer record lists it with the assertion purpose) or 'controller' (the controller of the issuer record). Default: the issuer key while it is listed, else the controller. Without an issuer record only the issuer key can sign.",
+          "type": "string",
+          "enum": [
+            "issuer",
+            "controller"
+          ]
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "attestation"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_delegation_delegate": {
+    "description": "Build an UNSIGNED transaction that delegates authority to a registered agent (Part 2 Section 5.2): the delegate may act, with its delegate key, for the actions and resources that the patterns cover, inside the period, and within the value limit. The delegator is a principal key (principal_key) or a registered agent (delegator; its controller or a delegation key signs). With parent it is a sub-delegation: the delegator is the parent's delegate agent, the parent's delegate key signs, and everything must be inside the parent. The delegate key also signs, and no other live delegation may use it (fresh keys). Vault payments need the action marketplace.hire.v1, the resource script:<escrow hash> and a value limit. It mints the delegation token named from a seed output of your wallet; the output holds the ledger minimum of AP3X, which undelegate returns. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "delegate": {
+          "description": "The DID of the delegate agent, which acts under the delegation (its record must be Active): did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "delegate_key": {
+          "description": "The delegate key: a key that the delegate record lists with the delegation purpose and that no other live delegation uses. It signs this transaction and every use: a key hash (56 hex) or an Ed25519 public key (64 hex)",
+          "type": "string",
+          "pattern": "^(?:[0-9a-fA-F]{56}|[0-9a-fA-F]{64})$"
+        },
+        "principal_key": {
+          "description": "A principal as the delegator (a key, not a registered agent): it signs. Not with delegator or parent: a key hash (56 hex) or an Ed25519 public key (64 hex)",
+          "type": "string",
+          "pattern": "^(?:[0-9a-fA-F]{56}|[0-9a-fA-F]{64})$"
+        },
+        "organisation": {
+          "description": "With principal_key: the DID or domain of the organisation that the principal acts for (never a person), 1 to 64 bytes",
+          "type": "string",
+          "minLength": 1
+        },
+        "delegator": {
+          "description": "The DID of a registered agent as the delegator (its record must be Active). With parent it is the parent's delegate agent and can be left out: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "delegator_signer": {
+          "description": "With delegator and no parent: who signs for the agent: 'controller' (default) or a key that its record lists with the delegation purpose (key hash or public key)",
+          "type": "string"
+        },
+        "parent": {
+          "description": "The parent delegation, for a sub-delegation: its identifier (64 hex). The parent's delegate agent is the delegator, and the parent's delegate key signs",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "actions": {
+          "description": "What the delegate may do: 1 to 16 action patterns: \"*\", a name such as marketplace.hire.v1, a prefix such as ocr.* (covers ocr.extract, not ocrx), or oauth:, mcp: or https:// with visible characters after it (matched exactly). A sub-delegation's parent must cover each pattern",
+          "minItems": 1,
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "resources": {
+          "description": "On what: 0 to 8 resource patterns: \"*\", script:<56 lowercase hex> (a script; vault payments use script:<escrow hash>), or oauth:, mcp: or https:// with visible characters after it. Default none, which covers no resource",
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "not_before": {
+          "description": "When the delegation starts; default the start of the validity window (for a sub-delegation, not before the parent's start) (POSIX milliseconds)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "not_after": {
+          "description": "When the delegation ends; a sub-delegation ends at or before its parent (POSIX milliseconds)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "remaining": {
+          "description": "How many further levels of sub-delegation this delegation allows (default 0: none); its depth plus remaining is at most 4",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "purpose": {
+          "description": "The purpose: the 32-byte hash (64 hex) of a purpose text or mandate",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "value_limit": {
+          "description": "A spending limit; vault payments need one. Under a parent with a limit, the child needs one inside it (per_tx and total at most the parent's, period_ms at least the parent's)",
+          "type": "object",
+          "properties": {
+            "per_tx": {
+              "description": "The most AP3X that one payment may spend",
+              "type": "number",
+              "minimum": 0
+            },
+            "total": {
+              "description": "The most AP3X that the payments of one period may spend together (at most 10,000); at least per_tx",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "period_ms": {
+              "description": "The length of a period in milliseconds, e.g. 86400000 for one day",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "per_tx",
+            "total",
+            "period_ms"
+          ]
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "delegate",
+        "delegate_key",
+        "actions",
+        "not_after"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_delegation_undelegate": {
+    "description": "Build an UNSIGNED transaction that ends a delegation (Part 2 Section 5.2): it burns the delegation token and returns its AP3X to your wallet. Every delegation below it becomes unusable at once. The delegator signs: the delegator of this delegation or of an ancestor (a principal key, or a delegator agent's controller or delegation key). Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "delegation": {
+          "description": "The delegation to end: its identifier (the token name, 64 hex)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "signer": {
+          "description": "The key that signs: the delegator's key of this delegation or of an ancestor. Default: this delegation's delegator (its principal key, or its agent's controller): a key hash (56 hex) or an Ed25519 public key (64 hex)",
+          "type": "string",
+          "pattern": "^(?:[0-9a-fA-F]{56}|[0-9a-fA-F]{64})$"
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "delegation"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
   "vector_build_deploy_contract": {
     "description": "Build an UNSIGNED transaction deploying a Plutus/Aiken smart contract (locks AP3X at its script address). Takes no key material - sign with your local signer, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     "inputSchema": {
@@ -61,22 +482,1253 @@
     }
   },
   "vector_build_deregister_agent": {
-    "description": "Build an UNSIGNED transaction that deregisters an agent (burns the identity NFT, returns the 10 AP3X deposit to the owner wallet). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
+    "description": "Build an UNSIGNED transaction that deregisters a LEGACY registry record (did:vector:agent:...) that will not adopt into the identity registry: burns its token and returns the deposit to the owner wallet; its DID then resolves as deactivated. To move a legacy record into the identity registry instead, use vector_build_identity_adopt. Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "The agent OWNER's wallet address (receives the returned deposit). Get it from vector_signer_get_address.",
+          "description": "The legacy record OWNER's wallet address (receives the returned deposit). Get it from vector_signer_get_address.",
           "type": "string"
         },
         "agent_id": {
-          "description": "Agent DID to deregister: did:vector:agent:{policyId}:{nftAssetName}",
+          "description": "Legacy agent DID to deregister: did:vector:agent:{policyId}:{nftAssetName}",
           "type": "string"
         }
       },
       "required": [
         "changeAddress",
         "agent_id"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_adopt": {
+    "description": "Build an UNSIGNED transaction that adopts a legacy agent record into the Vector identity registry (did:vector): it deregisters the legacy record, burns its legacy token and mints the identity token of the same identifier, so the agent keeps its identifier. The identifier must be on the adoption allowlist: pass `proof`, or the server computes it from the published allowlist. Each legacy profile field that fits the identity limits is copied; give a new value for each field that does not (a refusal lists them). The transaction also pays 10 AP3X to the legacy owner key, as the legacy deregistration requires (back to your wallet when your wallet is the owner). The legacy owner key, the controller, each listed Ed25519 key and each key-hash party sign; Module-1 as a party consents through its withdrawal. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the legacy agent to adopt (did:vector:agent:<legacy policy>:<64 hex> or did:vector:<64 hex>): did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "controller": {
+          "description": "The controller key of the adopted record: an Ed25519 public key, 64 hex characters (vector_signer_get_public_key shows yours)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "keys": {
+          "description": "Listed keys (up to 8): the keys that act for the agent. Each new Ed25519 key signs the adoption.",
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "description": "Key type (default Ed25519)",
+                "type": "string",
+                "enum": [
+                  "Ed25519",
+                  "P256"
+                ]
+              },
+              "key": {
+                "description": "The public key: 64 hex characters for Ed25519, 66 for a compressed P-256 point",
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]+$"
+              },
+              "purposes": {
+                "description": "What the key may do: authentication, assertion, transaction, delegation (a P-256 key: authentication and assertion only)",
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "authentication",
+                    "assertion",
+                    "transaction",
+                    "delegation"
+                  ]
+                }
+              },
+              "pop": {
+                "description": "P-256 only: the 64-byte ES256 signature by this key over \"did:vector:<id>#<key hash>\" (r || s, hex)",
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{128}$"
+              }
+            },
+            "required": [
+              "key",
+              "purposes"
+            ]
+          }
+        },
+        "parties": {
+          "description": "Parties (up to 8). A record needs at least one Accountable Party that covers the validity window (for example { role: \"Accountable\", signer: \"controller\" }).",
+          "minItems": 1,
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "description": "Accountable, Responsible, Provider, Distributor or Guardian",
+                "type": "string",
+                "enum": [
+                  "Accountable",
+                  "Responsible",
+                  "Provider",
+                  "Distributor",
+                  "Guardian"
+                ]
+              },
+              "signer": {
+                "description": "Who signs for the party: 'controller' (whoever is the record's controller), 'module1' (the approved dispute contract; Accountable or Responsible only), or a key hash (56 hex characters)",
+                "type": "string"
+              },
+              "organisation": {
+                "description": "The DID or domain of an organisation that the party acts for (never a person), 1 to 64 bytes",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "not_before": {
+                "description": "When the party starts to count; default the start of the validity window (POSIX milliseconds)",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "not_after": {
+                "description": "When the party stops counting; default never (POSIX milliseconds)",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "rights": {
+                "description": "The party's rights: suspend, revoke, recover. Default: the highest rights of the role (Accountable suspend+revoke, Responsible and Provider suspend, Distributor none, Guardian recover)",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "suspend",
+                    "revoke",
+                    "recover"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "role",
+              "signer"
+            ]
+          }
+        },
+        "guardian_threshold": {
+          "description": "How many guardians must act together to replace a lost controller key (default 0: no recovery); at most the number of Guardian parties with the recover right",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "name": {
+          "description": "New agent name, 1 to 64 bytes; default the legacy name when it fits",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "description": {
+          "description": "New description, up to 256 bytes; default the legacy description when it fits",
+          "type": "string",
+          "maxLength": 256
+        },
+        "framework": {
+          "description": "New framework, up to 64 bytes; default the legacy framework when it fits",
+          "type": "string",
+          "maxLength": 64
+        },
+        "endpoint": {
+          "description": "New endpoint URL, up to 256 bytes; default the legacy endpoint when it fits",
+          "type": "string",
+          "maxLength": 256
+        },
+        "capabilities": {
+          "description": "New capability ids, up to 16 of 1 to 64 bytes, no duplicates; default the legacy list when it fits",
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "proof": {
+          "description": "The Merkle proof of the identifier on the adoption allowlist: the 32-byte nodes (64 hex characters each) from the leaf upward. Default: computed from the allowlist that the deployment publishes",
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$"
+          }
+        },
+        "deposit": {
+          "description": "AP3X that the new record locks (default 10, the minimum; a large record needs its ledger minimum, which the builder takes when it is higher)",
+          "type": "number",
+          "minimum": 10
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did",
+        "controller",
+        "parties"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_change_controller": {
+    "description": "Build an UNSIGNED transaction that installs a new controller key on a live did:vector record. It ends every subagent of the agent (the subagent epoch rises by one) and cancels a pending recovery; holds stay. The old and the new controller keys sign. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent whose controller changes: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "new_controller": {
+          "description": "The new controller key: an Ed25519 public key, 64 hex characters (vector_signer_get_public_key shows yours)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did",
+        "new_controller"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_end_subagents": {
+    "description": "Build an UNSIGNED transaction that ends every subagent of an agent at once: it raises the record's subagent epoch by one, and each subagent created under an older epoch resolves as revoked (parentRevoked). The controller signs. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent whose subagents end: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_reclaim": {
+    "description": "Build an UNSIGNED transaction that takes back the AP3X of an ended (Revoked or Retired) did:vector record above the ledger minimum. The tombstone stays unchanged with the ledger minimum; the rest returns to the wallet. The controller signs. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the ended agent: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_recovery_cancel": {
+    "description": "Build an UNSIGNED transaction that cancels the pending recovery of a live did:vector record: enough guardians (at least the guardian threshold) sign. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent whose recovery ends: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "guardians": {
+          "description": "The guardians that act, each by its key hash (56 hex characters) or by its position in the party list (from 0): at least the guardian threshold of them. Each one signs",
+          "minItems": 1,
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 7
+              },
+              {
+                "description": "A guardian: a key hash, 56 hex characters",
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{56}$"
+              }
+            ]
+          }
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did",
+        "guardians"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_recovery_complete": {
+    "description": "Build an UNSIGNED transaction that completes the pending recovery of a live did:vector record once its 7 days have passed: the new controller key takes over, and every subagent ends (the subagent epoch rises by one). Anybody can submit it: only the wallet signs. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent to recover: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_recovery_start": {
+    "description": "Build an UNSIGNED transaction that starts the recovery of a live did:vector record whose controller key is lost: enough guardians (at least the guardian threshold) and the new controller key sign. Anybody can complete the recovery 7 days later with vector_build_identity_recovery_complete; until then the guardians can cancel it. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent to recover: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "new_controller": {
+          "description": "The new controller key: an Ed25519 public key, 64 hex characters (vector_signer_get_public_key shows yours)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "guardians": {
+          "description": "The guardians that act, each by its key hash (56 hex characters) or by its position in the party list (from 0): at least the guardian threshold of them. Each one signs",
+          "minItems": 1,
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 7
+              },
+              {
+                "description": "A guardian: a key hash, 56 hex characters",
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{56}$"
+              }
+            ]
+          }
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did",
+        "new_controller",
+        "guardians"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_register": {
+    "description": "Build an UNSIGNED transaction that registers a new agent in the Vector identity registry (did:vector): it mints the identity token named from a seed output of your wallet, so the DID is known before you sign, and locks a deposit of at least 10 AP3X in the record. The record names a controller key (the only key that can change it), listed keys with their purposes, and parties; at least one Accountable Party must cover the validity window. With `parent` it registers a subagent of that agent (no endpoint; the parent controller signs too). The controller, each listed Ed25519 key, each key-hash party and a parent controller must sign; Module-1 as a party consents through its withdrawal. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "controller": {
+          "description": "The controller key of the new record: an Ed25519 public key, 64 hex characters (vector_signer_get_public_key shows yours)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "name": {
+          "description": "Agent name, 1 to 64 bytes of UTF-8",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "description": {
+          "description": "Description, up to 256 bytes",
+          "type": "string",
+          "maxLength": 256
+        },
+        "framework": {
+          "description": "Framework, up to 64 bytes (e.g. 'LangChain', 'custom')",
+          "type": "string",
+          "maxLength": 64
+        },
+        "endpoint": {
+          "description": "Endpoint URL, up to 256 bytes (a subagent has none)",
+          "type": "string",
+          "maxLength": 256
+        },
+        "capabilities": {
+          "description": "Capability ids, up to 16 of 1 to 64 bytes, no duplicates",
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "keys": {
+          "description": "Listed keys (up to 8): the keys that act for the agent. Each new Ed25519 key signs the registration.",
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "description": "Key type (default Ed25519)",
+                "type": "string",
+                "enum": [
+                  "Ed25519",
+                  "P256"
+                ]
+              },
+              "key": {
+                "description": "The public key: 64 hex characters for Ed25519, 66 for a compressed P-256 point",
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]+$"
+              },
+              "purposes": {
+                "description": "What the key may do: authentication, assertion, transaction, delegation (a P-256 key: authentication and assertion only)",
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "authentication",
+                    "assertion",
+                    "transaction",
+                    "delegation"
+                  ]
+                }
+              },
+              "pop": {
+                "description": "P-256 only: the 64-byte ES256 signature by this key over \"did:vector:<id>#<key hash>\" (r || s, hex)",
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{128}$"
+              }
+            },
+            "required": [
+              "key",
+              "purposes"
+            ]
+          }
+        },
+        "parties": {
+          "description": "Parties (up to 8). A record needs at least one Accountable Party that covers the validity window (for example { role: \"Accountable\", signer: \"controller\" }).",
+          "minItems": 1,
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "description": "Accountable, Responsible, Provider, Distributor or Guardian",
+                "type": "string",
+                "enum": [
+                  "Accountable",
+                  "Responsible",
+                  "Provider",
+                  "Distributor",
+                  "Guardian"
+                ]
+              },
+              "signer": {
+                "description": "Who signs for the party: 'controller' (whoever is the record's controller), 'module1' (the approved dispute contract; Accountable or Responsible only), or a key hash (56 hex characters)",
+                "type": "string"
+              },
+              "organisation": {
+                "description": "The DID or domain of an organisation that the party acts for (never a person), 1 to 64 bytes",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "not_before": {
+                "description": "When the party starts to count; default the start of the validity window (POSIX milliseconds)",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "not_after": {
+                "description": "When the party stops counting; default never (POSIX milliseconds)",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "rights": {
+                "description": "The party's rights: suspend, revoke, recover. Default: the highest rights of the role (Accountable suspend+revoke, Responsible and Provider suspend, Distributor none, Guardian recover)",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "suspend",
+                    "revoke",
+                    "recover"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "role",
+              "signer"
+            ]
+          }
+        },
+        "guardian_threshold": {
+          "description": "How many guardians must act together to replace a lost controller key (default 0: no recovery); at most the number of Guardian parties with the recover right",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "parent": {
+          "description": "The DID of the parent agent, to register a subagent: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "deposit": {
+          "description": "AP3X that the record locks (default 10, the minimum); the controller can take it back after the record ends",
+          "type": "number",
+          "minimum": 10
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "controller",
+        "name",
+        "parties"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_retire": {
+    "description": "Build an UNSIGNED transaction that retires a live did:vector record for good: the record becomes a tombstone with status Retired. The controller signs, and so does the controller of a successor. By default the tombstone keeps its AP3X; with take_deposit it keeps only the ledger minimum and the rest returns to the wallet. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent to retire: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "successor": {
+          "description": "The DID of the successor: another live, independent agent whose controller signs too: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "take_deposit": {
+          "description": "Return the deposit above the ledger minimum to the wallet in the same transaction (default false; vector_build_identity_reclaim can do it later)",
+          "type": "boolean"
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_revoke": {
+    "description": "Build an UNSIGNED transaction that revokes a live did:vector record for good: the record becomes a tombstone (keys, parties, holds and most profile fields are cleared; the identifier, controller and name stay). The controller or a party with the revoke right acts and signs. The reason code is public for ever. invalid_from makes signatures by the record's keys from that time on invalid (a keyCompromise needs it). Only the controller names a successor, whose controller signs too. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent to revoke: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "actor": {
+          "description": "Who acts: 'controller' (the default), or a party of the record that has the right, covers the validity window and signs, named as { party_index } or { role, signer }. Module-1 acts only through its dispute verdicts, which anybody applies with the verdict token (Part 2 Section 3.8); no tool acts in its name.",
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "controller"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "party_index": {
+                  "description": "The party's position in the record's party list, from 0",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 7
+                },
+                "role": {
+                  "description": "Accountable, Responsible, Provider, Distributor or Guardian",
+                  "type": "string",
+                  "enum": [
+                    "Accountable",
+                    "Responsible",
+                    "Provider",
+                    "Distributor",
+                    "Guardian"
+                  ]
+                },
+                "signer": {
+                  "description": "Who signs for the party: 'controller' (whoever is the record's controller), 'module1' (the approved dispute contract; Accountable or Responsible only), or a key hash (56 hex characters)",
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "description": "Why the agent is revoked. A reason code or its name (Part 2 Appendix A): unspecified (0), keyCompromise (1), affiliationChanged (3), superseded (4), cessationOfOperation (5), privilegeWithdrawn (9), legalOrder (65). Code 64 (disputeVerdict) belongs to Module-1",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40
+            }
+          ]
+        },
+        "invalid_from": {
+          "description": "From when signatures by the keys of the record are invalid: from one hour before the record's created_at (the end of the validity window of its registration or adoption) up to the start of the validity window. A keyCompromise (1) needs it (POSIX milliseconds)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "successor": {
+          "description": "The DID of the successor: another live, independent agent whose controller signs too (controller only): did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did",
+        "reason"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_set_successor": {
+    "description": "Build an UNSIGNED transaction that names the successor of an ended (Revoked or Retired) did:vector record that has none yet, also after a party revoked it. The successor is another live, independent agent. The controller of the ended record and the controller of the successor sign. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the ended agent: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "successor": {
+          "description": "The DID of the successor: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did",
+        "successor"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_suspend": {
+    "description": "Build an UNSIGNED transaction that suspends a live did:vector record with a hold of its author (the controller, or a party with the suspend right) for at most 30 days. Each author has one hold: a new hold replaces the author's older one, and the holds of other authors stay. The author signs. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent to suspend: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "actor": {
+          "description": "Who acts: 'controller' (the default), or a party of the record that has the right, covers the validity window and signs, named as { party_index } or { role, signer }. Module-1 acts only through its dispute verdicts, which anybody applies with the verdict token (Part 2 Section 3.8); no tool acts in its name.",
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "controller"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "party_index": {
+                  "description": "The party's position in the record's party list, from 0",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 7
+                },
+                "role": {
+                  "description": "Accountable, Responsible, Provider, Distributor or Guardian",
+                  "type": "string",
+                  "enum": [
+                    "Accountable",
+                    "Responsible",
+                    "Provider",
+                    "Distributor",
+                    "Guardian"
+                  ]
+                },
+                "signer": {
+                  "description": "Who signs for the party: 'controller' (whoever is the record's controller), 'module1' (the approved dispute contract; Accountable or Responsible only), or a key hash (56 hex characters)",
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "description": "Why the agent is held (default 6, hold). A reason code or its name (Part 2 Appendix A): unspecified (0), hold (6), privilegeWithdrawn (9), legalOrder (65), providerWithdrawn (67), securityInvestigation (68). Code 64 (disputeVerdict) belongs to Module-1",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40
+            }
+          ]
+        },
+        "days": {
+          "description": "How long the hold lasts, in days from the start of the validity window (default 30). Do not combine with until",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "until": {
+          "description": "When the hold ends: after the end of the validity window, at most 30 days after its start (POSIX milliseconds)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_unsuspend": {
+    "description": "Build an UNSIGNED transaction that lifts the hold of one author (the controller, or the key of a party) on a live did:vector record. The holds of other authors stay; the status is Active when none remains. The author signs. A Module-1 hold cannot be lifted: it ends at its end time. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent whose hold ends: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "author": {
+          "description": "The author whose hold ends: 'controller' (the default) or the key hash of the party that set it",
+          "type": "string"
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_identity_update": {
+    "description": "Build an UNSIGNED transaction that updates a live did:vector record: profile fields, listed keys, parties and the guardian threshold, in one Update. Give only what changes. The controller signs; so does each new Ed25519 key, each new or changed party, and each removed party whose removal notice has not passed. A removal notice (announce_party_removal) needs no signature of the party: after it ends (at least 7 days), the controller removes the party alone. A threshold of 0 cancels a pending recovery. Module-1 joins as a party by its consent withdrawal; it never consents to a change or to an early removal. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent to update: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "name": {
+          "description": "New agent name, 1 to 64 bytes of UTF-8",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "description": {
+          "description": "New description, up to 256 bytes",
+          "type": "string",
+          "maxLength": 256
+        },
+        "framework": {
+          "description": "New framework, up to 64 bytes",
+          "type": "string",
+          "maxLength": 64
+        },
+        "endpoint": {
+          "description": "New endpoint URL, up to 256 bytes (a subagent has none)",
+          "type": "string",
+          "maxLength": 256
+        },
+        "capabilities": {
+          "description": "The new capability list (it replaces the old one): up to 16 ids of 1 to 64 bytes, no duplicates",
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "add_keys": {
+          "description": "Keys that join the record. Each new Ed25519 key signs; a P-256 key carries pop. A listed key cannot change: remove it in one update and add it again in a later one",
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "description": "Key type (default Ed25519)",
+                "type": "string",
+                "enum": [
+                  "Ed25519",
+                  "P256"
+                ]
+              },
+              "key": {
+                "description": "The public key: 64 hex characters for Ed25519, 66 for a compressed P-256 point",
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]+$"
+              },
+              "purposes": {
+                "description": "What the key may do: authentication, assertion, transaction, delegation (a P-256 key: authentication and assertion only)",
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "authentication",
+                    "assertion",
+                    "transaction",
+                    "delegation"
+                  ]
+                }
+              },
+              "pop": {
+                "description": "P-256 only: the 64-byte ES256 signature by this key over \"did:vector:<id>#<key hash>\" (r || s, hex)",
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{128}$"
+              }
+            },
+            "required": [
+              "key",
+              "purposes"
+            ]
+          }
+        },
+        "remove_keys": {
+          "description": "Keys that leave the record, each by its public key or its key hash",
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?:[0-9a-fA-F]{56}|[0-9a-fA-F]{64}|[0-9a-fA-F]{66})$"
+          }
+        },
+        "add_parties": {
+          "description": "Parties that join (they come last in the list). Each signs: a key-hash party by its key, the controller party by the controller, Module-1 by its consent withdrawal",
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "description": "Accountable, Responsible, Provider, Distributor or Guardian",
+                "type": "string",
+                "enum": [
+                  "Accountable",
+                  "Responsible",
+                  "Provider",
+                  "Distributor",
+                  "Guardian"
+                ]
+              },
+              "signer": {
+                "description": "Who signs for the party: 'controller' (whoever is the record's controller), 'module1' (the approved dispute contract; Accountable or Responsible only), or a key hash (56 hex characters)",
+                "type": "string"
+              },
+              "organisation": {
+                "description": "The DID or domain of an organisation that the party acts for (never a person), 1 to 64 bytes",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "not_before": {
+                "description": "When the party starts to count; default the start of the validity window (POSIX milliseconds)",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "not_after": {
+                "description": "When the party stops counting; default never (POSIX milliseconds)",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "rights": {
+                "description": "The party's rights: suspend, revoke, recover. Default: the highest rights of the role (Accountable suspend+revoke, Responsible and Provider suspend, Distributor none, Guardian recover)",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "suspend",
+                    "revoke",
+                    "recover"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "role",
+              "signer"
+            ]
+          }
+        },
+        "change_parties": {
+          "description": "Changes of existing parties, each named by its role and signer; fields that are not given stay. The party signs",
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "description": "Accountable, Responsible, Provider, Distributor or Guardian",
+                "type": "string",
+                "enum": [
+                  "Accountable",
+                  "Responsible",
+                  "Provider",
+                  "Distributor",
+                  "Guardian"
+                ]
+              },
+              "signer": {
+                "description": "Who signs for the party: 'controller' (whoever is the record's controller), 'module1' (the approved dispute contract; Accountable or Responsible only), or a key hash (56 hex characters)",
+                "type": "string"
+              },
+              "organisation": {
+                "description": "New organisation (1 to 64 bytes), or null to clear it",
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "not_before": {
+                "description": "New not_before (POSIX milliseconds)",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "not_after": {
+                "anyOf": [
+                  {
+                    "description": "New not_after, or null for no end (POSIX milliseconds)",
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "rights": {
+                "description": "New rights: suspend, revoke, recover (within the highest rights of the role)",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "suspend",
+                    "revoke",
+                    "recover"
+                  ]
+                }
+              },
+              "removal_after": {
+                "anyOf": [
+                  {
+                    "description": "New removal_after, or null to withdraw a removal notice (POSIX milliseconds)",
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "role",
+              "signer"
+            ]
+          }
+        },
+        "remove_parties": {
+          "description": "Parties that leave, each named by its role and signer. The party signs, unless its removal notice has ended",
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "description": "Accountable, Responsible, Provider, Distributor or Guardian",
+                "type": "string",
+                "enum": [
+                  "Accountable",
+                  "Responsible",
+                  "Provider",
+                  "Distributor",
+                  "Guardian"
+                ]
+              },
+              "signer": {
+                "description": "Who signs for the party: 'controller' (whoever is the record's controller), 'module1' (the approved dispute contract; Accountable or Responsible only), or a key hash (56 hex characters)",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "signer"
+            ]
+          }
+        },
+        "announce_party_removal": {
+          "description": "Removal notices for parties, each named by its role and signer. The party does not sign",
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "description": "Accountable, Responsible, Provider, Distributor or Guardian",
+                "type": "string",
+                "enum": [
+                  "Accountable",
+                  "Responsible",
+                  "Provider",
+                  "Distributor",
+                  "Guardian"
+                ]
+              },
+              "signer": {
+                "description": "Who signs for the party: 'controller' (whoever is the record's controller), 'module1' (the approved dispute contract; Accountable or Responsible only), or a key hash (56 hex characters)",
+                "type": "string"
+              },
+              "removal_after": {
+                "description": "When the controller may remove the party without its signature: at least 7 days after the end of the validity window (the default) (POSIX milliseconds)",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "role",
+              "signer"
+            ]
+          }
+        },
+        "guardian_threshold": {
+          "description": "New guardian threshold: at most the Guardian parties with the recover right whose period has not ended; 0 turns recovery off and cancels a pending recovery",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "deposit": {
+          "description": "The AP3X that the record holds after the update (at least 10, or its ledger minimum when that is higher); default unchanged. The difference comes from or goes to the wallet",
+          "type": "number",
+          "minimum": 10
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
@@ -160,7 +1812,7 @@
     }
   },
   "vector_build_marketplace_accept": {
-    "description": "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond. Only the buyer can accept, within 600 s of the supplier's Submit. If a receipt has arrived, verify it first with vector_marketplace_verify_receipt. It builds only for a Submitted escrow and prints the seconds left in the window, so it is also the way to check where an escrow stands (vector_marketplace_get_job cannot see where it stands now): a refusal names the state when one was found. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "Build an UNSIGNED transaction that accepts a Submitted marketplace job: pays the supplier price + supplier bond and returns your buyer bond (to the escrow's refund address when an identity-marketplace escrow names one). Only the buyer can accept, within 600 s of the supplier's Submit, in both escrow layouts. If a receipt has arrived, verify it first with vector_marketplace_verify_receipt. It builds only for a Submitted escrow and prints the seconds left in the window, so it is also the way to check where an escrow stands (vector_marketplace_get_job cannot see where it stands now): a refusal names the state when one was found. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -180,17 +1832,28 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_build_marketplace_post_advert": {
-    "description": "Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace: posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert. Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key; once the Post confirms, set your supplier runtime's ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names (after a Retire and a new Post, ADVERT_REF must change to the new ref). The transaction is valid for 5 minutes. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+  "vector_build_marketplace_advert_post": {
+    "description": "Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace with an identity-layout advert (Part 2 Section 6.2): the advert names the agent (did:vector) whose record lists the supplier key with the transaction purpose and the capability, and the capability, model, price, bonds, processing window and https endpoint that buyers' jobs go to. It locks a deposit that returns when you retire the advert. The builder checks the listing rule on chain (the record is live, independent and Active, and lists the key and the capability), so the indexer lists the advert. Terms that buyers could not hire or that a supplier template cannot serve are refused: a capability_id or model over 64 bytes of UTF-8, an endpoint_url or detail_uri over 256, a fleet capability id, an endpoint that is not https or that has whitespace, a query or a fragment (jobs go to <endpoint_url>/v1/job), a processing window outside 60,001 ms to 24 h, and price + both bonds above 10,000 AP3X. A detail_uri needs your detail_hash: this server fetches nothing. The supplier key must sign (the listing rule needs its signature). Once the Post confirms, buyers can hire it with vector_build_marketplace_post_escrow; set your supplier runtime's ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names (after a Retire and a new Post, ADVERT_REF must change to the new ref). Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your supplier wallet address: its key becomes the advert's supplier key, the only key that can retire the advert. Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
+        "did": {
+          "description": "The DID of the agent the advert offers: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "supplier_key_hash": {
+          "description": "The supplier key that claims and submits the jobs (default your wallet's key): a key hash, 56 hex characters",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{56}$"
+        },
         "capability_id": {
-          "description": "Capability id, at most 64 bytes, outside the fleet namespaces llm.text.generate.*, llm.chat.*, ocr.page.extract.* and audio.synthesize.* (for example research.summary.v1). A reputation stake names the same id.",
+          "description": "Capability id, at most 64 bytes, outside the fleet namespaces llm.text.generate.*, llm.chat.*, ocr.page.extract.* and audio.synthesize.* (for example research.summary.v1); the agent's record must list it",
           "type": "string",
           "minLength": 1
         },
@@ -212,10 +1875,237 @@
           "maximum": 86400000
         },
         "price_lovelace": {
-          "description": "Price per job in lovelace (1 AP3X = 1000000)",
+          "description": "Price per job in lovelace (1 AP3X = 1000000); price + both bonds is at most 10,000 AP3X",
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
+        },
+        "detail_hash": {
+          "description": "sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used",
+          "type": "string",
+          "pattern": "^(?:[0-9a-fA-F]{64})?$"
+        },
+        "endpoint_url": {
+          "description": "https URL of your supplier runtime, at most 256 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "supplier_bond_lovelace": {
+          "description": "Supplier bond in lovelace: a buyer locks price + both bonds per job, and on Accept the supplier receives price + supplier bond",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "buyer_bond_lovelace": {
+          "description": "Buyer bond in lovelace; it returns to the buyer on Accept",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "detail_uri": {
+          "description": "Optional https URL of your manifest (agent.json), at most 256 bytes (default none); requires detail_hash",
+          "type": "string",
+          "maxLength": 256
+        },
+        "deposit_lovelace": {
+          "description": "The AP3X the advert locks, in lovelace (default 2 AP3X, raised to the ledger minimum); it returns on retirement",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did",
+        "capability_id",
+        "model",
+        "max_output_tokens",
+        "max_processing_ms",
+        "price_lovelace",
+        "endpoint_url",
+        "supplier_bond_lovelace",
+        "buyer_bond_lovelace"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_marketplace_advert_retire": {
+    "description": "Build an UNSIGNED transaction that retires your supplier advert on the Vector agents marketplace, in either layout: it consumes the advert and returns its deposit to the supplier key. Only the advert's supplier key can retire it, and that key signs. An identity-layout advert: the deposit goes to your wallet when its key is the supplier key, else to the supplier key's enterprise address. A legacy-layout advert (suppliers retire these during the switch): changeAddress must be the supplier key's wallet, the deposit returns to it, and the transaction is valid for 5 minutes, as the supplier template builds it. Once it confirms, buyers can no longer hire the advert, and a buyer whose escrow against it is posted but whose job is not yet sent can no longer send it (that buyer reclaims everything after deliver_by): retire when no job is in flight. After it confirms, the supplier runtime's ADVERT_REF names a consumed advert: to list the supplier again, post a new advert and set ADVERT_REF to its ref. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "advert_ref": {
+          "description": "The advert '<txid>#<index>'",
+          "type": "string"
+        },
+        "valid_minutes": {
+          "description": "Identity layout only: minutes from now until the transaction expires (default 30, at most 59). A legacy-layout Retire is valid for 5 minutes",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "advert_ref"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_marketplace_advert_update": {
+    "description": "Build an UNSIGNED UpdateAdvert of an identity-layout advert: changes the fields you pass and keeps the others; the supplier key and the agent stay (the contract keeps them), advertised_at moves to now. The new terms follow the rules of a Post: Terms that buyers could not hire or that a supplier template cannot serve are refused: a capability_id or model over 64 bytes of UTF-8, an endpoint_url or detail_uri over 256, a fleet capability id, an endpoint that is not https or that has whitespace, a query or a fragment (jobs go to <endpoint_url>/v1/job), a processing window outside 60,001 ms to 24 h, and price + both bonds above 10,000 AP3X. A detail_uri needs your detail_hash: this server fetches nothing. An advert that stays Active must still pass the listing rule; status Retired takes it off the market but keeps the output (vector_build_marketplace_advert_retire returns the deposit). The supplier key signs. The update writes a new advert output, so once it confirms, set your supplier runtime's ADVERT_REF to the new advert_ref. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "advert_ref": {
+          "description": "The advert '<txid>#<index>'",
+          "type": "string"
+        },
+        "capability_id": {
+          "description": "Capability id, at most 64 bytes, outside the fleet namespaces llm.text.generate.*, llm.chat.*, ocr.page.extract.* and audio.synthesize.* (for example research.summary.v1); the agent's record must list it",
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "description": "Model or service version the supplier runs, at most 64 bytes",
+          "type": "string",
+          "minLength": 1
+        },
+        "max_output_tokens": {
+          "description": "Largest output the supplier commits to, in tokens (0 if not token-based)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_processing_ms": {
+          "description": "Processing window in milliseconds, from 60001 to 86400000 (24 h): how long the supplier has to submit a job. A vector-agent-template supplier needs at least its SERVICE_TIMEOUT_MS + 60000 (180000 with the default)",
+          "type": "integer",
+          "minimum": 60001,
+          "maximum": 86400000
+        },
+        "price_lovelace": {
+          "description": "Price per job in lovelace (1 AP3X = 1000000); price + both bonds is at most 10,000 AP3X",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "supplier_bond_lovelace": {
+          "description": "Supplier bond in lovelace",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "buyer_bond_lovelace": {
+          "description": "Buyer bond in lovelace",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "endpoint_url": {
+          "description": "https URL of your supplier runtime, at most 256 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "detail_uri": {
+          "description": "The new https URL of your manifest, at most 256 bytes (\"\" for none); a new detail_uri requires its detail_hash",
+          "type": "string",
+          "maxLength": 256
+        },
+        "detail_hash": {
+          "description": "sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used",
+          "type": "string",
+          "pattern": "^(?:[0-9a-fA-F]{64})?$"
+        },
+        "status": {
+          "description": "The new status (default unchanged)",
+          "type": "string",
+          "enum": [
+            "Active",
+            "Retired"
+          ]
+        },
+        "deposit_lovelace": {
+          "description": "The AP3X of the new advert output, in lovelace (default what the advert holds, raised to the ledger minimum)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "advert_ref"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_marketplace_post_advert": {
+    "description": "Legacy layout, until the switch date. Build an UNSIGNED transaction that lists your supplier agent on the Vector agents marketplace with a legacy-layout advert, which names no agent DID (for the identity layout use vector_build_marketplace_advert_post): posts an advert naming the key of changeAddress as the supplier, with the capability, model, price, bonds, processing window and https endpoint buyers' jobs go to, and locks a deposit (the supplier bond, at least 2 units) that returns when you retire the advert with vector_build_marketplace_advert_retire. Terms that buyers could not hire or that a supplier template cannot serve are refused: a text field over 64 bytes of UTF-8, a fleet capability id, an endpoint that is not https or that has whitespace, a query or a fragment (jobs go to <endpoint_url>/v1/job), a processing window outside 60,001 ms to 24 h, and price + both bonds above 10,000 AP3X. A detail_uri needs your detail_hash: this server fetches nothing. Takes no key material. The advert ref is <txHash>#0; once it confirms, buyers can hire it with vector_build_marketplace_post_escrow, and vector_marketplace_get_supplier shows it. Your supplier runtime (for example vector-agent-template) must serve the endpoint with the same key; once the Post confirms, set your supplier runtime's ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names (after a Retire and a new Post, ADVERT_REF must change to the new ref). The transaction is valid for 5 minutes. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your supplier wallet address: its key becomes the advert's supplier key, the only key that can retire the advert. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "capability_id": {
+          "description": "Capability id, at most 64 bytes, outside the fleet namespaces llm.text.generate.*, llm.chat.*, ocr.page.extract.* and audio.synthesize.* (for example research.summary.v1)",
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "description": "Model or service version the supplier runs, at most 64 bytes",
+          "type": "string",
+          "minLength": 1
+        },
+        "max_output_tokens": {
+          "description": "Largest output the supplier commits to, in tokens (0 if not token-based)",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_processing_ms": {
+          "description": "Processing window in milliseconds, from 60001 to 86400000 (24 h): how long the supplier has to submit a job. A vector-agent-template supplier needs at least its SERVICE_TIMEOUT_MS + 60000 (180000 with the default)",
+          "type": "integer",
+          "minimum": 60001,
+          "maximum": 86400000
+        },
+        "price_lovelace": {
+          "description": "Price per job in lovelace (1 AP3X = 1000000); price + both bonds is at most 10,000 AP3X",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "detail_hash": {
+          "description": "sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used",
+          "type": "string",
+          "pattern": "^(?:[0-9a-fA-F]{64})?$"
+        },
+        "endpoint_url": {
+          "description": "https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
+          "type": "string",
+          "minLength": 1
         },
         "supplier_bond_lovelace": {
           "description": "Supplier bond in lovelace (default 1000000). A buyer locks price + both bonds per job; on Accept the supplier receives price + supplier bond. It is also the advert's deposit, raised to 2 units",
@@ -231,18 +2121,9 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
-        "endpoint_url": {
-          "description": "https URL of your supplier runtime, at most 64 bytes, without whitespace, query or fragment (vector_marketplace_send_job posts jobs to <endpoint_url>/v1/job)",
-          "type": "string",
-          "minLength": 1
-        },
         "detail_uri": {
           "description": "Optional https URL of your manifest (agent.json), at most 64 bytes; requires detail_hash",
           "default": "",
-          "type": "string"
-        },
-        "detail_hash": {
-          "description": "sha256 (64 hex) of the exact bytes detail_uri serves; required with a detail_uri (this server does not fetch it). Without a detail_uri, omit it (or pass \"\"): the sha256 of no bytes is used",
           "type": "string"
         }
       },
@@ -259,7 +2140,7 @@
     }
   },
   "vector_build_marketplace_post_escrow": {
-    "description": "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Template-contract suppliers only in this release. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref, the same payload (the JSON block echoes it verbatim) and your wallet address as buyerAddress. The transaction is valid for at most 180 s, so sign and submit it at once. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "Build an UNSIGNED transaction that hires a supplier on the Vector agents marketplace: locks price + supplier bond + buyer bond in escrow for the given advert and commits a hash of your payload. Template-contract suppliers only in this release. Takes no key material. After it confirms, call vector_marketplace_send_job with the returned escrow_ref, the same payload (the JSON block echoes it verbatim) and your wallet address as buyerAddress. The transaction is valid for at most 180 s, so sign and submit it at once. Both advert layouts: an identity-marketplace advert (it names an agent, did:vector) must be listed by the marketplace indexer and its agent must pass the listing rule on chain; its escrow names the agent and refunds to your address, so anybody can Reclaim it to you after deliver_by. Price + both bonds above 10,000 AP3X is refused (value cap F-29). Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -292,12 +2173,12 @@
     }
   },
   "vector_build_marketplace_reclaim": {
-    "description": "Build an UNSIGNED transaction that reclaims your escrow after deliver_by when the supplier never submitted (state Open or Claimed): everything returns to you. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "Build an UNSIGNED transaction that reclaims your escrow after deliver_by when the supplier never submitted (state Open or Claimed): everything returns to you. An identity-marketplace escrow with a refund address (every one that vector_build_marketplace_post_escrow posts in that layout) can be reclaimed by anybody: the caller's wallet pays the fee, and everything the escrow holds goes to the refund address. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "The buyer wallet address that posted the escrow",
+          "description": "The buyer wallet address that posted the escrow (for an identity-marketplace escrow with a refund address: any wallet, which pays the fee)",
           "type": "string"
         },
         "escrow_ref": {
@@ -312,113 +2193,62 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_build_marketplace_retire_advert": {
-    "description": "Build an UNSIGNED transaction that retires your supplier advert on the Vector agents marketplace: consumes the advert and returns its deposit to changeAddress. Only the advert's supplier key can retire it. Once it confirms, buyers can no longer hire the advert, and a buyer whose escrow against it is posted but whose job is not yet sent can no longer send it (that buyer reclaims everything after deliver_by): retire when no job is in flight. After it confirms, the supplier runtime's ADVERT_REF names a consumed advert: to list the supplier again, post a new advert and set ADVERT_REF to its ref. Takes no key material. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+  "vector_build_marketplace_refund_revoked": {
+    "description": "Build an UNSIGNED RefundRevoked of an identity-marketplace escrow (Part 2 Section 6.1): anybody may submit it, before or after deliver_by, when the record of the escrow's agent is Revoked or Retired (escrow Open or Claimed), or Revoked with invalid_from at or before submitted_at (escrow Submitted). Everything the escrow holds goes to its refund address, or to the buyer key's enterprise address when it names none. Your wallet only pays the fee. Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "The supplier wallet address whose key the advert names. Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
-        "advert_ref": {
-          "description": "Advert '<txid>#<index>', as vector_build_marketplace_post_advert returned it",
+        "escrow_ref": {
+          "description": "The escrow's ref '<txid>#<index>' (its Post output)",
           "type": "string"
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
         "changeAddress",
-        "advert_ref"
+        "escrow_ref"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_build_message_agent": {
-    "description": "Build an UNSIGNED transaction that sends an on-chain message to a registered agent via TX metadata (label 674), delivering 2 AP3X to the agent's owner address. Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
+  "vector_build_marketplace_release": {
+    "description": "Build an UNSIGNED transaction that releases a Submitted escrow to its supplier once the buyer's 600 s accept window has passed: payment + supplier bond + buyer bond go to your wallet, whose payment key must be the escrow's supplier key (it signs). Both escrow layouts. Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (covers the 2 AP3X delivery and fee; recorded as the sender). Get it from vector_signer_get_address.",
+          "description": "The supplier's wallet address: its payment key must be the escrow's supplier_pkh. It receives the payout and pays the fee",
           "type": "string"
         },
-        "agent_id": {
-          "description": "Recipient agent DID: did:vector:agent:{policyId}:{nftAssetName}",
+        "escrow_ref": {
+          "description": "The escrow's ref '<txid>#<index>' (its Post output)",
           "type": "string"
         },
-        "message_type": {
-          "description": "Type of message",
-          "type": "string",
-          "enum": [
-            "inquiry",
-            "proposal",
-            "result"
-          ]
-        },
-        "payload": {
-          "description": "Message payload (string, max 512 chars)",
-          "type": "string",
-          "maxLength": 512
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
         "changeAddress",
-        "agent_id",
-        "message_type",
-        "payload"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
-  "vector_build_register_agent": {
-    "description": "Build an UNSIGNED transaction that registers an agent in the Vector on-chain registry (mints a soulbound identity NFT, locks a 10 AP3X deposit). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "changeAddress": {
-          "description": "Your wallet address (source of the deposit and change). Get it from vector_signer_get_address.",
-          "type": "string"
-        },
-        "name": {
-          "description": "Agent name (e.g. 'ResearchAgent', 'ArchiveBot')",
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64
-        },
-        "description": {
-          "description": "Short description of the agent's purpose",
-          "type": "string",
-          "maxLength": 256
-        },
-        "capabilities": {
-          "description": "List of capability tags (e.g. ['research', 'data-extraction', 'environmental'])",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "framework": {
-          "description": "Framework used (e.g. 'OpenClaw', 'LangChain', 'CrewAI', 'custom')",
-          "type": "string"
-        },
-        "endpoint": {
-          "description": "A2A communication endpoint URL (or empty string if not applicable)",
-          "type": "string"
-        }
-      },
-      "required": [
-        "changeAddress",
-        "name",
-        "description",
-        "capabilities",
-        "framework",
-        "endpoint"
+        "escrow_ref"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
   "vector_build_reputation_stake": {
-    "description": "Do not use on mainnet until the Module-3 reputation module is fixed and redeployed. Build an UNSIGNED transaction that creates your agent's reputation self-stake on Vector (step 2 of 2): consumes the opening output from vector_build_reputation_stake_open, mints the agent's stake token and locks the module's minimum self-stake (read from the module's parameters on the ledger; 10 units on mainnet today) behind the named capabilities, with your key as its owner. As deployed, the owner cannot withdraw a stake at the module's minimum; the module's oracle key can consume all of it through ClaimDecayRefund about 163 s after its last update; and a falsified capability slashes 1/N of it, where N is the number of staked capabilities (all of it when N = 1). The stake's time is the ledger's tip: sign and submit before the Valid until time the result shows. Mainnet only. Takes no key material. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "The current Module-3 deployment takes no new stakes. New stakes use the new Module-3 deployment, which is published after the identity release. Until then this tool refuses and builds nothing. It builds step 2 of 2 of your agent's reputation self-stake on Vector: an UNSIGNED transaction that consumes the opening output from vector_build_reputation_stake_open, mints the agent's stake token and locks the module's minimum self-stake (read from the module's parameters on the ledger) behind the named capabilities, with your key as its owner. Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -427,7 +2257,7 @@
           "type": "string"
         },
         "agent_id": {
-          "description": "Agent DID: did:vector:agent:{policyId}:{nftAssetName}, as vector_build_register_agent returned it",
+          "description": "Agent DID in the legacy registry form: did:vector:agent:{policyId}:{nftAssetName}",
           "type": "string"
         },
         "capabilities": {
@@ -454,7 +2284,7 @@
     }
   },
   "vector_build_reputation_stake_open": {
-    "description": "Do not use on mainnet until the Module-3 reputation module is fixed and redeployed. Build an UNSIGNED transaction that opens a reputation self-stake for your registered agent on Vector (step 1 of 2): locks a 2-unit opening output at the reputation (Module-3) validator, naming the agent and the capabilities to stake on. The validator mints a stake token only when it consumes an output of its own, so step 2, vector_build_reputation_stake, consumes this one and the 2 units return as change. Checked first: the agent's registry record lists every capability, changeAddress is the record's owner (the same key a supplier's adverts name), the agent has no stake yet, the node's clock is Vector mainnet's, and the wallet also holds what step 2 needs (the module's minimum, about 1 unit of fees and a pure 5-unit output for collateral). An agent that already has an opening output is pointed at it instead. As deployed, the owner cannot withdraw a stake at the module's minimum; the module's oracle key can consume all of it through ClaimDecayRefund about 163 s after its last update; and a falsified capability slashes 1/N of it, where N is the number of staked capabilities (all of it when N = 1). Mainnet only. Takes no key material. Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.",
+    "description": "The current Module-3 deployment takes no new stakes. New stakes use the new Module-3 deployment, which is published after the identity release. Until then this tool refuses and builds nothing. It builds step 1 of 2 of a reputation self-stake for your registered agent on Vector: an UNSIGNED transaction that locks a 2-unit opening output at the reputation (Module-3) validator, naming the agent and the capabilities to stake on; step 2 is vector_build_reputation_stake. Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -463,7 +2293,7 @@
           "type": "string"
         },
         "agent_id": {
-          "description": "Agent DID: did:vector:agent:{policyId}:{nftAssetName}, as vector_build_register_agent returned it",
+          "description": "Agent DID in the legacy registry form: did:vector:agent:{policyId}:{nftAssetName}",
           "type": "string"
         },
         "capabilities": {
@@ -485,26 +2315,36 @@
     }
   },
   "vector_build_self_improvement_critique": {
-    "description": "Build an UNSIGNED transaction that submits a critique on an improvement proposal (Supportive, Opposing, or Amendment). Requires staking at least 10 AP3X. Provide critiqueDocument for automatic IPFS upload, or critiqueHash and storageUri manually. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. Find a proposalTxHash to critique with vector_self_improvement_browse.",
+    "description": "Build an UNSIGNED transaction that locks a critique of an improvement proposal (Supportive, Opposing, or Amendment) with its stake at the Module-6 critique validator (step 1 of 2). The critic is a did:vector agent whose identity record is Active; except for an Amendment critique, the critic and the proposer must be different parties (different identifiers, controller keys and credentials, and no direct subagent relation). Requires staking at least 10 AP3X. The datum names the proposal by its seed. Provide critiqueDocument for automatic IPFS upload, or critiqueHash and storageUri manually. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. After this confirms, call vector_build_self_improvement_critique_spend with the lock transaction hash to create the critique. Find a proposal with vector_self_improvement_browse.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (holds the stake AP3X; receives change). Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the stake, the fee and the deposits, gives the collateral of step 2, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
         "agentDid": {
-          "description": "Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)",
-          "type": "string"
+          "description": "The DID of the critic: did:vector:<64 hex> (the legacy form did:vector:agent:<policy>:<64 hex> and the bare 64-hex identifier also work). Its identity record must be Active.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "credentialKeyHash": {
+          "description": "The declared credential of the agent: the key hash of its record's controller key or of a listed Ed25519 key with the transaction purpose. Default: the key of changeAddress. Stakes and rewards return to it, and its key signs step 2: a key hash, 56 hex characters",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{56}$"
         },
         "proposalTxHash": {
-          "description": "TX hash of the proposal UTxO to critique",
-          "type": "string"
+          "description": "The proposal: the transaction hash of its seed (the lock that its submission spent; vector_build_self_improvement_proposal_spend shows it) or of its current output (vector_self_improvement_browse shows it)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
         },
         "proposalOutputIndex": {
-          "description": "Output index of the proposal UTxO",
+          "description": "Output index of the proposal's seed or current output (default: 0)",
           "default": 0,
-          "type": "number"
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "critiqueDocument": {
           "description": "Full critique document as JSON string. Uploaded to IPFS via Filebase; hash and CID computed automatically.",
@@ -515,7 +2355,7 @@
           "type": "string"
         },
         "critiqueType": {
-          "description": "Type of critique",
+          "description": "Type of critique (the proposer can write only an Amendment critique of its own proposal)",
           "type": "string",
           "enum": [
             "Supportive",
@@ -531,6 +2371,12 @@
           "description": "AP3X to stake (minimum 10)",
           "type": "number",
           "minimum": 10
+        },
+        "validMinutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
@@ -543,32 +2389,90 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_build_self_improvement_endorse": {
-    "description": "Build an UNSIGNED transaction that endorses an improvement proposal by staking at least 5 AP3X. Endorsements signal support to the Foundation Council and are weighted by stake amount. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. Find a proposalTxHash to endorse with vector_self_improvement_browse.",
+  "vector_build_self_improvement_critique_spend": {
+    "description": "Build an UNSIGNED transaction that creates a critique (step 2 of 2): spends the confirmed critique lock through the Module-6 critique validator and mints its critique token. The critic's identity record and its ancestors, the proposal and (except for an Amendment critique) the proposer's record are reference inputs; the critic's record must be Active over the validity window (at most 1 hour). The declared credential of the lock and the wallet sign. Takes no key material. Each key holder signs in turn with vector_signer_sign, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (holds the stake AP3X; receives change). Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the stake, the fee and the deposits, gives the collateral of step 2, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
         "agentDid": {
-          "description": "Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)",
+          "description": "The DID of the critic (the critic of the lock): did:vector:<64 hex> (the legacy form did:vector:agent:<policy>:<64 hex> and the bare 64-hex identifier also work). Its identity record must be Active.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "lockTxHash": {
+          "description": "The CONFIRMED transaction hash of the lock (vector_build_self_improvement_critique)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "lockOutputIndex": {
+          "description": "Output index of the lock in that transaction (default: 0; step 1 shows it)",
+          "default": 0,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "validMinutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "agentDid",
+        "lockTxHash"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_self_improvement_endorse": {
+    "description": "Build an UNSIGNED transaction that locks an endorsement of an improvement proposal with its stake at the Module-6 endorsement validator (step 1 of 2). Endorsements signal support to the Foundation Council and are weighted by stake amount. The endorser is a did:vector agent whose identity record is Active, and a different party from the proposer (different identifiers, controller keys and credentials, and no direct subagent relation). Requires staking at least 5 AP3X. The datum names the proposal by its seed. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. After this confirms, call vector_build_self_improvement_endorse_spend with the lock transaction hash to create the endorsement. Find a proposal with vector_self_improvement_browse.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the stake, the fee and the deposits, gives the collateral of step 2, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
+        },
+        "agentDid": {
+          "description": "The DID of the endorser: did:vector:<64 hex> (the legacy form did:vector:agent:<policy>:<64 hex> and the bare 64-hex identifier also work). Its identity record must be Active.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "credentialKeyHash": {
+          "description": "The declared credential of the agent: the key hash of its record's controller key or of a listed Ed25519 key with the transaction purpose. Default: the key of changeAddress. Stakes and rewards return to it, and its key signs step 2: a key hash, 56 hex characters",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{56}$"
         },
         "proposalTxHash": {
-          "description": "TX hash of the proposal UTxO to endorse",
-          "type": "string"
+          "description": "The proposal: the transaction hash of its seed (the lock that its submission spent; vector_build_self_improvement_proposal_spend shows it) or of its current output (vector_self_improvement_browse shows it)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
         },
         "proposalOutputIndex": {
-          "description": "Output index of the proposal UTxO",
+          "description": "Output index of the proposal's seed or current output (default: 0)",
           "default": 0,
-          "type": "number"
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "stakeApex": {
           "description": "AP3X to stake as endorsement (minimum 5)",
           "type": "number",
           "minimum": 5
+        },
+        "validMinutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
@@ -580,18 +2484,67 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_build_self_improvement_proposal_lock": {
-    "description": "Build an UNSIGNED transaction that locks an improvement-proposal stake (step 1 of 2). Requires staking at least 25 AP3X. Provide proposalDocument for automatic IPFS upload, or proposalHash and storageUri manually. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. After this confirms, call this tool's counterpart, vector_build_self_improvement_proposal_spend, with the lock transaction hash to complete the submission.",
+  "vector_build_self_improvement_endorse_spend": {
+    "description": "Build an UNSIGNED transaction that creates an endorsement (step 2 of 2): spends the confirmed endorsement lock through the Module-6 endorsement validator and mints its endorsement token (gend_). The endorser's identity record and its ancestors, the proposal and the proposer's record are reference inputs; the endorser's record must be Active over the validity window (at most 1 hour). The declared credential of the lock and the wallet sign. Takes no key material. Each key holder signs in turn with vector_signer_sign, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "Your wallet address (holds the stake AP3X; receives change). Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the stake, the fee and the deposits, gives the collateral of step 2, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
         "agentDid": {
-          "description": "Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)",
+          "description": "The DID of the endorser (the endorser of the lock): did:vector:<64 hex> (the legacy form did:vector:agent:<policy>:<64 hex> and the bare 64-hex identifier also work). Its identity record must be Active.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "lockTxHash": {
+          "description": "The CONFIRMED transaction hash of the lock (vector_build_self_improvement_endorse)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "lockOutputIndex": {
+          "description": "Output index of the lock in that transaction (default: 0; step 1 shows it)",
+          "default": 0,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "validMinutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "agentDid",
+        "lockTxHash"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_self_improvement_proposal_lock": {
+    "description": "Build an UNSIGNED transaction that locks an improvement proposal with its stake at the Module-6 proposal validator (step 1 of 2). The proposer is a did:vector agent whose identity record is Active; the datum names its declared credential (the controller key or a listed transaction key; default the wallet key). Requires staking at least 25 AP3X (the module parameters may ask more). A proposal lock can leave the validator only through its submission, so the tool checks every submission rule first: the identity record, the module parameters, the rate limit and the activity list. Provide proposalDocument for automatic IPFS upload, or proposalHash and storageUri manually. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction. After this confirms, call vector_build_self_improvement_proposal_spend with the lock transaction hash to complete the submission.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the stake, the fee and the deposits, gives the collateral of step 2, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
+        },
+        "agentDid": {
+          "description": "The DID of the proposing agent: did:vector:<64 hex> (the legacy form did:vector:agent:<policy>:<64 hex> and the bare 64-hex identifier also work). Its identity record must be Active.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "credentialKeyHash": {
+          "description": "The declared credential of the agent: the key hash of its record's controller key or of a listed Ed25519 key with the transaction purpose. Default: the key of changeAddress. Stakes and rewards return to it, and its key signs step 2: a key hash, 56 hex characters",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{56}$"
         },
         "proposalType": {
           "description": "Category of the proposal",
@@ -605,12 +2558,12 @@
           ]
         },
         "stakeApex": {
-          "description": "AP3X to stake (minimum 25)",
+          "description": "AP3X to stake (minimum 25; an Emergency proposal needs the emergency stake of the module parameters)",
           "type": "number",
           "minimum": 25
         },
         "typeParams": {
-          "description": "Type-specific parameters (required for ParameterChange and TreasurySpend)",
+          "description": "Type-specific parameters: ParameterChange needs paramName (a governable parameter name), currentValue and proposedValue; TreasurySpend needs amount (lovelace) and recipientDescription; ProtocolUpgrade needs upgradeHash (64 hex characters); GameActivation needs gameId (a positive whole number)",
           "type": "object",
           "properties": {
             "paramName": {
@@ -637,7 +2590,7 @@
           }
         },
         "priority": {
-          "description": "Priority level (Emergency requires higher stake and reputation)",
+          "description": "Priority level: Standard (7-day review window) or Emergency (a ParameterChange or ProtocolUpgrade with the emergency stake and the emergency review window of the module parameters)",
           "default": "Standard",
           "type": "string",
           "enum": [
@@ -656,6 +2609,12 @@
         "storageUri": {
           "description": "Off-chain storage URI for the full proposal (IPFS CID or OriginTrail UAL). Required if proposalDocument is not provided.",
           "type": "string"
+        },
+        "validMinutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
@@ -668,26 +2627,37 @@
     }
   },
   "vector_build_self_improvement_proposal_spend": {
-    "description": "Build an UNSIGNED transaction that completes an improvement-proposal submission (step 2 of 2): spends the locked stake through the module validator and mints the proposal and activity tokens. Requires the confirmed lock transaction hash from vector_build_self_improvement_proposal_lock. Takes no key material. Sign it locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
+    "description": "Build an UNSIGNED transaction that completes an improvement-proposal submission (step 2 of 2): spends the confirmed lock through the Module-6 proposal validator, mints the proposal token, and records the agent in the activity list (its first proposal inserts the agent's node and mints its activity token). The agent's identity record and its ancestors are reference inputs; the record must be Active over the validity window (at most 1 hour). The declared credential of the lock and the wallet sign. Takes no key material. Each key holder signs in turn with vector_signer_sign, then broadcast with vector_submit_transaction and confirm with vector_await_transaction.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "The SAME wallet address used to build the proposal lock. Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the stake, the fee and the deposits, gives the collateral of step 2, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
         "agentDid": {
-          "description": "Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string) - must match the proposer DID in the locked proposal",
-          "type": "string"
+          "description": "The DID of the proposing agent (the proposer of the lock): did:vector:<64 hex> (the legacy form did:vector:agent:<policy>:<64 hex> and the bare 64-hex identifier also work). Its identity record must be Active.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
         },
         "lockTxHash": {
-          "description": "The CONFIRMED transaction hash from the proposal lock step",
-          "type": "string"
+          "description": "The CONFIRMED transaction hash of the lock (vector_build_self_improvement_proposal_lock)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
         },
         "lockOutputIndex": {
-          "description": "Output index of the locked proposal UTxO (default: 0)",
+          "description": "Output index of the lock in that transaction (default: 0; step 1 shows it)",
           "default": 0,
-          "type": "number"
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "validMinutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
@@ -822,96 +2792,143 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_build_transfer_agent": {
-    "description": "Build an UNSIGNED transaction that transfers agent ownership to a new address (must be a verification-key address, not a script). Takes no key material. Sign locally with vector_signer_sign, broadcast with vector_submit_transaction, then confirm with vector_await_transaction.",
+  "vector_build_vault_close": {
+    "description": "Build an UNSIGNED transaction that closes vault outputs, Live or Returned (escrow refunds), also after the delegation has ended: everything they hold goes to your wallet. The owner of each signs: the principal key, or for an agent owner its controller key (the agent's record is read as a reference input). Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "The CURRENT owner's wallet address. Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
-        "agent_id": {
-          "description": "Agent DID to transfer: did:vector:agent:{policyId}:{nftAssetName}",
-          "type": "string"
+        "vault_refs": {
+          "description": "The vault outputs to close (Live or Returned)",
+          "minItems": 1,
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "description": "A vault output to close: '<txid>#<index>'",
+            "type": "string"
+          }
         },
-        "new_owner_address": {
-          "description": "Bech32 address of the new owner (must be a verification key address, not a script address)",
-          "type": "string"
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
         "changeAddress",
-        "agent_id",
-        "new_owner_address"
+        "vault_refs"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_build_update_agent": {
-    "description": "Build an UNSIGNED transaction that updates a registered agent's profile fields. Only the specified fields change; others are preserved. Takes no key material - the on-chain validator requires the owner's signature, which you add locally with vector_signer_sign before vector_submit_transaction, then confirm with vector_await_transaction.",
+  "vector_build_vault_open": {
+    "description": "Build an UNSIGNED transaction that opens a vault: AP3X that the delegate of a delegation may spend on identity-marketplace escrows (vector_build_vault_pay), within the delegation's value limit. The owner must be the delegation's delegator: your wallet key by default, another principal key, or an agent. The delegation must have a value limit and cover the action marketplace.hire.v1 on the escrow script. Escrow refunds return to the vault for the owner, and only the owner can close it (vector_build_vault_close). Only the wallet signs. Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "The agent OWNER's wallet address. Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
-        "agent_id": {
-          "description": "Agent DID to update: did:vector:agent:{policyId}:{nftAssetName}",
-          "type": "string"
+        "delegation": {
+          "description": "The delegation: its token name, 64 hex characters (vector_build_delegation_delegate returns it)",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
         },
-        "name": {
-          "description": "New agent name",
+        "amount": {
+          "description": "AP3X the vault locks (at least the ledger minimum of the vault output, about 1.3 AP3X)",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "owner_did": {
+          "description": "The DID of the agent that owns the vault (when the delegator is an agent): did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "owner_key_hash": {
+          "description": "The principal key that owns the vault (default your wallet key): a key hash, 56 hex characters",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{56}$"
+        },
+        "owner_organisation": {
+          "description": "The owner's organisation (a DID or domain, never a person), as the delegation's delegator names it; default the delegation's",
           "type": "string",
           "minLength": 1,
           "maxLength": 64
         },
-        "description": {
-          "description": "New description",
-          "type": "string",
-          "maxLength": 256
-        },
-        "capabilities": {
-          "description": "New capability tags (replaces existing list)",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "framework": {
-          "description": "New framework identifier",
-          "type": "string"
-        },
-        "endpoint": {
-          "description": "New A2A endpoint URL (or empty string to clear)",
-          "type": "string"
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
         "changeAddress",
-        "agent_id"
+        "delegation",
+        "amount"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_vault_pay": {
+    "description": "Build an UNSIGNED transaction in which the delegate of a vault's delegation hires an identity-marketplace advert from the vault: it pays one escrow (output 0; its escrow_ref is <txHash>#0) whose buyer is the delegate key and whose refunds go back to the vault for the owner, and keeps the rest in the vault (output 1). The delegation must pass its use checks (Part 2 Section 5.2: Active delegate, delegate key still listed, period, action marketplace.hire.v1 on the escrow script) and its value limit (per payment, per period). The advert must be listed. The delegate key signs. After it confirms, send the job with vector_marketplace_send_job using the escrow_ref and a buyerAddress whose key is the delegate key. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "The delegate's wallet address: it pays the fee and gives the collateral. When its payment key is the delegate key, it also funds part of the transaction, which vector_marketplace_send_job checks",
+          "type": "string"
+        },
+        "vault_ref": {
+          "description": "The Live vault output that pays: '<txid>#<index>'",
+          "type": "string"
+        },
+        "advert_ref": {
+          "description": "The identity-marketplace advert '<txid>#<index>' to hire (vector_marketplace_list_suppliers shows its agent DID)",
+          "type": "string"
+        },
+        "payload": {
+          "description": "The job payload exactly as you will send it",
+          "type": "string",
+          "minLength": 1
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "vault_ref",
+        "advert_ref",
+        "payload"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
   "vector_discover_agents": {
-    "description": "Discover registered agents in the Vector on-chain registry, optionally filtered by capability or framework",
+    "description": "Discover agents that have a listed advert on the Vector agents marketplace, read from the marketplace indexer (which applies the listing rule), optionally filtered by capability. Each result names the agent's DID (did:vector:<64 hex>) when its adverts name one; a legacy advert names none. Read-only, no wallet needed. For an agent's profile, call vector_get_agent_profile with its DID.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "capability": {
-          "description": "Filter by capability tag (e.g. 'research', 'data-extraction')",
-          "type": "string"
-        },
-        "framework": {
-          "description": "Filter by framework (e.g. 'OpenClaw', 'LangChain', 'CrewAI')",
+          "description": "Filter by capability id, case-insensitive substring (e.g. 'llm.chat', 'identity.history')",
           "type": "string"
         },
         "limit": {
           "description": "Maximum number of agents to return (default: 20)",
           "default": 20,
-          "type": "number"
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
         }
       },
       "$schema": "http://json-schema.org/draft-07/schema#"
@@ -969,12 +2986,12 @@
     }
   },
   "vector_get_agent_profile": {
-    "description": "Get a registered agent's profile from the on-chain registry by DID (did:vector:agent:...)",
+    "description": "Get an agent's profile by DID. A canonical DID (did:vector:<64 hex>) is resolved through the identity gateway: profile, effective status, keys and record output. A legacy DID (did:vector:agent:<policyId>:<nftAssetName>) is read from the legacy registry on-chain. Read-only, no wallet needed.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "agent_id": {
-          "description": "Agent DID: did:vector:agent:{policyId}:{nftAssetName}",
+          "description": "Agent DID: did:vector:<64 hex> (canonical) or did:vector:agent:<policyId>:<nftAssetName> (legacy)",
           "type": "string"
         }
       },
@@ -1070,7 +3087,7 @@
     }
   },
   "vector_marketplace_get_supplier": {
-    "description": "Read one supplier advert from the Vector ledger by advert_ref (all 13 advert fields) plus the indexer's live status, and the manifest its detail_uri points to when it has one (fetched from the supplier's host; the supplier's own JSON, shown as such). The sha256 of the manifest's bytes is held against the advert's detail hash and reported as a match or a mismatch; a manifest that could not be fetched is reported as such and is never a match. Read-only.",
+    "description": "Read one supplier advert from the Vector ledger by advert_ref (all 13 advert fields, and the agent DID of an identity-marketplace advert) plus the indexer's live status, and the manifest its detail_uri points to when it has one (fetched from the supplier's host; the supplier's own JSON, shown as such). The sha256 of the manifest's bytes is held against the advert's detail hash and reported as a match or a mismatch; a manifest that could not be fetched is reported as such and is never a match. Read-only.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1094,7 +3111,7 @@
     }
   },
   "vector_marketplace_list_suppliers": {
-    "description": "List supplier adverts on the Vector agents marketplace (advert ref, model, price, bonds, processing window, status). Read-only. Pick an advert_ref here, then hire it with vector_build_marketplace_post_escrow. Fleet adverts (llm.text.generate.*, llm.chat.*, ocr.page.extract.*, audio.synthesize.*) are marked 'not hireable through these tools (fleet route)': post_escrow refuses them.",
+    "description": "List supplier adverts on the Vector agents marketplace (advert ref, agent DID, model, price, bonds, processing window, status). Read-only. Pick an advert_ref here, then hire it with vector_build_marketplace_post_escrow. An identity-marketplace advert names its agent (did:vector:<id>); a legacy advert has none ('-'). Fleet adverts (llm.text.generate.*, llm.chat.*, ocr.page.extract.*, audio.synthesize.*) are marked 'not hireable through these tools (fleet route)': post_escrow refuses them.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1146,7 +3163,7 @@
     }
   },
   "vector_marketplace_verify_receipt": {
-    "description": "Check a template-contract supplier's receipt without trusting the supplier. Five checks, each reported pass, FAIL or skipped: (1) receipt.escrow_ref equals the escrow ref; (2) sha256 of the result text equals the receipt's response_hash; (3) the supplier's public key hashes to receipt.supplier_pkh and to the escrow's supplier_pkh; (4) the Ed25519 signature over the canonical receipt verifies; (5) the escrow's result_receipt_hash on chain equals the hash of the signed receipt. One extra row, not one of the five: the receipt's prompt_hash equals the escrow's prompt_hash. Says verified only when every row passes. Pass the result text exactly as vector_marketplace_get_job returned it (from its JSON block, not the shortened view), or check 2 is skipped. Works before and after the Accept: check 5 finds the escrow's Submitted output on chain, live or, once it is spent, through the marketplace indexer (which only says where to look: the output is read from Koios and proven to be the escrow's own by the spend chain); pass submitted_ref to name it yourself. Read-only; the supplier's key is read from its /capability unless you pass supplier_pub_key_hex.",
+    "description": "Check a template-contract supplier's receipt without trusting the supplier. Six checks, each reported pass, FAIL or skipped: (1) receipt.escrow_ref equals the escrow ref; (2) sha256 of the result text equals the receipt's response_hash; (3) the supplier's public key hashes to receipt.supplier_pkh and to the escrow's supplier_pkh; (4) the Ed25519 signature over the canonical receipt verifies; (5) the escrow's result_receipt_hash on chain equals the hash of the signed receipt; (6) the receipt has exactly the fields of its escrow's layout: the 8 receipt fields for a legacy escrow, and those 8 plus agent_did = did:vector:<agent_id> for an identity-marketplace escrow. One extra row, not one of the six: the receipt's prompt_hash equals the escrow's prompt_hash. Says verified only when every row passes. Pass the result text exactly as vector_marketplace_get_job returned it (from its JSON block, not the shortened view), or check 2 is skipped. Works before and after the Accept: check 5 finds the escrow's Submitted output on chain, live or, once it is spent, through the marketplace indexer (which only says where to look: the output is read from Koios and proven to be the escrow's own by the spend chain); pass submitted_ref to name it yourself. Read-only; the supplier's key is read from its /capability unless you pass supplier_pub_key_hex.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1194,8 +3211,36 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
+  "vector_resolve_did": {
+    "description": "Resolve a did:vector DID through the identity gateway (DID Resolution v1.0: GET /1.0/identifiers/{did}). Accepts the canonical form did:vector:<64 hex> and the legacy form did:vector:agent:<policyId>:<64 hex>. Returns the HTTP status and the DID resolution result unchanged: the DID document and its metadata (effective status, keys, parties, profile, record output). Optional versionId or versionTime resolve an earlier version. Read-only, no wallet needed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "did": {
+          "description": "The DID to resolve: did:vector:<64 hex> (canonical) or did:vector:agent:<policyId>:<nftAssetName> (legacy)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "versionId": {
+          "description": "Resolve this version: '0', or a decimal number without leading zeros. Do not combine with versionTime.",
+          "type": "string",
+          "maxLength": 32
+        },
+        "versionTime": {
+          "description": "Resolve the DID as it was at this time: YYYY-MM-DDThh:mm:ssZ (UTC, whole seconds). Do not combine with versionId.",
+          "type": "string",
+          "maxLength": 32
+        }
+      },
+      "required": [
+        "did"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
   "vector_self_improvement_analyze_metrics": {
-    "description": "Analyze proposal metrics: proposal activity, adoption rate, treasury health, and engagement statistics. Read-only, takes no key material.",
+    "description": "Analyze proposal metrics of the Module-6 (self-improvement) module: proposal activity, adoption rate, treasury health, and engagement statistics. Read-only, takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1209,13 +3254,21 @@
             "treasury",
             "activity"
           ]
+        },
+        "deployment": {
+          "description": "Which Module-6 deployment to read: 'current' (default; the deployment on the identity registry that this server is configured for) or 'previous' (the deployment before the identity registry; its positions stay there until their owners exit)",
+          "type": "string",
+          "enum": [
+            "current",
+            "previous"
+          ]
         }
       },
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
   "vector_self_improvement_browse": {
-    "description": "Browse improvement proposals, critiques, and endorsements. Query on-chain UTxOs at the module's script addresses and decode datums into human-readable format.",
+    "description": "Browse improvement proposals, critiques, endorsements and the treasury of the Module-6 (self-improvement) module: reads the outputs at the module's script addresses and decodes their datums. The current deployment lists created positions only (each holds its token). Read-only.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1238,12 +3291,20 @@
           "type": "string"
         },
         "proposerDid": {
-          "description": "Filter by proposer DID (hex)",
+          "description": "Filter proposals by proposer: did:vector:<64 hex> (the legacy form and the bare 64-hex identifier also work)",
           "type": "string"
         },
         "proposalTxHash": {
-          "description": "Filter critiques/endorsements by the proposal they reference",
+          "description": "Filter critiques/endorsements by their proposal: the transaction hash of the proposal's seed (the lock that its submission spent) or of its current output",
           "type": "string"
+        },
+        "deployment": {
+          "description": "Which Module-6 deployment to read: 'current' (default; the deployment on the identity registry that this server is configured for) or 'previous' (the deployment before the identity registry; its positions stay there until their owners exit)",
+          "type": "string",
+          "enum": [
+            "current",
+            "previous"
+          ]
         }
       },
       "required": [

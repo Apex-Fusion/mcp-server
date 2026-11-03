@@ -1,6 +1,7 @@
 // Decode a transaction into plain data. Pure: no key, no filesystem, no network.
-// Everything policy needs is in the transaction body, which is why the signer
-// never has to resolve inputs against the chain.
+// The body names the inputs it spends only by output reference. The value and
+// the owner of each input are not in the transaction, so the own-inputs spend
+// rule needs them from resolve.ts; without them policy.ts uses the body alone.
 import * as CML from '@anastasia-labs/cardano-multiplatform-lib-nodejs';
 
 export interface DecodedOutput {
@@ -9,12 +10,41 @@ export interface DecodedOutput {
   assets: Array<{ unit: string; quantity: bigint }>;
 }
 
+/** An output reference: the transaction that made the output (lowercase hex) and the output's index. */
+export interface DecodedInput {
+  txHash: string;
+  index: number;
+}
+
+export interface DecodedWithdrawal {
+  rewardAddress: string;
+  /** The reward account's credential when it is a key hash (lowercase hex); null for a script credential. */
+  keyHash: string | null;
+  lovelace: bigint;
+}
+
 export interface DecodedTx {
   txHashHex: string;
   fee: bigint;
   outputs: DecodedOutput[];
   inputCount: number;
   mintedAssetCount: number;
+  /** The inputs the transaction spends, in body order. */
+  inputs: DecodedInput[];
+  /** The collateral inputs. A node takes them when a script of the transaction fails. */
+  collateralInputs: DecodedInput[];
+  /** The output that gets the rest of the collateral when a script fails; null when the body has none. */
+  collateralReturn: DecodedOutput | null;
+  withdrawals: DecodedWithdrawal[];
+  /**
+   * Key hashes of the credentials whose deposit a certificate of this transaction returns (stake or DRep
+   * deregistration). The refund adds value to the transaction, and for the legacy stake deregistration
+   * certificate the body does not say how much.
+   */
+  depositRefundKeyHashes: string[];
+  /** Key hashes of the vkey witnesses that the transaction already carries, in order. */
+  witnessKeyHashes: string[];
+  isValid: boolean;
 }
 
 function readAssets(value: CML.Value): Array<{ unit: string; quantity: bigint }> {
@@ -43,6 +73,54 @@ function readAssets(value: CML.Value): Array<{ unit: string; quantity: bigint }>
         quantity: BigInt(qty.toString()),
       });
     }
+  }
+  return out;
+}
+
+function readOutput(o: CML.TransactionOutput, what: string): DecodedOutput {
+  let address: string;
+  try {
+    address = o.address().to_bech32();
+  } catch {
+    throw new Error(`Transaction could not be decoded: ${what} has an unreadable address`);
+  }
+  return { address, lovelace: BigInt(o.amount().coin().toString()), assets: readAssets(o.amount()) };
+}
+
+function readInputs(list: CML.TransactionInputList | undefined): DecodedInput[] {
+  const out: DecodedInput[] = [];
+  if (!list) return out;
+  for (let i = 0; i < list.len(); i++) {
+    const input = list.get(i);
+    out.push({ txHash: input.transaction_id().to_hex().toLowerCase(), index: Number(input.index()) });
+  }
+  return out;
+}
+
+// The certificates that return a deposit into the transaction's balance. Every other kind
+// takes a deposit (registration) or moves no value.
+function depositRefundKeyHashes(body: CML.TransactionBody): string[] {
+  const certs = body.certs();
+  const out: string[] = [];
+  if (!certs) return out;
+  for (let i = 0; i < certs.len(); i++) {
+    const cert = certs.get(i);
+    let credential: CML.Credential | undefined;
+    switch (cert.kind()) {
+      case CML.CertificateKind.StakeDeregistration:
+        credential = cert.as_stake_deregistration()?.stake_credential();
+        break;
+      case CML.CertificateKind.UnregCert:
+        credential = cert.as_unreg_cert()?.stake_credential();
+        break;
+      case CML.CertificateKind.UnregDrepCert:
+        credential = cert.as_unreg_drep_cert()?.drep_credential();
+        break;
+      default:
+        continue;
+    }
+    const keyHash = credential?.as_pub_key()?.to_hex().toLowerCase();
+    if (keyHash) out.push(keyHash);
   }
   return out;
 }
@@ -82,20 +160,29 @@ export function decodeTransaction(cborHex: string): DecodedTx {
   const body = tx.body();
   const outputs: DecodedOutput[] = [];
   const cmlOutputs = body.outputs();
-  for (let i = 0; i < cmlOutputs.len(); i++) {
-    const o = cmlOutputs.get(i);
-    let address: string;
-    try {
-      address = o.address().to_bech32();
-    } catch (err) {
-      throw new Error(`Transaction could not be decoded: output ${i} has an unreadable address`);
+  for (let i = 0; i < cmlOutputs.len(); i++) outputs.push(readOutput(cmlOutputs.get(i), `output ${i}`));
+
+  const withdrawals: DecodedWithdrawal[] = [];
+  const cmlWithdrawals = body.withdrawals();
+  if (cmlWithdrawals) {
+    const accounts = cmlWithdrawals.keys();
+    for (let i = 0; i < accounts.len(); i++) {
+      const account = accounts.get(i);
+      withdrawals.push({
+        rewardAddress: account.to_address().to_bech32(),
+        keyHash: account.payment().as_pub_key()?.to_hex().toLowerCase() ?? null,
+        lovelace: BigInt((cmlWithdrawals.get(account) ?? 0n).toString()),
+      });
     }
-    outputs.push({
-      address,
-      lovelace: BigInt(o.amount().coin().toString()),
-      assets: readAssets(o.amount()),
-    });
   }
+
+  const witnessKeyHashes: string[] = [];
+  const vkeys = tx.witness_set().vkeywitnesses();
+  if (vkeys) {
+    for (let i = 0; i < vkeys.len(); i++) witnessKeyHashes.push(vkeys.get(i).vkey().hash().to_hex().toLowerCase());
+  }
+
+  const collateralReturn = body.collateral_return();
 
   const mint = body.mint();
   let mintedAssetCount = 0;
@@ -113,5 +200,12 @@ export function decodeTransaction(cborHex: string): DecodedTx {
     outputs,
     inputCount: body.inputs().len(),
     mintedAssetCount,
+    inputs: readInputs(body.inputs()),
+    collateralInputs: readInputs(body.collateral_inputs()),
+    collateralReturn: collateralReturn ? readOutput(collateralReturn, 'the collateral return output') : null,
+    withdrawals,
+    depositRefundKeyHashes: depositRefundKeyHashes(body),
+    witnessKeyHashes,
+    isValid: tx.is_valid(),
   };
 }

@@ -1,5 +1,5 @@
 // Local, per-user audit log. Records intent at signing time, not confirmed
-// submission - the signer has no network, so it cannot know whether a submit
+// submission - the signer never submits, so it cannot know whether a submit
 // later succeeded. That over-counts on a failed submit, which is conservative.
 //
 // The log file is untrusted input every time it is read: it can be hand-edited,
@@ -30,6 +30,7 @@
 // reaches the caller while no durable record of it exists on disk, so the
 // next process's committedTodayLovelace() will never count it.
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
+import type { OutflowRule } from './policy.js';
 
 export interface AuditEntry {
   timestamp: string;
@@ -38,6 +39,8 @@ export interface AuditEntry {
   netOutflowLovelace: string;
   reason?: string;
   assetMovements: number;
+  /** The rule that counted netOutflowLovelace. Absent in entries written before the rule existed. */
+  rule?: OutflowRule;
 }
 
 export class AuditLog {
@@ -169,8 +172,8 @@ export class AuditLog {
       // one is NOT harmless: adding a negative amount can only ever reduce
       // the running total, i.e. under-report - the one direction this
       // function must never move in. Nothing in the real pipeline can
-      // produce a negative netOutflowLovelace (policy.ts sums non-negative
-      // output lovelace plus a non-negative fee), so a negative value here
+      // produce a negative netOutflowLovelace (policy.ts never gives less
+      // than zero under either rule), so a negative value here
       // can only come from a corrupted or hand-edited log entry. Treated the
       // same as any other unparseable amount: skipped, not subtracted.
       if (amount < 0n) continue;

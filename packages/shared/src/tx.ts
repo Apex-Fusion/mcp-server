@@ -64,16 +64,6 @@ export function formatAssetName(name: string): string {
   }
 }
 
-// Cardano metadata strings must be <= 64 bytes. Chunk long strings into arrays.
-export function metadataStr(s: string): string | string[] {
-  if (s.length <= 64) return s;
-  const chunks: string[] = [];
-  for (let i = 0; i < s.length; i += 64) {
-    chunks.push(s.slice(i, i + 64));
-  }
-  return chunks;
-}
-
 export function cborUint(n: bigint): Buffer {
   if (n < 0n) throw new Error('output_index must be non-negative');
   if (n < 24n) return Buffer.from([Number(n)]);

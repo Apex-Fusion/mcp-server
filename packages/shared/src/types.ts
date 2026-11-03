@@ -55,26 +55,13 @@ export interface VectorBuildInteractResult extends VectorUnsignedBuildResult {
   scriptAddress: string; action: 'lock' | 'spend';
 }
 
-// --- Keyless registry builds (spec PR 7) ---
-
-export interface VectorBuildRegisterResult extends VectorUnsignedBuildResult {
-  agentId: string;
-  nftAssetName: string;
-  registryAddress: string;
-  depositLovelace: string;
-}
+// --- Keyless legacy registry deregistration (spec PR 7; the legacy register, update and transfer are retired) ---
 
 export interface VectorBuildAgentOpResult extends VectorUnsignedBuildResult {
   agentId: string;
-  op: 'update' | 'transfer' | 'deregister';
+  op: 'deregister';
   agentName: string;
   detail: string;
-}
-
-export interface VectorBuildMessageResult extends VectorUnsignedBuildResult {
-  agentId: string;
-  agentName: string;
-  recipientAddress: string;
 }
 
 // --- Agent Network ---
@@ -95,13 +82,6 @@ export interface AgentRegistrationResult {
   agentId: string;
   nftAssetName: string;
   txHash: string;
-  links: { explorer: string };
-}
-
-export interface AgentMessageResult {
-  txHash: string;
-  recipientAddress: string;
-  messageType: string;
   links: { explorer: string };
 }
 
@@ -132,31 +112,4 @@ export interface UnsignedTxResult {
   txCbor: string;
   fee: string;
   feeAda: string;
-}
-
-// --- Keyless self-improvement builds (spec PR 8) ---
-
-export interface VectorBuildStakeResult extends VectorUnsignedBuildResult {
-  op: 'critique' | 'endorse';
-  proposalRef: string;      // "txHash#index"
-  stakeLovelace: string;
-  scriptAddress: string;
-  ipfsCid?: string;
-  documentHash?: string;
-  storageUri?: string;      // set by buildCritique only - buildEndorse has no document/URI concept
-}
-
-export interface VectorBuildProposalLockResult extends VectorUnsignedBuildResult {
-  scriptAddress: string;
-  stakeLovelace: string;
-  storageUri: string;
-  proposalHash: string;
-  ipfsCid?: string;
-}
-
-export interface VectorBuildProposalSpendResult extends VectorUnsignedBuildResult {
-  proposalTokenName: string;
-  activityTokenName: string;
-  scriptAddress: string;
-  validToMs: number;        // the signing deadline the agent must beat
 }

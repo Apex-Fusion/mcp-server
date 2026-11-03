@@ -20,9 +20,17 @@ import { join } from 'node:path';
 // against this file. Within that narrower, accurate scope, weakening these
 // assertions — narrowing FORBIDDEN_IMPORTS, loosening a pattern, deleting a
 // check — still defeats the purpose they do serve.
+//
+// One module is allowed to reach the network: src/resolve.ts, the optional
+// input resolution (off unless VECTOR_SIGNER_OGMIOS_URL is set). It is the
+// only file that may name `fetch` at all, it may not import the key source,
+// the signer, the config or the audit log, and it names one JSON-RPC method:
+// the read-only ledger-state query queryLedgerState/utxo. Every other check
+// below still applies to it in full.
 
 const PKG_DIR = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
 const SRC_DIR = join(PKG_DIR, 'src');
+const NETWORK_MODULE = join(SRC_DIR, 'resolve.ts');
 
 const FORBIDDEN_IMPORTS = [
   '@apexfusion/vector-mcp-shared/provider',
@@ -91,14 +99,15 @@ function globalThisQualifiedAccess(name: string): RegExp {
   return new RegExp(`\\bglobalThis\\s*(?:\\.\\s*${name}\\b|\\[\\s*['"\`]${name}['"\`]\\s*\\])`);
 }
 
-const AMBIENT_NETWORK_GLOBALS: { label: string; pattern: RegExp }[] = [
-  { label: 'fetch(...)', pattern: /\bfetch\s*\(/ },
+// `networkModuleMay` marks the two patterns that NETWORK_MODULE alone may match.
+const AMBIENT_NETWORK_GLOBALS: { label: string; pattern: RegExp; networkModuleMay?: true }[] = [
+  { label: 'fetch(...)', pattern: /\bfetch\s*\(/, networkModuleMay: true },
   { label: 'new WebSocket', pattern: /\bnew\s+WebSocket\b/ },
   { label: 'new EventSource', pattern: /\bnew\s+EventSource\b/ },
   { label: 'new XMLHttpRequest', pattern: /\bnew\s+XMLHttpRequest\b/ },
   { label: 'navigator.sendBeacon', pattern: /\bnavigator\s*\.\s*sendBeacon\b/ },
   { label: `navigator['sendBeacon']`, pattern: /\bnavigator\s*\[\s*['"`]sendBeacon['"`]\s*\]/ },
-  { label: `globalThis.fetch / globalThis['fetch']`, pattern: globalThisQualifiedAccess('fetch') },
+  { label: `globalThis.fetch / globalThis['fetch']`, pattern: globalThisQualifiedAccess('fetch'), networkModuleMay: true },
   { label: `globalThis.WebSocket / globalThis['WebSocket']`, pattern: globalThisQualifiedAccess('WebSocket') },
   { label: `globalThis.EventSource / globalThis['EventSource']`, pattern: globalThisQualifiedAccess('EventSource') },
   {
@@ -127,7 +136,7 @@ function quotedForms(specifier: string): string[] {
   return [`'${specifier}'`, `"${specifier}"`, `\`${specifier}\``];
 }
 
-describe('signer has no network capability', () => {
+describe('signer has no network capability outside the one input-resolution module', () => {
   test('no source file imports a network-capable module', () => {
     const offenders: string[] = [];
     for (const file of sourceFiles(SRC_DIR)) {
@@ -183,16 +192,50 @@ describe('signer has no network capability', () => {
     assert.deepStrictEqual(offenders, [], `disallowed shared-package specifier found:\n  ${offenders.join('\n  ')}`);
   });
 
-  test('no source file uses an ambient network global', () => {
+  test('no source file uses an ambient network global (resolve.ts: fetch only)', () => {
     const offenders: string[] = [];
     for (const file of sourceFiles(SRC_DIR)) {
       const text = readFileSync(file, 'utf8');
-      for (const { label, pattern } of AMBIENT_NETWORK_GLOBALS) {
+      for (const { label, pattern, networkModuleMay } of AMBIENT_NETWORK_GLOBALS) {
+        if (networkModuleMay && file === NETWORK_MODULE) continue;
         if (pattern.test(text)) {
           offenders.push(`${file} uses ${label}`);
         }
       }
     }
     assert.deepStrictEqual(offenders, [], `ambient network globals found:\n  ${offenders.join('\n  ')}`);
+  });
+
+  test('no source file but resolve.ts names fetch at all, not even as a value', () => {
+    // Stricter than the call patterns above: `const f = fetch` or a default
+    // parameter `= fetch` never spells `fetch(`, but still names the word.
+    const offenders = sourceFiles(SRC_DIR).filter((file) => file !== NETWORK_MODULE && /\bfetch\b/.test(readFileSync(file, 'utf8')));
+    assert.deepStrictEqual(offenders, [], `fetch named outside resolve.ts:\n  ${offenders.join('\n  ')}`);
+  });
+});
+
+describe('resolve.ts, the one module that may reach the network', () => {
+  const source = readFileSync(NETWORK_MODULE, 'utf8');
+
+  test('imports nothing that holds or reaches the key, the config or the audit log', () => {
+    const specifiers = [...source.matchAll(/\bfrom\s+['"`]([^'"`]+)['"`]/g)].map((m) => m[1]).sort();
+    assert.deepStrictEqual(specifiers, ['./decode.js', './policy.js', '@anastasia-labs/cardano-multiplatform-lib-nodejs']);
+    assert.ok(!/\bimport\s*\(/.test(source), 'no dynamic import');
+    assert.ok(!/\brequire\s*\(/.test(source), 'no require');
+  });
+
+  test('makes one call, with the read-only ledger-state query as its only JSON-RPC method', () => {
+    assert.equal([...source.matchAll(/\bfetchImpl\s*\(/g)].length, 1, 'exactly one network call site');
+    const methods = [...source.matchAll(/\bmethod:\s*['"`]([^'"`]+)['"`]/g)].map((m) => m[1]).sort();
+    assert.deepStrictEqual(methods, ['POST', 'queryLedgerState/utxo'], 'one HTTP POST, one JSON-RPC method');
+    for (const other of ['submitTransaction', 'evaluateTransaction', 'Mempool', 'acquireLedgerState']) {
+      assert.ok(!source.includes(other), `resolve.ts names ${other}`);
+    }
+  });
+
+  test('the key never enters it: no private key, no key source, no signing', () => {
+    for (const word of [/privateKey/i, /keySource/i, /signTransaction/, /\.sign\(/]) {
+      assert.ok(!word.test(source), `resolve.ts mentions ${word}`);
+    }
   });
 });

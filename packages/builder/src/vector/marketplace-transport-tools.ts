@@ -13,6 +13,7 @@ import { sendJob, getJob, verifyJob } from './marketplace-transport.js';
 import type { Check, ReceiptChecks, VerifiedJob } from './marketplace-transport.js';
 import { text, fail, cell, isoOrRaw, ACCEPT_WINDOW_S, RELEASE_TAKE, ACCEPT_CLOCK } from './marketplace-shared.js';
 import type { RateGate } from './marketplace-shared.js';
+import type { IdentityDeployment } from './identity-deployment.js';
 
 /** How much of a result the markdown shows. The fenced JSON block always carries all of it. */
 const RESULT_VIEW_CHARS = 4_000;
@@ -61,16 +62,17 @@ function receiptOf(receipt: string | Record<string, unknown>): unknown {
   try { return JSON.parse(receipt); } catch { throw new Error('the receipt text is not valid JSON; pass the receipt exactly as vector_marketplace_get_job returned it.'); }
 }
 
-// The five checks, by the design's names and in its order, and after them the extra row (numbered `extra`, not 6: it is not one of the five).
+// The six checks, by their names and in their order, and after them the extra row (numbered `extra`, not 7: it is not one of the six).
 const CHECK_LABELS: Record<keyof ReceiptChecks, string> = {
   escrow_ref_matches: '`receipt.escrow_ref` equals the escrow ref',
   response_hash_matches: '`sha256(result)` equals `response_hash`',
   supplier_key_matches: "the supplier public key hashes to `receipt.supplier_pkh` and to the escrow datum's `supplier_pkh`",
   signature_valid: 'Ed25519 over `canonicalize(receipt)` verifies',
   on_chain_hash_matches: "the Submitted escrow datum's `result_receipt_hash` equals `sha256(canonicalize({receipt, signature}))`",
+  fields_match: "the receipt has exactly the fields of its escrow's layout: 8 for a legacy escrow; 9 with `agent_did` = `did:vector:<agent_id>` for an identity-marketplace escrow",
   prompt_hash_matches: "the receipt's `prompt_hash` equals the escrow datum's `prompt_hash`",
 };
-const ROW_NUMBERS = ['1', '2', '3', '4', '5', 'extra'];
+const ROW_NUMBERS = ['1', '2', '3', '4', '5', '6', 'extra'];
 /** How the Submitted output was found, in a line. */
 const FOUND_VIA = {
   lineage: 'found on chain',
@@ -88,14 +90,14 @@ const resultOf = (c: Check): string => (c.state === 'pass' ? 'pass' : `${c.state
 const NOTHING_TO_ACCEPT = "No Submitted output was found on chain. If the escrow is Open or Claimed there is nothing to accept yet, and declining costs nothing: if the supplier never submits, vector_build_marketplace_reclaim after deliver_by returns everything. " +
   `Check where it stands with vector_build_marketplace_accept (it builds only for a Submitted escrow, prints the seconds left, and its refusal names the state when one was found); if it is Submitted, the accept clock is running: ${ACCEPT_CLOCK}`;
 
-/** What a verdict says to do, with nothing in it that calls a receipt verified unless all five checks passed. */
+/** What a verdict says to do, with nothing in it that calls a receipt verified unless all six checks passed. */
 function verdictAdvice(v: VerifiedJob): string {
   // Koios reports the Submitted output spent: the Accept or the Release has landed, so there is nothing left to accept and no clock.
   const settled = v.submittedSpent === true;
   // No Submitted output found: the advice about an accept and its clock would be about an escrow that may not be Submitted at all.
   const nothingOnChain = v.submittedRef === null;
   if (v.verdict === 'verified') {
-    return "All five checks passed, and so did the extra row: the receipt is for this escrow and for the request it committed to, it hashes the result text you gave, it is signed by the key that belongs to the escrow's supplier, and the hash of that signed receipt is the one the supplier committed on chain. That says nothing about whether the result is any good: read it" +
+    return "All six checks passed, and so did the extra row: the receipt is for this escrow and for the request it committed to, it has exactly the fields of its escrow's layout (and names the agent you hired, for an identity-marketplace escrow), it hashes the result text you gave, it is signed by the key that belongs to the escrow's supplier, and the hash of that signed receipt is the one the supplier committed on chain. That says nothing about whether the result is any good: read it" +
       (settled ? '. The escrow is already settled, so there is nothing left to accept.' : ` before you accept. Next: vector_build_marketplace_accept, which must land within ${ACCEPT_WINDOW_S} s of the supplier's Submit.`);
   }
   if (v.verdict === 'failed') {
@@ -112,7 +114,7 @@ function verdictAdvice(v: VerifiedJob): string {
   return `${open} before you accept. ${ACCEPT_CLOCK}`;
 }
 
-export function registerMarketplaceTransportTools(server: McpServer, checkRateLimit: RateGate, providerFor: () => Provider) {
+export function registerMarketplaceTransportTools(server: McpServer, checkRateLimit: RateGate, providerFor: () => Provider, deploymentFor: () => IdentityDeployment | null = () => null) {
   server.tool(
     "vector_marketplace_send_job",
     "Send the job payload to the supplier of a posted escrow and get back a job id. Call it once the post is confirmed (vector_await_transaction). Template-contract suppliers only in this release. escrow_ref is the one vector_build_marketplace_post_escrow returned. buyerAddress is required and must be the wallet that posted AND funded the escrow (escrows funded from another key are refused). payload must be byte-identical to the one given at post time. The payload goes to the endpoint named by the escrow's advert, and the whole call, checks included, waits up to 90 s for the supplier to answer. Then poll with vector_marketplace_get_job. " + BUYER_NOTE,
@@ -126,7 +128,7 @@ export function registerMarketplaceTransportTools(server: McpServer, checkRateLi
       const entered = Date.now();
       const limited = checkRateLimit(); if (limited) return limited;
       try {
-        const r = await sendJob(providerFor(), VECTOR_KOIOS_URL, { escrowRef: escrow_ref, payload, buyerAddress }, fetch, { startedAt: entered });
+        const r = await sendJob(providerFor(), VECTOR_KOIOS_URL, { escrowRef: escrow_ref, payload, buyerAddress, deployment: deploymentFor() }, fetch, { startedAt: entered });
         const ref = r.escrowRef;
         const md = `# Job sent\n\n**Job id:** \`${r.jobId}\` · **status:** ${cell(r.status, 100)}\n**Escrow:** \`${ref}\` · **capability:** \`${cell(r.capabilityId)}\`\n\n` +
           `The supplier answered with this job id. Poll with vector_marketplace_get_job { escrow_ref, job_id, buyerAddress } every few seconds until it returns a result and a receipt. ` +
@@ -154,7 +156,7 @@ export function registerMarketplaceTransportTools(server: McpServer, checkRateLi
     async ({ escrow_ref, job_id, buyerAddress }) => {
       const limited = checkRateLimit(); if (limited) return limited;
       try {
-        const r = await getJob(VECTOR_KOIOS_URL, { escrowRef: escrow_ref, jobId: job_id, buyerAddress });
+        const r = await getJob(VECTOR_KOIOS_URL, { escrowRef: escrow_ref, jobId: job_id, buyerAddress, deployment: deploymentFor() });
         const ref = r.escrowRef;
         const v = r.view;
         if (v.state === 'pending') {
@@ -196,7 +198,7 @@ export function registerMarketplaceTransportTools(server: McpServer, checkRateLi
 
   server.tool(
     "vector_marketplace_verify_receipt",
-    "Check a template-contract supplier's receipt without trusting the supplier. Five checks, each reported pass, FAIL or skipped: (1) receipt.escrow_ref equals the escrow ref; (2) sha256 of the result text equals the receipt's response_hash; (3) the supplier's public key hashes to receipt.supplier_pkh and to the escrow's supplier_pkh; (4) the Ed25519 signature over the canonical receipt verifies; (5) the escrow's result_receipt_hash on chain equals the hash of the signed receipt. One extra row, not one of the five: the receipt's prompt_hash equals the escrow's prompt_hash. Says verified only when every row passes. Pass the result text exactly as vector_marketplace_get_job returned it (from its JSON block, not the shortened view), or check 2 is skipped. Works before and after the Accept: check 5 finds the escrow's Submitted output on chain, live or, once it is spent, through the marketplace indexer (which only says where to look: the output is read from Koios and proven to be the escrow's own by the spend chain); pass submitted_ref to name it yourself. Read-only; the supplier's key is read from its /capability unless you pass supplier_pub_key_hex.",
+    "Check a template-contract supplier's receipt without trusting the supplier. Six checks, each reported pass, FAIL or skipped: (1) receipt.escrow_ref equals the escrow ref; (2) sha256 of the result text equals the receipt's response_hash; (3) the supplier's public key hashes to receipt.supplier_pkh and to the escrow's supplier_pkh; (4) the Ed25519 signature over the canonical receipt verifies; (5) the escrow's result_receipt_hash on chain equals the hash of the signed receipt; (6) the receipt has exactly the fields of its escrow's layout: the 8 receipt fields for a legacy escrow, and those 8 plus agent_did = did:vector:<agent_id> for an identity-marketplace escrow. One extra row, not one of the six: the receipt's prompt_hash equals the escrow's prompt_hash. Says verified only when every row passes. Pass the result text exactly as vector_marketplace_get_job returned it (from its JSON block, not the shortened view), or check 2 is skipped. Works before and after the Accept: check 5 finds the escrow's Submitted output on chain, live or, once it is spent, through the marketplace indexer (which only says where to look: the output is read from Koios and proven to be the escrow's own by the spend chain); pass submitted_ref to name it yourself. Read-only; the supplier's key is read from its /capability unless you pass supplier_pub_key_hex.",
     {
       escrow_ref: z.string().describe("The escrow_ref that vector_build_marketplace_post_escrow returned"),
       receipt: z.union([z.string(), z.record(z.string(), z.unknown())]).describe("The receipt object (or its JSON text) exactly as vector_marketplace_get_job returned it"),
@@ -210,16 +212,18 @@ export function registerMarketplaceTransportTools(server: McpServer, checkRateLi
       try {
         const v = await verifyJob(providerFor(), VECTOR_KOIOS_URL, {
           escrowRef: escrow_ref, receipt: receiptOf(receipt), signature: receipt_signature.trim(), result,
-          supplierPubKeyHex: supplier_pub_key_hex?.trim() || undefined, submittedRef: submitted_ref?.trim() || undefined,
+          supplierPubKeyHex: supplier_pub_key_hex?.trim() || undefined, submittedRef: submitted_ref?.trim() || undefined, deployment: deploymentFor(),
         });
         const rows = (Object.keys(CHECK_LABELS) as Array<keyof ReceiptChecks>).map((name, i) => `| ${ROW_NUMBERS[i]} | ${CHECK_LABELS[name]} | ${resultOf(v.checks[name])} |`).join('\n');
         const submitted = v.submittedRef === null || v.submittedVia === null ? 'none found' : `\`${v.submittedRef}\` (${FOUND_VIA[v.submittedVia]}; ${v.submittedSpent ? 'already spent: the escrow is settled' : 'live'})`;
         const md = `# Receipt check: ${v.verdict.toUpperCase()}\n\n**Escrow:** \`${v.escrowRef}\` · **supplier key hash (from the escrow):** \`${v.supplierPkh}\`\n` +
+          (v.agentDid === null ? '' : `**Agent (from the escrow):** ${v.agentDid}\n`) +
           `**Supplier key:** ${v.keyFrom === 'argument' ? 'given by you' : "read from the supplier's /capability"}\n**Submitted output:** ${submitted}\n\n` +
           `| # | check | result |\n|---|---|---|\n${rows}\n\n${verdictAdvice(v)}`;
         const entries = Object.entries(v.checks) as Array<[string, Check]>;
         return text(withJson(md, {
           verdict: v.verdict, verified: v.verdict === 'verified', escrow_ref: v.escrowRef, supplier_pkh: v.supplierPkh, supplier_key_from: v.keyFrom,
+          layout: v.layout, agent_did: v.agentDid,
           submitted_ref: v.submittedRef, submitted_via: v.submittedVia, submitted_spent: v.submittedSpent,
           checks: Object.fromEntries(entries.map(([name, c]) => [name, c.state])),
           notes: Object.fromEntries(entries.filter(([, c]) => c.note !== '').map(([name, c]) => [name, c.note])),

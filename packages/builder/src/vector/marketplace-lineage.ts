@@ -1,16 +1,75 @@
 // packages/builder/src/vector/marketplace-lineage.ts
-// Where is an escrow now? The resolver behind Accept, Reclaim and the transport tools: it follows an escrow along its spend chain on
-// Koios and checks what it finds against the node. Reads only; nothing here builds, signs or submits.
+// Where is an escrow now? The resolver behind Accept, Reclaim, Release and the transport tools: it follows an escrow along its spend
+// chain on Koios and checks what it finds against the node. Reads only; nothing here builds, signs or submits.
+//
+// Two escrow layouts live side by side during the drain (Part 2 Sections 6.1 and 9.6): the legacy escrow (its script hash
+// ESCROW_SCRIPT_HASH, a 14-field datum) and the identity-marketplace escrow of the server's deployment (deployment.escrow.hash, a
+// 16-field datum that adds agent_id and refund). An escrow output's layout is the layout of its payment credential, and every output
+// that carries it on has the same layout. The legacy escrow finds the continuation of a Claim or Submit by payment credential, any
+// stake part; the identity escrow writes it at exactly its enterprise address, and keeps agent_id and refund as well.
 import { getAddressDetails } from '@lucid-evolution/lucid';
 import type { Provider, UTxO } from '@lucid-evolution/lucid';
 import { ESCROW_SCRIPT_HASH } from './marketplace-constants.js';
-import { decodeEscrowDatum, encodeEscrowDatum, parseOutRef, formatOutRef } from './marketplace-datum.js';
-import type { EscrowDatum, EscrowState } from './marketplace-datum.js';
+import { decodeEscrowDatum, decodeIdentityEscrowDatum, encodeEscrowDatum, encodeIdentityEscrowDatum, parseOutRef, formatOutRef } from './marketplace-datum.js';
+import type { EscrowDatum, EscrowState, IdentityEscrowDatum, Refund } from './marketplace-datum.js';
 import { koiosUtxoInfo, koiosCredentialUtxos, koiosTxInputRefs, TooManyOutputs } from './marketplace-indexer.js';
 import type { KoiosUtxo } from './marketplace-indexer.js';
 import { ACCEPT_CLOCK } from './marketplace-shared.js';
+import { NOT_CONFIGURED } from './identity-deployment.js';
+import type { IdentityDeployment } from './identity-deployment.js';
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+// ─── Layouts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Which escrow script an escrow lives at: the legacy one, or the identity marketplace's (Part 2 Section 6.1). */
+export type EscrowLayout = 'legacy' | 'identity';
+
+/** The payment credential of an address when it is a script's, else null. */
+function scriptCredentialOf(address: unknown): string | null {
+  if (typeof address !== 'string') return null;
+  try {
+    const credential = getAddressDetails(address).paymentCredential;
+    return credential?.type === 'Script' ? credential.hash : null;
+  } catch { return null; }
+}
+
+/**
+ * The layout of an output by its payment credential, whatever its stake part: the legacy escrow script's, or the escrow script of
+ * `deployment` (when the server has one). Null for any other address.
+ */
+export function escrowLayoutOf(address: unknown, deployment: IdentityDeployment | null): EscrowLayout | null {
+  const credential = scriptCredentialOf(address);
+  if (credential === ESCROW_SCRIPT_HASH) return 'legacy';
+  if (credential !== null && deployment !== null && credential === deployment.escrow.hash) return 'identity';
+  return null;
+}
+
+/** The escrow script hash of a layout. */
+export function escrowCredentialOf(layout: EscrowLayout, deployment: IdentityDeployment | null): string {
+  if (layout === 'legacy') return ESCROW_SCRIPT_HASH;
+  if (deployment === null) throw new Error(`An identity-marketplace escrow needs the identity deployment. ${NOT_CONFIGURED}`);
+  return deployment.escrow.hash;
+}
+
+/** Is this escrow datum the identity layout's (it names the agent and the refund)? */
+export const isIdentityEscrow = (d: EscrowDatum): d is IdentityEscrowDatum => 'agent_id' in d && 'refund' in d;
+
+/** The datum of an escrow output of `layout`: 14 fields for the legacy escrow, 16 for the identity escrow. Throws when it is not one. */
+export const decodeEscrowAs = (layout: EscrowLayout, hex: string): EscrowDatum => (layout === 'legacy' ? decodeEscrowDatum(hex) : decodeIdentityEscrowDatum(hex));
+
+/** The canonical encoding of an escrow datum of `layout` (two datums are the same when these are). */
+function encodeEscrowAs(layout: EscrowLayout, d: EscrowDatum): string {
+  if (layout === 'legacy') return encodeEscrowDatum(d);
+  if (!isIdentityEscrow(d)) throw new Error('escrow: not an identity-marketplace datum');
+  return encodeIdentityEscrowDatum(d);
+}
+
+/** Does `hex` decode as an identity-marketplace escrow datum? */
+function isIdentityEscrowDatum(hex: string | undefined): boolean {
+  if (!hex) return false;
+  try { decodeIdentityEscrowDatum(hex); return true; } catch { return false; }
+}
 
 export interface EscrowLineage {
   /** The datum of the output `escrowRef` names: for the ref buildPostEscrow returns, the Post output as posted (state Open). */
@@ -22,6 +81,8 @@ export interface EscrowLineage {
   current: { utxo: UTxO; datum: EscrowDatum } | null;
   /** Koios says the posted output has been spent. */
   spent: boolean;
+  /** The escrow's layout: every datum above is an IdentityEscrowDatum when it is 'identity'. */
+  layout: EscrowLayout;
 }
 
 /** An output Koios lists at the escrow credential whose datum carries the escrow's fields: a candidate for its continuation. */
@@ -59,19 +120,6 @@ export function nodeFailure(err: unknown): string {
   return known ? known[0] : 'node request failed (network error or timeout)';
 }
 
-/**
- * Is this an escrow output? The validator finds the continuation of a Claim or Submit with unique_output_to_credential, so it is
- * content with the continuation at ANY address whose payment credential is the escrow script's, stake part and all. An escrow
- * output is therefore known by that credential, never by one exact address.
- */
-function isEscrowAddress(address: unknown): boolean {
-  if (typeof address !== 'string') return false;
-  try {
-    const credential = getAddressDetails(address).paymentCredential;
-    return credential?.type === 'Script' && credential.hash === ESCROW_SCRIPT_HASH;
-  } catch { return false; }
-}
-
 /** A lovelace amount as Koios writes it (decimal text), or undefined for anything else. */
 const lovelaceOf = (value: unknown): bigint | undefined => (typeof value === 'string' && /^\d+$/.test(value) ? BigInt(value) : undefined);
 /** What an escrow's datum says is owed between the parties: the payment and both bonds, all that Accept and Reclaim pay out. */
@@ -98,12 +146,20 @@ const KEPT_BY_CLAIM_AND_SUBMIT: Array<[field: string, valueOf: (d: EscrowDatum) 
   ['payment_lovelace', (d) => d.payment_lovelace], ['buyer_bond_lovelace', (d) => d.buyer_bond_lovelace], ['supplier_bond_lovelace', (d) => d.supplier_bond_lovelace],
   ['deliver_by', (d) => d.deliver_by], ['posted_at', (d) => d.posted_at],
 ];
+/** A refund as one comparable text: its address (stake pointer numbers included) and its datum's canonical CBOR, or 'none'. */
+const refundText = (refund: Refund | null): string =>
+  (refund === null ? 'none' : `${JSON.stringify(refund.address, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))}|${refund.datum ?? 'no datum'}`);
+/** The identity escrow keeps agent_id and refund too (Part 2 Section 6.1: Claim and Submit keep agent_id and refund unchanged). */
+const KEPT_BY_IDENTITY_CLAIM_AND_SUBMIT: Array<[field: string, valueOf: (d: EscrowDatum) => unknown]> = [
+  ...KEPT_BY_CLAIM_AND_SUBMIT,
+  ['agent_id', (d) => (isIdentityEscrow(d) ? d.agent_id : null)], ['refund', (d) => (isIdentityEscrow(d) ? refundText(d.refund) : null)],
+];
 /** The names of the fields Claim and Submit keep that `d` has changed from `earlier`, in datum order. */
-const changedFieldsOf = (earlier: EscrowDatum, d: EscrowDatum): string[] =>
-  KEPT_BY_CLAIM_AND_SUBMIT.filter(([, valueOf]) => valueOf(earlier) !== valueOf(d)).map(([field]) => field);
-/** The same datum, field for field (the escrow encoder is canonical, so equal encodings mean equal datums). */
-function sameDatum(a: EscrowDatum, b: EscrowDatum): boolean {
-  try { return encodeEscrowDatum(a) === encodeEscrowDatum(b); } catch { return false; }
+const changedFieldsOf = (earlier: EscrowDatum, d: EscrowDatum, layout: EscrowLayout = 'legacy'): string[] =>
+  (layout === 'legacy' ? KEPT_BY_CLAIM_AND_SUBMIT : KEPT_BY_IDENTITY_CLAIM_AND_SUBMIT).filter(([, valueOf]) => valueOf(earlier) !== valueOf(d)).map(([field]) => field);
+/** The same datum, field for field (each layout's encoder is canonical, so equal encodings mean equal datums). */
+function sameDatum(a: EscrowDatum, b: EscrowDatum, layout: EscrowLayout): boolean {
+  try { return encodeEscrowAs(layout, a) === encodeEscrowAs(layout, b); } catch { return false; }
 }
 /** The states an escrow has a UTxO in, in the order Claim and Submit take it through them. Accepted, Reclaimed and Released are terminal: nothing is left at the escrow address. */
 const LIVE_STATES: EscrowState[] = ['Open', 'Claimed', 'Submitted'];
@@ -119,14 +175,14 @@ function named(list: Candidate[]): string {
  * Which of `candidates` descend from the escrow output `rootRef` by the spend chain, and which Koios cannot tell yet because it
  * does not know a transaction on the way (see resolveEscrowLineage). A candidate one state past the root's was made by a
  * transaction that spent the root; one two states past was made by a transaction that spent an escrow output whose own
- * transaction spent the root. Only inputs at an address with the escrow's payment credential count, so a transfer that merely
- * spends the supplier's change from the Claim is no link. One tx_info batch covers the candidates' transactions, a second the
- * step between when one is needed.
+ * transaction spent the root. Only inputs at an address with the escrow's payment credential (`credential`, the script of the
+ * escrow's layout) count, so a transfer that merely spends the supplier's change from the Claim is no link. One tx_info batch covers
+ * the candidates' transactions, a second the step between when one is needed.
  */
-async function descendantsOf(rootRef: string, root: EscrowDatum, candidates: Candidate[], koiosUrl: string, fetchImpl: typeof fetch): Promise<{ genuine: Candidate[]; unknown: Candidate[] }> {
+async function descendantsOf(rootRef: string, root: EscrowDatum, candidates: Candidate[], koiosUrl: string, fetchImpl: typeof fetch, credential: string): Promise<{ genuine: Candidate[]; unknown: Candidate[] }> {
   // transaction hash -> the escrow outputs that transaction spent; a transaction Koios does not know is absent
   const escrowInputsOf = async (txHashes: string[]): Promise<Map<string, string[]>> => {
-    try { return await koiosTxInputRefs(koiosUrl, txHashes, fetchImpl, ESCROW_SCRIPT_HASH); } catch (err) { throw new Error(`Could not read escrow ${rootRef}: ${koiosFailure(err)}`); }
+    try { return await koiosTxInputRefs(koiosUrl, txHashes, fetchImpl, credential); } catch (err) { throw new Error(`Could not read escrow ${rootRef}: ${koiosFailure(err)}`); }
   };
   const rootStep = LIVE_STATES.indexOf(root.state);
   const stepsPastRoot = (c: Candidate): number => { const step = LIVE_STATES.indexOf(c.datum.state); return rootStep < 0 || step < 0 ? 0 : step - rootStep; };
@@ -150,32 +206,47 @@ async function descendantsOf(rootRef: string, root: EscrowDatum, candidates: Can
   return { genuine, unknown };
 }
 
+/** The output an escrow ref names, as Koios describes it: its datum (of the layout of its credential), spent or not, what it holds. */
+interface EscrowRow { datum: EscrowDatum; spent: boolean; lovelace: bigint; layout: EscrowLayout; address: string }
+
 /**
  * The output `escrowRef` names, as Koios utxo_info describes it, spent or not (Koios keeps the datum of a spent output): its
  * datum, whether Koios says it is spent, and what it holds. Koios only: no node, no spend chain, no other output, so nothing that
  * anyone locks at the escrow credential can change the answer. A caller that needs only what the Post output says (its buyer, its
  * supplier, its advert, its hashes) reads it here and not through resolveEscrowLineage, which fails when a copy at the escrow
  * credential cannot be told from the escrow's own continuation. It fails closed as the resolver does for this output: not found,
- * not at the escrow credential, no escrow datum, spent status or value not reported, not funded. Errors name the escrow by its
- * canonical ref and carry no endpoint and no response body.
+ * at neither escrow credential (the identity escrow's counts only with `deployment`; without it, an identity-marketplace escrow is
+ * refused with the words that say how to configure the server), no escrow datum of that layout, spent status or value not reported,
+ * not funded. The datum is an IdentityEscrowDatum for the identity layout (isIdentityEscrow). Errors name the escrow by its canonical
+ * ref and carry no endpoint and no response body.
  */
-export async function readEscrowOutput(koiosUrl: string, escrowRef: string, fetchImpl: typeof fetch = fetch): Promise<{ datum: EscrowDatum; spent: boolean; lovelace: bigint }> {
+export async function readEscrowOutput(koiosUrl: string, escrowRef: string, fetchImpl: typeof fetch = fetch, deployment: IdentityDeployment | null = null): Promise<{ datum: EscrowDatum; spent: boolean; lovelace: bigint }> {
+  const { datum, spent, lovelace } = await readEscrowRow(koiosUrl, escrowRef, fetchImpl, deployment);
+  return { datum, spent, lovelace };
+}
+
+/** readEscrowOutput, with the layout and the address of the output. */
+async function readEscrowRow(koiosUrl: string, escrowRef: string, fetchImpl: typeof fetch, deployment: IdentityDeployment | null): Promise<EscrowRow> {
   const ref = parseOutRef(escrowRef);
   const canonical = formatOutRef(ref.txHash, ref.outputIndex);
   let rows: KoiosUtxo[];
   try { rows = await koiosUtxoInfo(koiosUrl, [canonical], fetchImpl); } catch (err) { throw new Error(`Could not read escrow ${canonical}: ${koiosFailure(err)}`); }
   const row = rows.find((u) => String(u?.tx_hash).toLowerCase() === ref.txHash && u?.tx_index === ref.outputIndex);
   if (!row) throw new Error(`Escrow ${canonical} not found on the ledger.`);
-  if (!isEscrowAddress(row.address)) throw new Error(`UTxO ${canonical} is not an escrow output: its payment credential is not the escrow script's.`);
+  const layout = escrowLayoutOf(row.address, deployment);
+  if (layout === null) {
+    if (deployment === null && isIdentityEscrowDatum(row.inline_datum?.bytes)) throw new Error(`Escrow ${canonical} is an identity-marketplace escrow. ${NOT_CONFIGURED}`);
+    throw new Error(`UTxO ${canonical} is not an escrow output: its payment credential is not the escrow script's.`);
+  }
   let datum: EscrowDatum;
-  try { datum = decodeEscrowDatum(row.inline_datum?.bytes ?? ''); } catch { throw new Error(`UTxO ${canonical} does not hold an escrow datum.`); }
+  try { datum = decodeEscrowAs(layout, row.inline_datum?.bytes ?? ''); } catch { throw new Error(`UTxO ${canonical} does not hold an escrow datum.`); }
   if (typeof row.is_spent !== 'boolean') throw new Error(`Koios did not report whether escrow ${canonical} is spent; refusing to guess where it is.`);
   const lovelace = lovelaceOf(row.value);
   if (lovelace === undefined) throw new Error(`Koios did not report the value of escrow ${canonical}; refusing to guess whether it is funded.`);
   if (lovelace < owedLovelace(datum)) {
     throw new Error(`Escrow ${canonical} is not funded: its datum owes ${owedLovelace(datum)} lovelace but the output holds ${lovelace}; refusing to treat it as an escrow.`);
   }
-  return { datum, spent: row.is_spent, lovelace };
+  return { datum, spent: row.is_spent, lovelace, layout, address: String(row.address) };
 }
 
 // ─── The Submitted output of an escrow that may be settled ──────────────────────────────────────────────────────────────────────
@@ -189,17 +260,21 @@ const lowerText = (v: unknown): string | undefined => (typeof v === 'string' ? v
 /**
  * Which of the rows the indexer lists for an escrow's buyer put forward a Submitted output of the escrow whose Post datum is
  * `posted`? A row counts when its state is Submitted and it agrees with the Post datum on every field escrow.ak keeps across Claim and
- * Submit: buyer, supplier, advert, capability, request spec hash, prompt hash, the three amounts, deliver_by and posted_at. The same
- * buyer hiring the same supplier with the same payload again differs from an earlier escrow in posted_at and deliver_by alone, and
- * does it often. The refs come back canonical, sorted and once each; an entry that is no row, or has no usable utxo_ref, is skipped.
+ * Submit: buyer, supplier, advert, capability, request spec hash, prompt hash, the three amounts, deliver_by and posted_at; for an
+ * identity-marketplace escrow also its agent_id, and a row that names a layout must name the escrow's. The same buyer hiring the same
+ * supplier with the same payload again differs from an earlier escrow in posted_at and deliver_by alone, and does it often. The refs
+ * come back canonical, sorted and once each; an entry that is no row, or has no usable utxo_ref, is skipped. (The refund is not
+ * compared: the indexer writes it in its own form, and readSubmittedOutput holds the output to it on chain.)
  */
 export function submittedRefsOf(rows: unknown[], posted: EscrowDatum): string[] {
   const advert = formatOutRef(posted.advert_ref.txHash, posted.advert_ref.index);
+  const layout: EscrowLayout = isIdentityEscrow(posted) ? 'identity' : 'legacy';
   const refs = new Set<string>();
   for (const entry of rows) {
     if (entry === null || typeof entry !== 'object') continue;
     const r = entry as Record<string, unknown>;
     if (r.state !== 'Submitted' || typeof r.utxo_ref !== 'string') continue;
+    if (r.layout !== undefined && r.layout !== layout) continue;
     let ref: string;
     try { const parsed = parseOutRef(r.utxo_ref); ref = formatOutRef(parsed.txHash, parsed.outputIndex); } catch { continue; }
     const agrees = lowerText(r.buyer_pkh) === posted.buyer_pkh && lowerText(r.supplier_pkh) === posted.supplier_pkh
@@ -207,7 +282,8 @@ export function submittedRefsOf(rows: unknown[], posted: EscrowDatum): string[] 
       && lowerText(r.request_spec_hash) === posted.request_spec_hash && lowerText(r.prompt_hash) === posted.prompt_hash
       && lovelaceOf(r.payment_lovelace) === posted.payment_lovelace && lovelaceOf(r.buyer_bond_lovelace) === posted.buyer_bond_lovelace
       && lovelaceOf(r.supplier_bond_lovelace) === posted.supplier_bond_lovelace
-      && r.deliver_by === posted.deliver_by && r.posted_at === posted.posted_at;
+      && r.deliver_by === posted.deliver_by && r.posted_at === posted.posted_at
+      && (!isIdentityEscrow(posted) || lowerText(r.agent_id) === posted.agent_id);
     if (agrees) refs.add(ref);
   }
   return [...refs].sort();
@@ -220,22 +296,27 @@ export function submittedRefsOf(rows: unknown[], posted: EscrowDatum): string[] 
  * fields are public and anyone can lock a copy. What a copy cannot fake is how it came to be, so it must also (1) be in state
  * Submitted with a receipt hash, (2) agree with the Post datum on every field Claim and Submit keep, (3) hold what the Post output
  * held, and (4) descend from the Post output by the spend chain (descendantsOf: its transaction spent a Claimed output that the
- * escrow's Claim made, two calls to tx_info). Whoever named the ref, the indexer or a caller, these checks are the same. Throws, naming
- * the output and the escrow, when any fails or Koios cannot say.
+ * escrow's Claim made, two calls to tx_info). An identity-marketplace escrow (`post.layout`, read with `deployment`) also needs the
+ * output in that layout and at exactly the escrow address, where the script writes it. Whoever named the ref, the indexer or a
+ * caller, these checks are the same. Throws, naming the output and the escrow, when any fails or Koios cannot say.
  */
 export async function readSubmittedOutput(
-  koiosUrl: string, post: { ref: string; datum: EscrowDatum; lovelace: bigint }, submittedRef: string, fetchImpl: typeof fetch = fetch,
+  koiosUrl: string, post: { ref: string; datum: EscrowDatum; lovelace: bigint; layout?: EscrowLayout }, submittedRef: string, fetchImpl: typeof fetch = fetch,
+  deployment: IdentityDeployment | null = null,
 ): Promise<{ datum: EscrowDatum; receiptHash: string; spent: boolean; ref: string }> {
   const parsed = parseOutRef(submittedRef);
   const at = formatOutRef(parsed.txHash, parsed.outputIndex);
-  const out = await readEscrowOutput(koiosUrl, at, fetchImpl);
+  const layout = post.layout ?? 'legacy';
+  const out = await readEscrowRow(koiosUrl, at, fetchImpl, deployment);
   const { datum } = out;
+  if (out.layout !== layout) throw new Error(`UTxO ${at} does not belong to escrow ${post.ref}: it is a ${out.layout} escrow output and the escrow is a ${layout} one.`);
+  if (layout === 'identity' && out.address !== deployment?.escrow.address) throw new Error(`UTxO ${at} does not belong to escrow ${post.ref}: it is not at the escrow address, where Claim and Submit write the escrow.`);
   if (datum.state !== 'Submitted') throw new Error(`UTxO ${at} is not a Submitted output: its datum is in state ${datum.state}.`);
   if (datum.result_receipt_hash === null) throw new Error(`UTxO ${at} is a Submitted output without a receipt hash.`);
-  const changed = changedFieldsOf(post.datum, datum);
+  const changed = changedFieldsOf(post.datum, datum, layout);
   if (changed.length > 0) throw new Error(`UTxO ${at} does not belong to escrow ${post.ref}: its datum differs from that escrow's in ${changed.join(', ')}, which Claim and Submit leave unchanged.`);
   if (out.lovelace !== post.lovelace) throw new Error(`UTxO ${at} does not belong to escrow ${post.ref}: it holds ${out.lovelace} lovelace where the Post output held ${post.lovelace}.`);
-  const { genuine, unknown } = await descendantsOf(post.ref, post.datum, [{ txHash: parsed.txHash, outputIndex: parsed.outputIndex, datum }], koiosUrl, fetchImpl);
+  const { genuine, unknown } = await descendantsOf(post.ref, post.datum, [{ txHash: parsed.txHash, outputIndex: parsed.outputIndex, datum }], koiosUrl, fetchImpl, escrowCredentialOf(layout, deployment));
   if (unknown.length > 0) throw new Error(`Cannot tell whether UTxO ${at} belongs to escrow ${post.ref}: Koios does not know the transaction behind it yet; retry in a few seconds.`);
   if (genuine.length === 0) throw new Error(`UTxO ${at} does not belong to escrow ${post.ref}: it carries the escrow's fields, but it does not descend from that escrow by the spend chain.`);
   return { datum, receiptHash: datum.result_receipt_hash, spent: out.spent, ref: at };
@@ -276,6 +357,11 @@ export async function readSubmittedOutput(
  * fields but none provably descends from it, or Koios does not know a transaction on the way yet; when two of them do; and when
  * the one that does differs from the escrow in a field Claim and Submit keep.
  *
+ * Both layouts (Part 2 Section 6.1). An escrow's layout is the layout of its posted output's credential (escrowLayoutOf; the
+ * identity escrow's needs `deployment`), and everything above is read at that layout's credential. The identity escrow writes the
+ * continuation of a Claim or Submit at exactly its enterprise address and keeps agent_id and refund as well, so a candidate must be
+ * at that address and agree on those two fields too.
+ *
  * Residual: the candidate read holds at most CREDENTIAL_UTXOS_MAX_ROWS (5,000) outputs, and anyone can lock decoys that copy the
  * escrow's public prompt hash, so a flood of them makes a spent Post output unresolvable here, and with it every Accept and Reclaim
  * that goes through these tools. The refusal says so, names the accept clock and the way out (the buyer SDK of agents-marketplace builds
@@ -283,7 +369,7 @@ export async function readSubmittedOutput(
  * is a third party's word.
  * `fetchImpl` stands in for fetch in the Koios calls (tests).
  */
-export async function resolveEscrowLineage(provider: Provider, koiosUrl: string, escrowRef: string, fetchImpl: typeof fetch = fetch): Promise<EscrowLineage> {
+export async function resolveEscrowLineage(provider: Provider, koiosUrl: string, escrowRef: string, fetchImpl: typeof fetch = fetch, deployment: IdentityDeployment | null = null): Promise<EscrowLineage> {
   const ref = parseOutRef(escrowRef);
   const canonical = formatOutRef(ref.txHash, ref.outputIndex);
   const fromKoios = async <T>(read: () => Promise<T>): Promise<T> => {
@@ -293,22 +379,25 @@ export async function resolveEscrowLineage(provider: Provider, koiosUrl: string,
     try { return await read(); } catch (err) { throw new Error(`Could not read escrow ${canonical} from the node: ${nodeFailure(err)}`); }
   };
   const disagree = (detail: string) => new Error(`Koios and the node disagree about escrow ${canonical}: ${detail}; retry in a minute.`);
-  /** The node's copy of an output Koios described must be that output: an escrow output, with that datum and that lovelace. */
-  const confirmedOnNode = (utxo: UTxO, at: string, expected: { datum: EscrowDatum; lovelace: bigint }): UTxO => {
-    if (!isEscrowAddress(utxo.address) || !utxo.datum) throw disagree(`the node lists ${at} but not as an escrow output (no escrow payment credential or no inline datum)`);
+  const { datum: posted, spent: rootSpent, lovelace: rootLovelace, layout } = await readEscrowRow(koiosUrl, canonical, fetchImpl, deployment);
+  const credential = escrowCredentialOf(layout, deployment);
+  /** Where a continuation of this escrow can be: the legacy escrow's at any address with its credential, the identity escrow's at exactly its address. */
+  const continuesAt = (address: unknown): boolean => (layout === 'legacy' ? escrowLayoutOf(address, deployment) === 'legacy' : address === deployment?.escrow.address);
+  /** The node's copy of an output Koios described must be that output: an escrow output of this layout, with that datum and that lovelace. */
+  const confirmedOnNode = (utxo: UTxO, at: string, expected: { datum: EscrowDatum; lovelace: bigint }, continuation: boolean): UTxO => {
+    const placed = continuation ? continuesAt(utxo.address) : escrowLayoutOf(utxo.address, deployment) === layout;
+    if (!placed || !utxo.datum) throw disagree(`the node lists ${at} but not as an escrow output (no escrow payment credential or no inline datum)`);
     let datum: EscrowDatum | undefined;
-    try { datum = decodeEscrowDatum(utxo.datum); } catch { /* not an escrow datum: refused below */ }
-    if (!datum || !sameDatum(datum, expected.datum)) throw disagree(`the datum the node holds at ${at} differs from the one Koios reports`);
+    try { datum = decodeEscrowAs(layout, utxo.datum); } catch { /* not an escrow datum: refused below */ }
+    if (!datum || !sameDatum(datum, expected.datum, layout)) throw disagree(`the datum the node holds at ${at} differs from the one Koios reports`);
     if (utxo.assets.lovelace !== expected.lovelace) throw disagree(`the node holds ${utxo.assets.lovelace} lovelace at ${at} where Koios reports ${expected.lovelace}`);
     return utxo;
   };
 
-  const { datum: posted, spent: rootSpent, lovelace: rootLovelace } = await readEscrowOutput(koiosUrl, canonical, fetchImpl);
-
   const [rootOnNode] = await fromNode(() => provider.getUtxosByOutRef([ref]));
   if (!rootSpent) {
     if (!rootOnNode) throw disagree('Koios says it is unspent, the node does not list it (one of them is behind)');
-    return { posted, current: { utxo: confirmedOnNode(rootOnNode, canonical, { datum: posted, lovelace: rootLovelace }), datum: posted }, spent: false };
+    return { posted, current: { utxo: confirmedOnNode(rootOnNode, canonical, { datum: posted, lovelace: rootLovelace }, false), datum: posted }, spent: false, layout };
   }
   if (rootOnNode) throw disagree('Koios says it is spent, the node still lists it as unspent (one of them is behind)');
 
@@ -319,19 +408,19 @@ export async function resolveEscrowLineage(provider: Provider, koiosUrl: string,
     throw new Error(`Escrow ${canonical} cannot be followed: its prompt hash is ${promptBytes} bytes, outside the 1 to 128 bytes the lookup supports; retrying will not change that.`);
   }
   // Candidates: the outputs at the escrow credential whose datum carries this escrow's prompt hash, as Koios lists them.
-  const listed = await fromKoios(() => koiosCredentialUtxos(koiosUrl, ESCROW_SCRIPT_HASH, fetchImpl, { datumContains: posted.prompt_hash }));
+  const listed = await fromKoios(() => koiosCredentialUtxos(koiosUrl, credential, fetchImpl, { datumContains: posted.prompt_hash }));
   const candidates: Candidate[] = [];
   for (const u of listed) {
     const txHash = u.tx_hash.toLowerCase();
     if (txHash === ref.txHash && u.tx_index === ref.outputIndex) continue; // Koios lists the posted output as spent above: it is not its own continuation
-    if (!isEscrowAddress(u.address) || typeof u.inline_datum?.bytes !== 'string') continue;
+    if (!continuesAt(u.address) || typeof u.inline_datum?.bytes !== 'string') continue;
     let datum: EscrowDatum;
-    try { datum = decodeEscrowDatum(u.inline_datum.bytes); } catch { continue; }
+    try { datum = decodeEscrowAs(layout, u.inline_datum.bytes); } catch { continue; }
     if (carriesFieldsOf(posted, datum) && lovelaceOf(u.value) === rootLovelace) candidates.push({ txHash, outputIndex: u.tx_index, datum });
   }
-  if (candidates.length === 0) return { posted, current: null, spent: true };
+  if (candidates.length === 0) return { posted, current: null, spent: true, layout };
 
-  const { genuine, unknown } = await descendantsOf(canonical, posted, candidates, koiosUrl, fetchImpl);
+  const { genuine, unknown } = await descendantsOf(canonical, posted, candidates, koiosUrl, fetchImpl, credential);
   if (genuine.length > 1) throw new Error(`More than one UTxO descends from escrow ${canonical} by the spend chain (${named(genuine)}); refusing to choose between them.`);
   if (genuine.length === 0) {
     throw new Error(unknown.length > 0
@@ -342,11 +431,11 @@ export async function resolveEscrowLineage(provider: Provider, koiosUrl: string,
   const at = refOf(chosen);
   // Descending by the spend chain is not enough: a transaction that ended the escrow (Reclaim, Accept, Release) can leave an
   // output at the escrow credential behind, with a datum of its own, and Accept would pay out what that datum says.
-  const changed = changedFieldsOf(posted, chosen.datum);
+  const changed = changedFieldsOf(posted, chosen.datum, layout);
   if (changed.length > 0) {
     throw new Error(`UTxO ${at} follows escrow ${canonical} along the spend chain, but its datum differs from that escrow's in ${changed.join(', ')}, which Claim and Submit leave unchanged; refusing to build on it.`);
   }
   const [utxo] = await fromNode(() => provider.getUtxosByOutRef([{ txHash: chosen.txHash, outputIndex: chosen.outputIndex }]));
   if (!utxo) throw disagree(`Koios lists ${at} as its live continuation, the node does not list it (one of them is behind)`);
-  return { posted, current: { utxo: confirmedOnNode(utxo, at, { datum: chosen.datum, lovelace: rootLovelace }), datum: chosen.datum }, spent: true };
+  return { posted, current: { utxo: confirmedOnNode(utxo, at, { datum: chosen.datum, lovelace: rootLovelace }, true), datum: chosen.datum }, spent: true, layout };
 }

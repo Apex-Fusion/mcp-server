@@ -345,19 +345,20 @@ describe(VERIFY, () => {
   const submitted = (o: Scenario = {}) => run({ escrow: 'submitted', supplierPkh: pkhOf(SUPPLIER_KEY), receiptHash: committedHash(receipt, signature), answer: capability(pubHexOf(SUPPLIER_KEY)), ...o });
   const args = { escrow_ref: ESCROW_REF, receipt, receipt_signature: signature, result: RESULT };
   const VERIFY_TIPS = `${TIPS}1. Pass the receipt and its signature exactly as vector_marketplace_get_job returned them, and the escrow_ref the post returned\n2. If the supplier's /capability cannot be read, pass supplier_pub_key_hex`;
-  // the five checks by the design's names, in its order, and the extra row after them
+  // the six checks by their names, in their order, and the extra row after them
   const LABELS = [
     '`receipt.escrow_ref` equals the escrow ref',
     '`sha256(result)` equals `response_hash`',
     "the supplier public key hashes to `receipt.supplier_pkh` and to the escrow datum's `supplier_pkh`",
     'Ed25519 over `canonicalize(receipt)` verifies',
     "the Submitted escrow datum's `result_receipt_hash` equals `sha256(canonicalize({receipt, signature}))`",
+    "the receipt has exactly the fields of its escrow's layout: 8 for a legacy escrow; 9 with `agent_did` = `did:vector:<agent_id>` for an identity-marketplace escrow",
     "the receipt's `prompt_hash` equals the escrow datum's `prompt_hash`",
   ];
-  const NUMBERS = ['1', '2', '3', '4', '5', 'extra'];
+  const NUMBERS = ['1', '2', '3', '4', '5', '6', 'extra'];
   const table = (results: string[]) => `| # | check | result |\n|---|---|---|\n${LABELS.map((label, i) => `| ${NUMBERS[i]} | ${label} | ${results[i]} |`).join('\n')}`;
-  const ALL_PASS = ['pass', 'pass', 'pass', 'pass', 'pass', 'pass'];
-  const VERIFIED_HEAD = "All five checks passed, and so did the extra row: the receipt is for this escrow and for the request it committed to, it hashes the result text you gave, it is signed by the key that belongs to the escrow's supplier, and the hash of that signed receipt is the one the supplier committed on chain. That says nothing about whether the result is any good: read it";
+  const ALL_PASS = ['pass', 'pass', 'pass', 'pass', 'pass', 'pass', 'pass'];
+  const VERIFIED_HEAD = "All six checks passed, and so did the extra row: the receipt is for this escrow and for the request it committed to, it has exactly the fields of its escrow's layout (and names the agent you hired, for an identity-marketplace escrow), it hashes the result text you gave, it is signed by the key that belongs to the escrow's supplier, and the hash of that signed receipt is the one the supplier committed on chain. That says nothing about whether the result is any good: read it";
   const VERIFIED_COPY = `${VERIFIED_HEAD} before you accept. Next: vector_build_marketplace_accept, which must land within 600 s of the supplier's Submit.`;
   const SETTLED_COPY = `${VERIFIED_HEAD}. The escrow is already settled, so there is nothing left to accept.`;
   const CLOCK = ACCEPT_CLOCK;
@@ -365,7 +366,7 @@ describe(VERIFY, () => {
   /** What the advice says when no Submitted output was found, word for word. */
   const NOTHING_TO_ACCEPT = "No Submitted output was found on chain. If the escrow is Open or Claimed there is nothing to accept yet, and declining costs nothing: if the supplier never submits, vector_build_marketplace_reclaim after deliver_by returns everything. " +
     `Check where it stands with vector_build_marketplace_accept (it builds only for a Submitted escrow, prints the seconds left, and its refusal names the state when one was found); if it is Submitted, the accept clock is running: ${CLOCK}`;
-  const CHECKS = (over: Record<string, string> = {}) => ({ escrow_ref_matches: 'pass', response_hash_matches: 'pass', supplier_key_matches: 'pass', signature_valid: 'pass', on_chain_hash_matches: 'pass', prompt_hash_matches: 'pass', ...over });
+  const CHECKS = (over: Record<string, string> = {}) => ({ escrow_ref_matches: 'pass', response_hash_matches: 'pass', supplier_key_matches: 'pass', signature_valid: 'pass', on_chain_hash_matches: 'pass', fields_match: 'pass', prompt_hash_matches: 'pass', ...over });
   /** What a verdict that is not "verified" may say in words: nothing that calls the receipt verified. (The JSON block carries the flag, false.) */
   const notVerified = (t: string, verdict: string) => {
     assert.doesNotMatch(markdownOf(t), /verified/i);
@@ -380,7 +381,7 @@ describe(VERIFY, () => {
       `# Receipt check: VERIFIED\n\n**Escrow:** \`${ESCROW_REF}\` · **supplier key hash (from the escrow):** \`${pkhOf(SUPPLIER_KEY)}\`\n` +
       `**Supplier key:** read from the supplier's /capability\n**Submitted output:** \`${SUBMIT_TX}#0\` (found on chain; live)\n\n${table(ALL_PASS)}\n\n${VERIFIED_COPY}`);
     assert.deepEqual(jsonOf(t), {
-      verdict: 'verified', verified: true, escrow_ref: ESCROW_REF, supplier_pkh: pkhOf(SUPPLIER_KEY), supplier_key_from: 'capability',
+      verdict: 'verified', verified: true, escrow_ref: ESCROW_REF, supplier_pkh: pkhOf(SUPPLIER_KEY), supplier_key_from: 'capability', layout: 'legacy', agent_did: null,
       submitted_ref: `${SUBMIT_TX}#0`, submitted_via: 'lineage', submitted_spent: false, checks: CHECKS(), notes: {},
     });
     assert.deepEqual(s.sup.calls.map((c) => [c.method, c.url]), [['GET', `${SUPPLIER}/capability`]]);
@@ -405,7 +406,7 @@ describe(VERIFY, () => {
   test('without the result text the check is skipped, the verdict is incomplete, and the text never says verified', async () => {
     submitted();
     const t = await call(VERIFY, { ...args, result: undefined });
-    assert.ok(markdownOf(t).includes(table(['pass', 'skipped (no report text given)', 'pass', 'pass', 'pass', 'pass'])));
+    assert.ok(markdownOf(t).includes(table(['pass', 'skipped (no report text given)', 'pass', 'pass', 'pass', 'pass', 'pass'])));
     assert.ok(t.startsWith('# Receipt check: INCOMPLETE\n'));
     assert.ok(markdownOf(t).endsWith(`Nothing failed, but not every check ran (see the rows marked skipped), so this is not a verification: run it again with what is missing before you accept. ${CLOCK}`));
     notVerified(t, 'incomplete');
@@ -417,7 +418,7 @@ describe(VERIFY, () => {
     const sig = signWith(SUPPLIER_KEY, other);
     submitted({ receiptHash: committedHash(other, sig) });
     const t = await call(VERIFY, { ...args, receipt: other, receipt_signature: sig });
-    assert.ok(markdownOf(t).includes(table(['FAIL (the receipt names another escrow)', 'pass', 'pass', 'pass', 'pass', 'pass'])));
+    assert.ok(markdownOf(t).includes(table(['FAIL (the receipt names another escrow)', 'pass', 'pass', 'pass', 'pass', 'pass', 'pass'])));
     assert.ok(t.startsWith('# Receipt check: FAILED\n'));
     assert.ok(markdownOf(t).endsWith(`At least one check failed. Whether to accept on this receipt is your call, and neither choice is free: ${CHOICES}. ${NO_DISPUTE} ${CLOCK} ${REPORT}`));
     notVerified(t, 'failed');
@@ -504,7 +505,7 @@ describe(VERIFY, () => {
     const sig = signWith(SUPPLIER_KEY, other);
     submitted({ receiptHash: committedHash(other, sig) });
     const t = await call(VERIFY, { ...args, receipt: other, receipt_signature: sig });
-    assert.ok(markdownOf(t).includes(table(['pass', 'pass', 'pass', 'pass', 'pass', "FAIL (the receipt's prompt_hash is not the escrow's prompt_hash: it was made for another request)"])));
+    assert.ok(markdownOf(t).includes(table(['pass', 'pass', 'pass', 'pass', 'pass', 'pass', "FAIL (the receipt's prompt_hash is not the escrow's prompt_hash: it was made for another request)"])));
     assert.ok(t.startsWith('# Receipt check: FAILED\n'));
     notVerified(t, 'failed');
     assert.deepEqual(jsonOf(t).checks, CHECKS({ prompt_hash_matches: 'fail' }));
@@ -518,7 +519,7 @@ describe(VERIFY, () => {
         `# Receipt check: VERIFIED\n\n**Escrow:** \`${ESCROW_REF}\` · **supplier key hash (from the escrow):** \`${pkhOf(SUPPLIER_KEY)}\`\n` +
         `**Supplier key:** read from the supplier's /capability\n**Submitted output:** \`${SUBMIT_TX}#0\` (located by the marketplace indexer and proven by the spend chain; already spent: the escrow is settled)\n\n${table(ALL_PASS)}\n\n${SETTLED_COPY}`);
       assert.deepEqual(jsonOf(t), {
-        verdict: 'verified', verified: true, escrow_ref: ESCROW_REF, supplier_pkh: pkhOf(SUPPLIER_KEY), supplier_key_from: 'capability',
+        verdict: 'verified', verified: true, escrow_ref: ESCROW_REF, supplier_pkh: pkhOf(SUPPLIER_KEY), supplier_key_from: 'capability', layout: 'legacy', agent_did: null,
         submitted_ref: `${SUBMIT_TX}#0`, submitted_via: 'indexer', submitted_spent: true, checks: CHECKS(), notes: {},
       });
       assert.deepEqual(s.indexerCalls().length, 1);
@@ -686,12 +687,12 @@ describe('the tool texts', () => {
       assert.doesNotMatch(text(name), /may have claimed|forfeit|stops a stranger/i, name);
     }
   });
-  test('verify_receipt names the five checks and the extra row, says it works before and after the Accept, and says "verified" only when every row passes', () => {
+  test('verify_receipt names the six checks and the extra row, says it works before and after the Accept, and says "verified" only when every row passes', () => {
     const t = text(VERIFY);
-    for (const part of ['(1) receipt.escrow_ref equals the escrow ref', '(2) sha256 of the result text equals the receipt\'s response_hash', '(3) the supplier\'s public key hashes to receipt.supplier_pkh and to the escrow\'s supplier_pkh', '(4) the Ed25519 signature over the canonical receipt verifies', '(5) the escrow\'s result_receipt_hash on chain equals the hash of the signed receipt']) {
+    for (const part of ['(1) receipt.escrow_ref equals the escrow ref', '(2) sha256 of the result text equals the receipt\'s response_hash', '(3) the supplier\'s public key hashes to receipt.supplier_pkh and to the escrow\'s supplier_pkh', '(4) the Ed25519 signature over the canonical receipt verifies', '(5) the escrow\'s result_receipt_hash on chain equals the hash of the signed receipt', '(6) the receipt has exactly the fields of its escrow\'s layout: the 8 receipt fields for a legacy escrow, and those 8 plus agent_did = did:vector:<agent_id> for an identity-marketplace escrow']) {
       assert.ok(t.includes(part), part);
     }
-    assert.match(t, /One extra row, not one of the five: the receipt's prompt_hash equals the escrow's prompt_hash\./);
+    assert.match(t, /One extra row, not one of the six: the receipt's prompt_hash equals the escrow's prompt_hash\./);
     assert.match(t, /Says verified only when every row passes\./);
     assert.match(t, /Works before and after the Accept: check 5 finds the escrow's Submitted output on chain, live or, once it is spent, through the marketplace indexer \(which only says where to look: the output is read from Koios and proven to be the escrow's own by the spend chain\); pass submitted_ref to name it yourself\./);
     assert.doesNotMatch(t, /Run it before|no longer there/);

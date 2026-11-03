@@ -3,8 +3,9 @@
 // No supplier URLs are contacted here (marketplace-transport.ts does that, through safeFetch).
 import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import { ADVERT_ADDRESS, INDEXER_URL } from './marketplace-constants.js';
-import { decodeAdvertDatum, formatOutRef, parseOutRef } from './marketplace-datum.js';
-import type { AdvertDatum } from './marketplace-datum.js';
+import { decodeAdvertDatum, decodeIdentityAdvertDatum, formatOutRef, parseOutRef } from './marketplace-datum.js';
+import type { AdvertDatum, IdentityAdvertDatum } from './marketplace-datum.js';
+import { NOT_CONFIGURED } from './identity-deployment.js';
 
 export interface CapabilityRow { capability_id: string; supplier_count: number }
 export interface SupplierRow {
@@ -13,6 +14,11 @@ export interface SupplierRow {
   price_lovelace: bigint; supplier_bond_lovelace: bigint; buyer_bond_lovelace: bigint;
   endpoint_url: string; detail_uri: string; detail_hash: string; advertised_at: number;
   status: string; advert_status: string; current_escrow_ref: string | null; last_seen_iso: string | null; created_slot: number;
+  /**
+   * The identifier of the agent that the advert names (Part 2 Section 6.4): 64 lowercase hex, or null for a legacy advert. An
+   * indexer older than the identity release leaves it out. The indexer's word: check its shape before use.
+   */
+  agent_id?: string | null;
 }
 export interface KoiosUtxo {
   tx_hash: string; tx_index: number; address?: string; value: string; is_spent?: boolean; payment_cred?: string;
@@ -106,6 +112,23 @@ export async function fetchSupplier(pkh: string, opts: Opts = {}): Promise<Suppl
   const body = await readJson<unknown>(res, 'get supplier');
   if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new Error('get supplier: indexer returned a non-object response');
   return normaliseSupplier(body as Record<string, unknown>);
+}
+
+/** The agent_id of an indexer row when it has the shape of an identifier (64 lowercase hex), else null: the indexer's word, checked. */
+export function rowAgentId(row: Pick<SupplierRow, 'agent_id'>): string | null {
+  return typeof row.agent_id === 'string' && /^[0-9a-f]{64}$/.test(row.agent_id) ? row.agent_id : null;
+}
+
+/**
+ * The indexer's row of the advert `advertRef` (canonical `<txHash>#<index>`) among the listed adverts (GET /suppliers), or null when
+ * the indexer does not list it. The indexer lists an identity-marketplace advert only when it passes the listing rule (Part 2 Section
+ * 6.2), so a row with the advert's agent_id says that the indexer found the advert listed. It is the indexer's word: a builder also
+ * checks the rule on chain.
+ */
+export async function listedAdvertRow(advertRef: string, opts: Opts = {}): Promise<SupplierRow | null> {
+  const rows = await getList<Record<string, unknown>>(`${INDEXER_URL}/suppliers`, opts, 'list suppliers');
+  const row = rows.find((r) => r !== null && typeof r === 'object' && typeof r.utxo_ref === 'string' && r.utxo_ref.toLowerCase() === advertRef);
+  return row ? normaliseSupplier(row) : null;
 }
 
 /**
@@ -272,36 +295,56 @@ export function withJson(markdown: string, obj: unknown): string {
   return `${markdown}\n\n\`\`\`json\n${json}\n\`\`\``;
 }
 
-export type AdvertRead = { error: string } | { utxo: KoiosUtxo; advert: AdvertDatum; spent: boolean };
+/** Which advert script an advert sits at: the legacy one, or the identity marketplace's (Part 2 Section 6.2). */
+export type AdvertLayout = 'legacy' | 'identity';
+export type AdvertRead = { error: string }
+  | { utxo: KoiosUtxo; spent: boolean; layout: 'legacy'; advert: AdvertDatum; agentId: null }
+  | { utxo: KoiosUtxo; spent: boolean; layout: 'identity'; advert: IdentityAdvertDatum; agentId: string };
+
+/** Does `datumHex` decode as an identity-marketplace advert (14 fields)? */
+function isIdentityAdvert(datumHex: string | undefined): boolean {
+  if (!datumHex) return false;
+  try { decodeIdentityAdvertDatum(datumHex); return true; } catch { return false; }
+}
 
 // Anyone can lock a UTxO anywhere with a datum that merely parses as an advert (and copies a real supplier_pkh), so a UTxO is
-// taken for an advert only at the advert script address. Problems with the ref come back as text-ready `{ error }`; Koios failures throw.
+// taken for an advert only at an advert script address. Problems with the ref come back as text-ready `{ error }`; Koios failures throw.
 /**
- * Reads one advert from the ledger. It refuses UTxOs that are not at the advert script address or hold no advert datum. That does
- * not make an advert genuine (the advert validator does not check who creates one, so buildPostEscrow also proves authorship) or
- * live: a spent or retired advert is returned too, flagged by `spent` and `advert.status`, and buildPostEscrow requires it unspent.
- * `koiosUrl` is the Koios it asks (the configured one unless a caller that has read other things from a Koios of its own passes that
- * one, so that one decision draws on one source).
+ * Reads one advert from the ledger, in either layout: at the legacy advert address with the 13-field datum, or at
+ * `identityAdvertAddress` (the identity deployment's advert address, when the server has one) with the 14-field datum that names the
+ * agent. It refuses UTxOs that are at neither address or hold no advert datum of that address's layout; without a deployment, an
+ * identity-marketplace advert is refused with the words that say how to configure the server. That does not make an advert genuine
+ * (the advert validator does not check who creates one, so buildPostEscrow also proves authorship, or for the identity layout that
+ * the advert is listed) or live: a spent or retired advert is returned too, flagged by `spent` and `advert.status`, and
+ * buildPostEscrow requires it unspent. `koiosUrl` is the Koios it asks (the configured one unless a caller that has read other
+ * things from a Koios of its own passes that one, so that one decision draws on one source).
  */
-export async function readAdvert(ref: string, fetchImpl: typeof fetch = fetch, koiosUrl: string = VECTOR_KOIOS_URL): Promise<AdvertRead> {
+export async function readAdvert(ref: string, fetchImpl: typeof fetch = fetch, koiosUrl: string = VECTOR_KOIOS_URL, identityAdvertAddress: string | null = null): Promise<AdvertRead> {
   let parsed: { txHash: string; outputIndex: number };
   try { parsed = parseOutRef(ref); } catch (err) { return { error: err instanceof Error ? err.message : String(err) }; }
   const canonical = formatOutRef(parsed.txHash, parsed.outputIndex);
   const utxos = await koiosUtxoInfo(koiosUrl, [canonical], fetchImpl);
   const utxo = utxos.find((u) => String(u?.tx_hash).toLowerCase() === parsed.txHash && u?.tx_index === parsed.outputIndex);
   if (!utxo) return { error: `No UTxO at ${canonical}.` };
-  if (utxo.address?.toLowerCase() !== ADVERT_ADDRESS) return { error: `UTxO ${canonical} is not at the advert script address.` };
+  const address = utxo.address?.toLowerCase();
   const datum = utxo.inline_datum?.bytes;
-  let advert: AdvertDatum | null = null;
-  let why = '';
-  if (datum) {
-    try { advert = decodeAdvertDatum(datum); } catch (err) {
-      // Refused below. When the decoder names the field it refused (`advert.max_output_tokens: integer outside the safe range`)
-      // the caller is told which; those messages are fixed text, whereas anything else it says (CBOR, shape) stays out.
-      const message = err instanceof Error ? err.message : '';
-      if (/^advert\.\w+: /.test(message)) why = ` ${message}.`;
-    }
+  const layout: AdvertLayout | null = address === ADVERT_ADDRESS ? 'legacy' : identityAdvertAddress !== null && address === identityAdvertAddress ? 'identity' : null;
+  if (layout === null) {
+    if (identityAdvertAddress === null && isIdentityAdvert(datum)) return { error: `UTxO ${canonical} holds an identity-marketplace advert. ${NOT_CONFIGURED}` };
+    return { error: `UTxO ${canonical} is not at the advert script address.` };
   }
-  if (!advert) return { error: `UTxO ${canonical} does not hold an advert datum.${why}` };
-  return { utxo, advert, spent: utxo.is_spent === true };
+  let why = '';
+  // The decoder names the field it refused (`advert.max_output_tokens: integer outside the safe range`): the caller is told which.
+  // Those messages are fixed text, whereas anything else it says (CBOR, shape) stays out.
+  const whyOf = (err: unknown) => { const message = err instanceof Error ? err.message : ''; if (/^advert\.\w+: /.test(message)) why = ` ${message}.`; };
+  if (datum && layout === 'legacy') {
+    let advert: AdvertDatum | null = null;
+    try { advert = decodeAdvertDatum(datum); } catch (err) { whyOf(err); }
+    if (advert) return { utxo, spent: utxo.is_spent === true, layout, advert, agentId: null };
+  } else if (datum) {
+    let advert: IdentityAdvertDatum | null = null;
+    try { advert = decodeIdentityAdvertDatum(datum); } catch (err) { whyOf(err); }
+    if (advert) return { utxo, spent: utxo.is_spent === true, layout: 'identity', advert, agentId: advert.agent_id };
+  }
+  return { error: `UTxO ${canonical} does not hold an advert datum.${why}` };
 }

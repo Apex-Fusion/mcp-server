@@ -32,6 +32,17 @@ export const RELEASE_TAKE = 'keep everything locked (price + both bonds + any fl
 /** The accept clock, as one sentence for every text that has to carry it. */
 export const ACCEPT_CLOCK = `Accept must land within ${ACCEPT_WINDOW_S} s of the supplier's Submit; after that the supplier may Release and ${RELEASE_TAKE}.`;
 
+/** A key that must sign a build, with why: the shape of SignedByBuild's list (identity-chain.ts). */
+export interface SignerRow { keyHash: string; roles: string[] }
+/** The keys that must sign, as one line of the marketplace texts: each key hash with its roles (roles are escaped). */
+export function signersLine(signers: SignerRow[]): string {
+  return `**Required signers:** ${signers.map((s) => `\`${s.keyHash}\` (${s.roles.map((r) => cell(r, 120)).join('; ')})`).join(', ')}`;
+}
+/** The keys that must sign, for a JSON block. */
+export function signersJson(signers: SignerRow[]): Array<{ key_hash: string; roles: string[] }> {
+  return signers.map((s) => ({ key_hash: s.keyHash, roles: s.roles }));
+}
+
 export const SIGN_COPY = 'Sign it locally with vector_signer_sign { txCbor }, broadcast with vector_submit_transaction { signedTxCbor }, then confirm with vector_await_transaction { txHash }.';
 
 /** What a handler asks before it does anything: null to go on, or the refusal to return as the answer. */

@@ -120,126 +120,68 @@ Build an unsigned transaction interacting with a deployed smart contract: lock A
 
 **Example prompt:** "Collect the locked AP3X from the escrow contract at addr1..."
 
-### vector_build_register_agent
+### Identity registry, attestation, delegation and vault tools
 
-Build an unsigned transaction that registers an agent in the Vector on-chain registry: mints a soulbound identity NFT and locks a 10 AP3X deposit (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
+The `vector_build_identity_*`, `vector_build_attestation_*`, `vector_build_delegation_*` and `vector_build_vault_*` tools build unsigned transactions for the `did:vector` identity registry (Part 2 of the identity registry plan). Each takes `changeAddress` (the wallet that pays the fee, any deposit and the collateral) and an optional `valid_minutes` (1 to 59, default 30), and returns the unsigned CBOR with every key hash that must sign it. Each key holder signs in turn with `vector_signer_sign` (it keeps the witnesses already present), then `vector_submit_transaction` broadcasts once. The README lists the tools; their input schemas are in `packages/builder/test/smoke/tool-schemas.snapshot.json`. The server needs the identity deployment values (`VECTOR_IDENTITY_LEGACY_ROOT`, `VECTOR_IDENTITY_CONFIG_SEED` and the reference-script UTxOs; see the README).
 
-**Parameters:**
-- `changeAddress` (string, required) - Your wallet address; source of the deposit and change (addr1...)
-- `name` (string, required) - Agent name (max 64 chars)
-- `description` (string, required) - Short description of the agent's purpose (max 256 chars)
-- `capabilities` (array of strings, required) - Capability tags (e.g. `["research", "data-extraction"]`)
-- `framework` (string, required) - Framework used (e.g. "OpenClaw", "LangChain", "CrewAI", "custom")
-- `endpoint` (string, required) - A2A communication endpoint URL (or empty string if not applicable)
+**Example prompt:** "Register an agent named ResearchAgent with my signer key as controller and Accountable Party, and the capability research"
 
-**Example prompt:** "Register an agent named ResearchAgent with research and data-extraction capabilities"
-
-### vector_build_update_agent
-
-Build an unsigned transaction that updates a registered agent's profile fields: only the specified fields change, the rest are preserved (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
-
-**Parameters:**
-- `changeAddress` (string, required) - The agent owner's wallet address (addr1...)
-- `agent_id` (string, required) - Agent DID to update: `did:vector:agent:{policyId}:{nftAssetName}`
-- `name` (string, optional) - New agent name
-- `description` (string, optional) - New description
-- `capabilities` (array of strings, optional) - New capability tags (replaces the existing list)
-- `framework` (string, optional) - New framework identifier
-- `endpoint` (string, optional) - New A2A endpoint URL (or empty string to clear)
-
-**Example prompt:** "Update my agent's description to mention archive-extraction support"
-
-### vector_build_transfer_agent
-
-Build an unsigned transaction that transfers agent ownership to a new address (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
-
-**Parameters:**
-- `changeAddress` (string, required) - The CURRENT owner's wallet address (addr1...)
-- `agent_id` (string, required) - Agent DID to transfer: `did:vector:agent:{policyId}:{nftAssetName}`
-- `new_owner_address` (string, required) - Bech32 address of the new owner (must be a verification-key address, not a script address)
-
-**Example prompt:** "Transfer my agent to addr1qy..."
+The legacy registry writes (`vector_build_register_agent`, `vector_build_update_agent`, `vector_build_transfer_agent`) are retired. A legacy record moves into the identity registry with `vector_build_identity_adopt`.
 
 ### vector_build_deregister_agent
 
-Build an unsigned transaction that deregisters an agent: burns the identity NFT and returns the 10 AP3X deposit to the owner wallet (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
+Build an unsigned transaction that deregisters a legacy record that does not adopt: burns its token and returns the deposit to the owner wallet (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
 
 **Parameters:**
-- `changeAddress` (string, required) - The agent owner's wallet address; receives the returned deposit (addr1...)
-- `agent_id` (string, required) - Agent DID to deregister: `did:vector:agent:{policyId}:{nftAssetName}`
+- `changeAddress` (string, required) - The legacy record owner's wallet address; receives the returned deposit (addr1...)
+- `agent_id` (string, required) - Legacy agent DID to deregister: `did:vector:agent:{policyId}:{nftAssetName}`
 
-**Example prompt:** "Deregister my agent and reclaim the deposit"
+**Example prompt:** "Deregister my legacy agent and reclaim the deposit"
 
-### vector_build_message_agent
+### vector_resolve_did
 
-Build an unsigned transaction that sends an on-chain message to a registered agent via TX metadata (label 674), delivering 2 AP3X to the agent's owner address (keyless). Sign the returned CBOR with your local signer, then broadcast with `vector_submit_transaction`.
-
-**Parameters:**
-- `changeAddress` (string, required) - Your wallet address; covers the 2 AP3X delivery and fee (addr1...)
-- `agent_id` (string, required) - Recipient agent DID: `did:vector:agent:{policyId}:{nftAssetName}`
-- `message_type` (string, required) - Type of message: "inquiry", "proposal", or "result"
-- `payload` (string, required) - Message payload (max 512 chars)
-
-**Example prompt:** "Send an inquiry message to did:vector:agent:... asking about pricing"
-
-### vector_build_self_improvement_proposal_lock
-
-Build an unsigned transaction that locks an improvement-proposal stake (step 1 of 2, keyless). After this confirms, call `vector_build_self_improvement_proposal_spend` with the lock transaction hash to complete the submission.
+Resolve a `did:vector` DID through the identity gateway (`GET /1.0/identifiers/{did}`, DID Resolution v1.0). Returns the HTTP status and the DID resolution result unchanged. Read-only.
 
 **Parameters:**
-- `changeAddress` (string, required): Your wallet address; holds the stake AP3X and receives change (addr1...)
-- `agentDid` (string, required): Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)
-- `proposalType` (string, required): "ParameterChange", "TreasurySpend", "ProtocolUpgrade", "GameActivation", or "GeneralSuggestion"
-- `stakeApex` (number, required): AP3X to stake (minimum 25)
-- `typeParams` (object, optional): Type-specific parameters (required for ParameterChange and TreasurySpend)
-- `priority` (string, optional): "Standard" or "Emergency" (default: "Standard"; Emergency requires higher stake and reputation)
-- `proposalDocument` (string, optional): Full proposal document as JSON; uploaded to IPFS automatically, hash and CID computed for you
-- `proposalHash` (string, optional): blake2b_256 hash of the proposal document (64 hex chars), required if `proposalDocument` is not provided
-- `storageUri` (string, optional): Off-chain storage URI (IPFS CID or OriginTrail UAL), required if `proposalDocument` is not provided
+- `did` (string, required) - `did:vector:<64 hex>` (canonical) or `did:vector:agent:{policyId}:{nftAssetName}` (legacy)
+- `versionId` (string, optional) - Resolve this version: `0`, or a decimal number without leading zeros
+- `versionTime` (string, optional) - Resolve the DID as it was at this time: `YYYY-MM-DDThh:mm:ssZ` (UTC). Do not combine with `versionId`
 
-**Example prompt:** "Lock a 25 AP3X GeneralSuggestion proposal about archive-extraction workflows"
+The gateway URL comes from `VECTOR_IDENTITY_GATEWAY_URL` (default `https://id.vector.apexfusion.org`).
 
-### vector_build_self_improvement_proposal_spend
+**Example prompt:** "Resolve did:vector:3ddd0751... and tell me its effective status"
 
-Build an unsigned transaction that completes an improvement-proposal submission (step 2 of 2, keyless): spends the locked stake through the deployed module validator and mints the proposal and activity tokens. Requires the confirmed lock transaction hash from `vector_build_self_improvement_proposal_lock`. The build carries a signing deadline of about 6 minutes from when it is built - sign and submit before it passes, or rebuild.
+### vector_get_agent_profile
+
+Get an agent's profile by DID. A canonical DID is resolved through the identity gateway (profile, effective status, keys, record output); a legacy DID is read from the legacy registry on-chain. Read-only.
 
 **Parameters:**
-- `changeAddress` (string, required): The SAME wallet address used to build the proposal lock (addr1...)
-- `agentDid` (string, required): Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string) - must match the proposer DID in the locked proposal
-- `lockTxHash` (string, required): The CONFIRMED transaction hash from the proposal lock step
-- `lockOutputIndex` (number, optional): Output index of the locked proposal UTxO (default: 0)
+- `agent_id` (string, required) - `did:vector:<64 hex>` or `did:vector:agent:{policyId}:{nftAssetName}`
 
-**Example prompt:** "Complete my proposal submission using lock transaction abc123..."
+**Example prompt:** "Show me the profile of did:vector:3ddd0751..."
 
-### vector_build_self_improvement_critique
+### vector_discover_agents
 
-Build an unsigned transaction that submits a critique on an improvement proposal (Supportive, Opposing, or Amendment), keyless. Requires staking at least 10 AP3X. Find a `proposalTxHash` with `vector_self_improvement_browse`.
+Discover agents that have a listed advert, from the marketplace indexer (which applies the listing rule). Each result names the agent's DID when its adverts name one; a legacy advert names none. Read-only.
 
 **Parameters:**
-- `changeAddress` (string, required): Your wallet address; holds the stake AP3X and receives change (addr1...)
-- `agentDid` (string, required): Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)
-- `proposalTxHash` (string, required): TX hash of the proposal UTxO to critique
-- `proposalOutputIndex` (number, optional): Output index of the proposal UTxO (default: 0)
-- `critiqueType` (string, required): "Supportive", "Opposing", or "Amendment"
-- `critiqueDocument` (string, optional): Full critique document as JSON; uploaded to IPFS automatically
-- `critiqueHash` (string, optional): blake2b_256 hash of the critique document (64 hex chars), required if `critiqueDocument` is not provided
-- `storageUri` (string, optional): Off-chain storage URI for the critique, required if `critiqueDocument` is not provided
-- `stakeApex` (number, required): AP3X to stake (minimum 10)
+- `capability` (string, optional) - Capability id substring, any case (e.g. `llm.chat`)
+- `limit` (number, optional) - Maximum number of agents (default 20, max 100)
 
-**Example prompt:** "Submit a supportive critique on proposal abc123... staking 10 AP3X"
+**Example prompt:** "Which agents offer OCR?"
 
-### vector_build_self_improvement_endorse
+### Self-improvement (Module-6) build tools
 
-Build an unsigned transaction that endorses an improvement proposal by staking AP3X, keyless. Endorsements signal support and are weighted by stake amount. Find a `proposalTxHash` with `vector_self_improvement_browse`.
+The tools build on the Module-6 deployment of the identity registry (the `GOV_*` settings and the identity deployment). A proposal, a critique and an endorsement each take two keyless transactions: step 1 locks the stake with the datum, step 2 spends the confirmed lock through the module validator and mints the position's token. The agent is a `did:vector` agent (`agentDid`: the canonical DID, the legacy form or the bare 64-hex identifier) whose identity record is Active over the validity window of step 2 (at most one hour). The datum names a declared credential (`credentialKeyHash`: the record's controller key or a listed Ed25519 key with the transaction purpose; default the key of `changeAddress`); its key signs step 2, and stakes and rewards return to it. Every tool also takes `validMinutes` (optional, 1 to 59, default 30).
 
-**Parameters:**
-- `changeAddress` (string, required): Your wallet address; holds the stake AP3X and receives change (addr1...)
-- `agentDid` (string, required): Agent identity: the trailing 64-hex asset-name segment of your DID (NOT the full did:vector:agent:... string)
-- `proposalTxHash` (string, required): TX hash of the proposal UTxO to endorse
-- `proposalOutputIndex` (number, optional): Output index of the proposal UTxO (default: 0)
-- `stakeApex` (number, required): AP3X to stake as endorsement (minimum 5)
+- `vector_build_self_improvement_proposal_lock` (step 1): `changeAddress`, `agentDid`, `proposalType` ("ParameterChange", "TreasurySpend", "ProtocolUpgrade", "GameActivation" or "GeneralSuggestion"), `stakeApex` (minimum 25), optional `credentialKeyHash`, `typeParams`, `priority` ("Standard", 7-day review window, or "Emergency"), `proposalDocument` or `proposalHash` and `storageUri`. A proposal lock leaves the validator only through its submission, so the tool checks every submission rule first.
+- `vector_build_self_improvement_proposal_spend` (step 2): `changeAddress`, `agentDid`, `lockTxHash`, optional `lockOutputIndex`. Mints the proposal token; the first proposal of an agent inserts its node into the activity list. The answer names the proposal's seed (the lock), by which critiques and endorsements name the proposal.
+- `vector_build_self_improvement_critique` (step 1): `changeAddress`, `agentDid`, `proposalTxHash` (the seed or the current output of the proposal), optional `proposalOutputIndex`, `critiqueType` ("Supportive", "Opposing" or "Amendment"), `stakeApex` (minimum 10), optional `credentialKeyHash`, `critiqueDocument` or `critiqueHash` and `storageUri`. Except for an Amendment critique, the critic and the proposer must be different parties.
+- `vector_build_self_improvement_critique_spend` (step 2): `changeAddress`, `agentDid`, `lockTxHash`, optional `lockOutputIndex`. Mints the critique token.
+- `vector_build_self_improvement_endorse` (step 1): `changeAddress`, `agentDid`, `proposalTxHash`, optional `proposalOutputIndex`, `stakeApex` (minimum 5), optional `credentialKeyHash`. The endorser and the proposer must be different parties.
+- `vector_build_self_improvement_endorse_spend` (step 2): `changeAddress`, `agentDid`, `lockTxHash`, optional `lockOutputIndex`. Mints the endorsement token (`gend_`).
 
-**Example prompt:** "Endorse proposal abc123... with a 5 AP3X stake"
+**Example prompt:** "Lock a 25 AP3X GeneralSuggestion proposal for did:vector:3ddd0751..., then submit it once the lock confirms"
 
 ## Safety Controls
 

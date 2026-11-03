@@ -37,6 +37,14 @@ interface OgmiosProviderConfig {
 }
 
 /**
+ * A reward account as the ledger holds it: registered, with the whole reward balance that a withdrawal must take, or not registered.
+ * `source` names the service that answered.
+ */
+export type RewardAccount =
+  | { registered: true; rewards: bigint; source: 'ogmios' | 'koios' }
+  | { registered: false; source: 'koios' };
+
+/**
  * Interpret a submit-api response body as a transaction hash.
  *
  * Exported and pure so it can be tested without a network round trip. Now
@@ -225,6 +233,11 @@ function describeError(err: unknown): string {
     return causeText ? `${err.message} (cause: ${causeText})` : err.message;
   }
   return String(err);
+}
+
+/** A field of a JSON value that a service answered, or undefined when the value is not an object. */
+function fieldOf(value: unknown, key: string): unknown {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[key] : undefined;
 }
 
 export class OgmiosProvider implements Provider {
@@ -473,6 +486,72 @@ export class OgmiosProvider implements Provider {
       }
     }
     return { poolId: null, rewards: 0n };
+  }
+
+  /**
+   * The reward account of a stake credential, read with no default. getDelegation (the Lucid Provider method) falls back to 0 when it
+   * cannot read the account, but a withdrawal must take the WHOLE balance, and anybody can raise that balance by paying into the
+   * account. Ogmios's reward account summary decides when it has an entry (the ledger state at the tip). Vector's Ogmios gives no
+   * entry for a credential that is registered but not delegated (a script credential such as Module-1's is never delegated), so
+   * without one, Koios account_info decides: status "registered" gives rewards_available; another status, or no row, is not
+   * registered. Koios follows the tip a little behind, so at an epoch boundary its balance can lag the ledger's, and the ledger then
+   * refuses the withdrawal. Every failure to read throws, sanitised as rpc()'s throws are.
+   */
+  async getRewardAccount(credential: Credential, rewardAddress: string): Promise<RewardAccount> {
+    const method = 'queryLedgerState/rewardAccountSummaries';
+    const summaries: unknown = await this.rpc(method, credential.type === 'Script' ? { scripts: [credential.hash] } : { keys: [credential.hash] });
+    if (!Array.isArray(summaries)) {
+      console.error(`[OgmiosProvider] Ogmios ${method} at ${this.ogmiosUrl}: the result is not a list`, summaries);
+      throw new Error(formatServiceError('Ogmios', method, 'invalid response'));
+    }
+    const hash = credential.hash.toLowerCase();
+    const summary: unknown = summaries.find((s: unknown) => { const c = fieldOf(s, 'credential'); return typeof c === 'string' && c.toLowerCase() === hash; });
+    if (summary !== undefined) {
+      const lovelace = fieldOf(fieldOf(fieldOf(summary, 'rewards'), 'ada'), 'lovelace');
+      if (typeof lovelace !== 'number' || !Number.isSafeInteger(lovelace) || lovelace < 0) {
+        console.error(`[OgmiosProvider] Ogmios ${method} at ${this.ogmiosUrl}: no usable reward balance`, summary);
+        throw new Error(formatServiceError('Ogmios', method, 'invalid response'));
+      }
+      return { registered: true, rewards: BigInt(lovelace), source: 'ogmios' };
+    }
+    if (!this.koiosUrl) {
+      throw new Error('Koios URL is not configured. A reward account that Ogmios does not summarise is read from the Koios indexer. Set VECTOR_KOIOS_URL in your environment.');
+    }
+    let response: Response;
+    try {
+      response = await fetch(`${this.koiosUrl}/api/v1/account_info`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ _stake_addresses: [rewardAddress] }),
+      });
+    } catch (err) {
+      console.error(`[OgmiosProvider] Koios network error (account_info) at ${this.koiosUrl}: ${describeError(err)}`);
+      throw new Error(formatServiceError('Koios', 'account_info', 'network error'));
+    }
+    if (!response.ok) {
+      const text = await response.text();
+      console.error(`[OgmiosProvider] Koios account_info query failed at ${this.koiosUrl}: ${response.status} ${response.statusText} - ${text}`);
+      throw new Error(formatServiceError('Koios', 'account_info', response.status, response.statusText));
+    }
+    let rows: unknown;
+    try {
+      rows = await response.json();
+    } catch (err) {
+      console.error(`[OgmiosProvider] Koios response parse error (account_info) at ${this.koiosUrl}: ${describeError(err)}`);
+      throw new Error(formatServiceError('Koios', 'account_info', 'invalid response'));
+    }
+    if (!Array.isArray(rows)) {
+      console.error(`[OgmiosProvider] Koios account_info at ${this.koiosUrl}: the answer is not a list`, rows);
+      throw new Error(formatServiceError('Koios', 'account_info', 'invalid response'));
+    }
+    const row: unknown = rows.find((r: unknown) => fieldOf(r, 'stake_address') === rewardAddress);
+    if (row === undefined || fieldOf(row, 'status') !== 'registered') return { registered: false, source: 'koios' };
+    const available = fieldOf(row, 'rewards_available');
+    if (typeof available !== 'string' || !/^\d+$/.test(available)) {
+      console.error(`[OgmiosProvider] Koios account_info at ${this.koiosUrl}: no usable rewards_available`, row);
+      throw new Error(formatServiceError('Koios', 'account_info', 'invalid response'));
+    }
+    return { registered: true, rewards: BigInt(available), source: 'koios' };
   }
 
   async getDatum(datumHash: string): Promise<string> {

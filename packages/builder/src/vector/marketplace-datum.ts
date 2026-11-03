@@ -5,8 +5,15 @@
 // to the marketplace's cbor-x encoder (pinned against the live datum by
 // test/marketplace-datum.test.ts), because escrowLockFloor sizes the Submitted datum from
 // these bytes and Lucid's Data.to frames lists and integers more compactly, which under-sizes the lock.
+//
+// Two layouts during the drain (Part 2 Section 6.5): the legacy escrow (14 fields) and advert (13 fields), and the identity-marketplace
+// escrow (16 fields: the 14, then agent_id and refund, Section 6.1) and advert (14 fields: the 13, then agent_id, Section 6.2). The
+// identity layouts are written with Lucid's Data.to, which writes the bytes that Aiken's cbor.serialise writes; their lock floor is
+// sized from the widest encoding of the datum (identityEscrowLockFloor), whoever writes the continuing datums.
 import { Data, Constr, fromText, toText } from '@lucid-evolution/lucid';
 import { createHash } from 'node:crypto';
+import { constrFields, bytesOf, optionOf, plutusAddressOf, plutusAddressToData } from './identity-codec.js';
+import type { PlutusAddress } from './identity-codec.js';
 
 export type AdvertStatus = 'Active' | 'Retired';
 export type EscrowState = 'Open' | 'Claimed' | 'Submitted' | 'Accepted' | 'Reclaimed' | 'Released';
@@ -70,10 +77,8 @@ function optionBytes(x: unknown, where: string): string | null {
   throw new Error(`${where}: malformed option`);
 }
 
-export function decodeAdvertDatum(hex: string): AdvertDatum {
-  const c = asConstr(Data.from(hex), 'advert');
-  if (c.index !== 0 || c.fields.length !== 13) throw new Error(`advert: expected Constr 0 with 13 fields, got ${c.index}/${c.fields.length}`);
-  const f = c.fields;
+/** The 13 fields of the legacy advert, which the identity advert keeps as its first 13. */
+function advertFieldsOf(f: Data[]): AdvertDatum {
   const status = asConstr(f[12], 'advert.status').index;
   if (status !== 0 && status !== 1) throw new Error(`advert.status: unknown tag ${status}`);
   return {
@@ -93,6 +98,40 @@ export function decodeAdvertDatum(hex: string): AdvertDatum {
   };
 }
 
+export function decodeAdvertDatum(hex: string): AdvertDatum {
+  const c = asConstr(Data.from(hex), 'advert');
+  if (c.index !== 0 || c.fields.length !== 13) throw new Error(`advert: expected Constr 0 with 13 fields, got ${c.index}/${c.fields.length}`);
+  return advertFieldsOf(c.fields);
+}
+
+/** The advert of the identity-marketplace contract (Part 2 Section 6.2): the 13 legacy fields, then `agent_id` (32 bytes) as field 13. */
+export interface IdentityAdvertDatum extends AdvertDatum { agent_id: string }
+export type AnyAdvertDatum = { layout: 'legacy'; datum: AdvertDatum } | { layout: 'identity'; datum: IdentityAdvertDatum };
+
+export function decodeIdentityAdvertDatum(hex: string): IdentityAdvertDatum {
+  const c = asConstr(Data.from(hex), 'advert');
+  if (c.index !== 0 || c.fields.length !== 14) throw new Error(`advert: expected Constr 0 with 14 fields, got ${c.index}/${c.fields.length}`);
+  return { ...advertFieldsOf(c.fields), agent_id: bytesOf(c.fields[13], 'advert.agent_id', 32) };
+}
+
+/** Either advert layout, by its field count: 13 legacy, 14 identity. */
+export function decodeAnyAdvertDatum(hex: string): AnyAdvertDatum {
+  const c = asConstr(Data.from(hex), 'advert');
+  if (c.index === 0 && c.fields.length === 13) return { layout: 'legacy', datum: advertFieldsOf(c.fields) };
+  if (c.index === 0 && c.fields.length === 14) return { layout: 'identity', datum: decodeIdentityAdvertDatum(hex) };
+  throw new Error(`advert: expected Constr 0 with 13 (legacy) or 14 (identity) fields, got ${c.index}/${c.fields.length}`);
+}
+
+/** The identity advert as Plutus Data CBOR (Aiken's encoding). The text fields are written as UTF-8. */
+export function encodeIdentityAdvertDatum(d: IdentityAdvertDatum): string {
+  if (!/^[0-9a-f]{64}$/.test(d.agent_id)) throw new Error('advert.agent_id: expected 32 bytes of lowercase hex');
+  return Data.to(new Constr(0, [
+    d.supplier_pkh, fromText(d.capability_id), fromText(d.model), BigInt(d.max_output_tokens), BigInt(d.max_processing_ms),
+    d.price_lovelace, d.supplier_bond_lovelace, d.buyer_bond_lovelace, fromText(d.endpoint_url), fromText(d.detail_uri), d.detail_hash,
+    BigInt(d.advertised_at), new Constr(d.status === 'Active' ? 0 : 1, []), d.agent_id,
+  ]));
+}
+
 // Positions of the four bytestring fields decodeAdvertDatum turns into text: capability_id, model, endpoint_url, detail_uri.
 const ADVERT_TEXT_FIELDS = [1, 2, 8, 9];
 
@@ -104,7 +143,7 @@ const ADVERT_TEXT_FIELDS = [1, 2, 8, 9];
 export function advertTextFieldsRoundTrip(datumHex: string): boolean {
   let parsed: Data;
   try { parsed = Data.from(datumHex); } catch { return false; }
-  if (!(parsed instanceof Constr) || parsed.fields.length !== 13) return false;
+  if (!(parsed instanceof Constr) || (parsed.fields.length !== 13 && parsed.fields.length !== 14)) return false;
   const fields = parsed.fields;
   return ADVERT_TEXT_FIELDS.every((i) => {
     const hex = fields[i];
@@ -112,10 +151,8 @@ export function advertTextFieldsRoundTrip(datumHex: string): boolean {
   });
 }
 
-export function decodeEscrowDatum(hex: string): EscrowDatum {
-  const c = asConstr(Data.from(hex), 'escrow');
-  if (c.index !== 0 || c.fields.length !== 14) throw new Error(`escrow: expected Constr 0 with 14 fields, got ${c.index}/${c.fields.length}`);
-  const f = c.fields;
+/** The 14 fields of the legacy escrow, which the identity escrow keeps as its first 14. */
+function escrowFieldsOf(f: Data[]): EscrowDatum {
   const ref = asConstr(f[2], 'escrow.advert_ref');
   if (ref.index !== 0 || ref.fields.length !== 2) throw new Error('escrow.advert_ref: malformed');
   const stateIdx = asConstr(f[13], 'escrow.state').index;
@@ -138,6 +175,58 @@ export function decodeEscrowDatum(hex: string): EscrowDatum {
     state,
   };
 }
+
+export function decodeEscrowDatum(hex: string): EscrowDatum {
+  const c = asConstr(Data.from(hex), 'escrow');
+  if (c.index !== 0 || c.fields.length !== 14) throw new Error(`escrow: expected Constr 0 with 14 fields, got ${c.index}/${c.fields.length}`);
+  return escrowFieldsOf(c.fields);
+}
+
+/**
+ * Where the buyer payouts of an identity escrow go (Part 2 Section 6.1): outputs at exactly `address`, without a datum when `datum`
+ * is null, else with that inline datum (Plutus Data CBOR hex).
+ */
+export interface Refund { address: PlutusAddress; datum: string | null }
+/** The escrow of the identity-marketplace contract (Part 2 Section 6.1): the 14 legacy fields, then `agent_id` and `refund`. */
+export interface IdentityEscrowDatum extends EscrowDatum { agent_id: string; refund: Refund | null }
+export type AnyEscrowDatum = { layout: 'legacy'; datum: EscrowDatum } | { layout: 'identity'; datum: IdentityEscrowDatum };
+
+export function decodeIdentityEscrowDatum(hex: string): IdentityEscrowDatum {
+  const c = asConstr(Data.from(hex), 'escrow');
+  if (c.index !== 0 || c.fields.length !== 16) throw new Error(`escrow: expected Constr 0 with 16 fields, got ${c.index}/${c.fields.length}`);
+  const refund = optionOf(c.fields[15], 'escrow.refund', (d, p): Refund => {
+    const [address, datum] = constrFields(d, p, 0, 2);
+    return { address: plutusAddressOf(address, `${p}.address`), datum: optionOf(datum, `${p}.datum`, (inner) => Data.to(inner)) };
+  });
+  return { ...escrowFieldsOf(c.fields), agent_id: bytesOf(c.fields[14], 'escrow.agent_id', 32), refund };
+}
+
+/** Either escrow layout, by its field count: 14 legacy, 16 identity. */
+export function decodeAnyEscrowDatum(hex: string): AnyEscrowDatum {
+  const c = asConstr(Data.from(hex), 'escrow');
+  if (c.index === 0 && c.fields.length === 14) return { layout: 'legacy', datum: escrowFieldsOf(c.fields) };
+  if (c.index === 0 && c.fields.length === 16) return { layout: 'identity', datum: decodeIdentityEscrowDatum(hex) };
+  throw new Error(`escrow: expected Constr 0 with 14 (legacy) or 16 (identity) fields, got ${c.index}/${c.fields.length}`);
+}
+
+/** The identity escrow datum as Lucid Data (Aiken's field order). */
+export function identityEscrowDatumToData(d: IdentityEscrowDatum): Data {
+  const stateAlt = STATES.indexOf(d.state);
+  if (stateAlt < 0) throw new Error(`escrow.state: unknown state "${String(d.state)}"`);
+  if (!/^[0-9a-f]{64}$/.test(d.agent_id)) throw new Error('escrow.agent_id: expected 32 bytes of lowercase hex');
+  const option = (value: Data | null): Data => (value === null ? new Constr(1, []) : new Constr(0, [value]));
+  return new Constr(0, [
+    d.buyer_pkh, d.supplier_pkh, new Constr(0, [d.advert_ref.txHash, BigInt(d.advert_ref.index)]), fromText(d.capability_id),
+    d.request_spec_hash, d.prompt_hash, d.payment_lovelace, d.buyer_bond_lovelace, d.supplier_bond_lovelace,
+    BigInt(d.deliver_by), BigInt(d.posted_at),
+    option(d.submitted_at === null ? null : BigInt(d.submitted_at)), option(d.result_receipt_hash),
+    new Constr(stateAlt, []), d.agent_id,
+    option(d.refund === null ? null : new Constr(0, [plutusAddressToData(d.refund.address), option(d.refund.datum === null ? null : Data.from(d.refund.datum))])),
+  ]);
+}
+
+/** The identity escrow datum as Plutus Data CBOR (Aiken's encoding). */
+export function encodeIdentityEscrowDatum(d: IdentityEscrowDatum): string { return Data.to(identityEscrowDatumToData(d)); }
 
 // Hand-rolled writer for the escrow datum, byte-identical to the marketplace's cbor-x encoder:
 // definite-length arrays, every integer as 1b + 8 bytes big-endian whatever its magnitude,
@@ -232,6 +321,32 @@ function estimateOutputBytes(datumBytes: number, lovelace: bigint): bigint {
 export function escrowLockFloor(openDatum: EscrowDatum, economicTotal: bigint): bigint {
   const submitted: EscrowDatum = { ...openDatum, submitted_at: openDatum.deliver_by, result_receipt_hash: 'ff'.repeat(32), state: 'Submitted' };
   const datumBytes = encodeEscrowDatum(submitted).length / 2;
+  const floor = (OUTPUT_OVERHEAD_BYTES + estimateOutputBytes(datumBytes, economicTotal)) * UTXO_COST_PER_BYTE + SAFETY_MARGIN_LOVELACE;
+  return floor > economicTotal ? floor : economicTotal;
+}
+
+/**
+ * The most bytes that any encoder can write for `x`: every integer in 9 bytes (cbor-x writes them so), every non-empty constructor,
+ * list or map with an indefinite-length frame (Aiken writes them so) and each byte string with a definite header. The identity escrow's
+ * continuing datums are written by the supplier's code, not by this tool, so the lock is sized for the widest of them.
+ */
+export function plutusDataMaxBytes(x: Data): number {
+  if (typeof x === 'bigint') return 9;
+  if (typeof x === 'string') { const n = x.length / 2; return (n < 24 ? 1 : n < 256 ? 2 : 3) + n + (n > 64 ? Math.ceil(n / 64) * 2 + 2 : 0); }
+  const frame = (items: number): number => (items === 0 ? 1 : 2);
+  if (x instanceof Constr) return (x.index < 7 ? 2 : 3) + frame(x.fields.length) + x.fields.reduce((n: number, f) => n + plutusDataMaxBytes(f), 0);
+  if (Array.isArray(x)) return frame(x.length) + x.reduce((n: number, f) => n + plutusDataMaxBytes(f), 0);
+  if (x instanceof Map) { let n = frame(x.size); for (const [k, v] of x) n += plutusDataMaxBytes(k) + plutusDataMaxBytes(v); return n; }
+  throw new Error('plutusDataMaxBytes: not Plutus Data');
+}
+
+/**
+ * The lovelace an identity escrow Post must lock: price + both bonds, raised to the min-UTxO floor of the Submitted datum (the
+ * largest the output will carry) in its widest encoding (plutusDataMaxBytes), plus the same safety margin as the legacy floor.
+ */
+export function identityEscrowLockFloor(openDatum: IdentityEscrowDatum, economicTotal: bigint): bigint {
+  const submitted: IdentityEscrowDatum = { ...openDatum, submitted_at: openDatum.deliver_by, result_receipt_hash: 'ff'.repeat(32), state: 'Submitted' };
+  const datumBytes = plutusDataMaxBytes(identityEscrowDatumToData(submitted));
   const floor = (OUTPUT_OVERHEAD_BYTES + estimateOutputBytes(datumBytes, economicTotal)) * UTXO_COST_PER_BYTE + SAFETY_MARGIN_LOVELACE;
   return floor > economicTotal ? floor : economicTotal;
 }

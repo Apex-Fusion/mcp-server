@@ -1,8 +1,10 @@
 // packages/builder/test/advert-stake-tools.test.ts
-// Handler-level tests for the four supplier-side tools: the advert Post and Retire (registered with the marketplace family) and the two
-// reputation stake steps. A minimal fake server captures the handlers, Koios is a stubbed global fetch, and the node is a fixture handed
-// in as the provider argument, as in marketplace-tools.test.ts; the stake and Retire nodes evaluate the deployed validators
-// (uplc-node.fixture.ts). No network is touched. (Schemas and descriptions are covered by the smoke suite.)
+// Handler-level tests for the supplier-side tools of PR #25: the legacy advert Post, the Retire of a legacy advert (both registered with
+// the marketplace family; vector_build_marketplace_advert_retire takes both layouts) and the two reputation stake steps, which refuse
+// while the deployment takes no new stakes and whose build path runs with the setting on. A minimal fake server captures the handlers,
+// Koios is a stubbed global fetch, and the node is a fixture handed in as the provider argument, as in marketplace-tools.test.ts; the
+// stake and Retire nodes evaluate the deployed validators (uplc-node.fixture.ts). No network is touched. (Schemas and descriptions are
+// covered by the smoke suite.)
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Provider, UTxO } from '@lucid-evolution/lucid';
@@ -12,7 +14,7 @@ import { registerReputationTools } from '../src/vector/reputation-tools.ts';
 import { RateLimiter } from '../src/vector/rate-limiter.ts';
 import { ADVERT_ADDRESS } from '../src/vector/marketplace-constants.ts';
 import { decodeAdvertDatum } from '../src/vector/marketplace-datum.ts';
-import { stakeTokenUnit, VECTOR_MAINNET_ZERO_TIME_MS } from '../src/vector/reputation-build.ts';
+import { stakeTokenUnit, NO_NEW_STAKES, VECTOR_MAINNET_ZERO_TIME_MS } from '../src/vector/reputation-build.ts';
 import { SIGN_COPY } from '../src/vector/marketplace-shared.ts';
 import { FixtureProvider } from './fixtures/fixture-provider.ts';
 import { uplcEvaluatingProvider } from './fixtures/uplc-node.fixture.ts';
@@ -28,6 +30,9 @@ const nodeOfTheTest = (): Provider => { if (!node) throw new Error('this test se
 const handlers = new Map<string, Handler>();
 registerMarketplaceTools(serverOf(handlers), 'advert-stake-tools-test', nodeOfTheTest, new RateLimiter(100_000));
 registerReputationTools(serverOf(handlers), 'advert-stake-tools-test', nodeOfTheTest, new RateLimiter(100_000));
+/** The stake tools with the build path on, as for a deployment that takes new stakes. */
+const building = new Map<string, Handler>();
+registerReputationTools(serverOf(building), 'advert-stake-tools-test', nodeOfTheTest, new RateLimiter(100_000), true);
 const callOn = (registered: Map<string, Handler>) => async (name: string, args: Record<string, unknown> = {}): Promise<string> => {
   const h = registered.get(name);
   assert.ok(h, `${name} is registered`);
@@ -77,15 +82,16 @@ describe('vector_build_marketplace_post_advert', () => {
     stubKoios([]);
     node = new FixtureProvider(supplierWallet);
     const t = await call('vector_build_marketplace_post_advert', postArgs());
-    assert.ok(t.startsWith('# Unsigned Advert Post Built (Not Submitted)\n'), t.slice(0, 200));
+    assert.ok(t.startsWith('# Unsigned Advert Post Built (Not Submitted)\n\n**Layout:** legacy, until the switch date (for the identity layout use vector_build_marketplace_advert_post)\n'), t.slice(0, 300));
     const j = jsonOf(t);
     assert.match(t, new RegExp(`\\*\\*Advert ref \\(after submit\\):\\*\\* \`${j.tx_hash}#0\``));
     assert.match(t, new RegExp(`\\*\\*Supplier key:\\*\\* \`${ADVOCATE.supplier_pkh}\` \\(the key of changeAddress; only it can retire the advert\\)`));
     assert.match(t, /\*\*Per job:\*\* a buyer locks price 3\.000000 \+ supplier bond 1\.000000 \+ buyer bond 1\.000000; on Accept the supplier receives price \+ supplier bond and the buyer bond returns to the buyer/);
-    assert.match(t, /\*\*Deposit locked:\*\* 2\.000000 \(returns to you when you retire the advert with vector_build_marketplace_retire_advert\)/);
+    assert.match(t, /\*\*Deposit locked:\*\* 2\.000000 \(returns to you when you retire the advert with vector_build_marketplace_advert_retire\)/);
     assert.match(t, /\(as given\)/);
     assert.match(t, /\*\*Supplier runtime:\*\* once this confirms, set your supplier runtime's ADVERT_REF to this advert_ref and restart it: the supplier template serves only the advert ADVERT_REF names \(after a Retire and a new Post, ADVERT_REF must change to the new ref\)\./);
     assert.ok(t.includes(SIGN_COPY));
+    assert.equal(j.layout, 'legacy');
     assert.equal(j.advert_ref, `${j.tx_hash}#0`);
     assert.equal(j.supplier_pkh, ADVOCATE.supplier_pkh);
     assert.equal(j.deposit_lovelace, '2000000');
@@ -126,26 +132,27 @@ const advertRow = () => ({ tx_hash: ADVERT_RETIRE.advert.txHash, tx_index: 0, ad
 const advertScript: UTxO = { ...ADVERT_REF_UTXO_BARE, scriptRef: { type: 'PlutusV3', script: ADVERT_SCRIPT_CBOR } };
 const nowSlot = () => Math.floor((Date.now() - ZERO) / 1000);
 
-describe('vector_build_marketplace_retire_advert', () => {
-  test('shows the advert and the deposit that returns; the deployed validator accepts the transaction', async () => {
+describe('vector_build_marketplace_advert_retire, a legacy-layout advert', () => {
+  test('shows the advert and the deposit that returns, with or without the identity deployment; the deployed validator accepts the transaction', async () => {
     stubKoios([advertRow()]);
     const n = uplcEvaluatingProvider([ADVERT_RETIRE.wallet, ADVERT_RETIRE.advert, advertScript], nowSlot());
     node = n;
-    const t = await call('vector_build_marketplace_retire_advert', { changeAddress: ADVERT_RETIRE.wallet.address, advert_ref: RETIRE_REF });
-    assert.ok(t.startsWith('# Unsigned Advert Retire Built (Not Submitted)\n'), t.slice(0, 300));
-    assert.match(t, new RegExp(`\\*\\*Advert:\\*\\* \`${RETIRE_REF}\` \\(\`audio\\.transcript\\.snippets\\.v1\`\\)`));
-    assert.match(t, /\*\*Deposit returned to you:\*\* 2\.017080/);
-    assert.match(t, /\*\*Supplier runtime:\*\* after this confirms, its ADVERT_REF names a consumed advert; to list the supplier again, post a new advert with vector_build_marketplace_post_advert and set ADVERT_REF to the new advert_ref\./);
+    const t = await call('vector_build_marketplace_advert_retire', { changeAddress: ADVERT_RETIRE.wallet.address, advert_ref: RETIRE_REF });
+    assert.ok(t.startsWith('# Advert Retirement Built (Unsigned, Not Submitted)\n\n**Layout:** legacy (the advert names no agent)\n**Agent:** none\n'), t.slice(0, 300));
+    assert.ok(t.includes(`**Retires:** \`${RETIRE_REF}\`\n`));
+    assert.match(t, /\*\*Capability:\*\* `audio\.transcript\.snippets\.v1`/);
+    assert.ok(t.includes(`**Deposit back:** 2.017080 AP3X to ${ADVERT_RETIRE.wallet.address}\n`));
+    assert.match(t, /\*\*Supplier runtime:\*\* after this confirms, the supplier runtime's ADVERT_REF names a consumed advert; to list the supplier again, post a new advert with vector_build_marketplace_advert_post and set ADVERT_REF to the new advert_ref\./);
     const j = jsonOf(t);
-    assert.equal(j.advert_ref, RETIRE_REF);
-    assert.equal(j.return_lovelace, '2017080');
+    assert.deepEqual([j.layout, j.advert_ref, j.spent_ref, j.did, j.deposit_lovelace, j.paid_to], ['legacy', null, RETIRE_REF, null, '2017080', ADVERT_RETIRE.wallet.address]);
+    assert.deepEqual(j.required_signers, [{ key_hash: decodeAdvertDatum(ADVERT_RETIRE.advert.datum!).supplier_pkh, roles: ['supplier key (the advert names it; the advert validator needs its signature)', 'wallet (inputs, fee and collateral)'] }]);
     assert.equal(n.evaluations.length, 1);
   });
   test('another key is refused with the supplier key named', async () => {
     stubKoios([advertRow()]);
     node = uplcEvaluatingProvider([{ ...ADVERT_RETIRE.wallet, address: STAKE_A.ownerAddress }, ADVERT_RETIRE.advert, advertScript], nowSlot());
-    const t = await call('vector_build_marketplace_retire_advert', { changeAddress: STAKE_A.ownerAddress, advert_ref: RETIRE_REF });
-    assert.match(t, /^Failed to build advert retire: This advert names supplier key [0-9a-f]{56}, not the key of changeAddress; only its supplier can retire it\./);
+    const t = await call('vector_build_marketplace_advert_retire', { changeAddress: STAKE_A.ownerAddress, advert_ref: RETIRE_REF });
+    assert.match(t, /^Failed to build advert retirement: This advert names supplier key [0-9a-f]{56}, not the key of changeAddress; only its supplier can retire it\./);
   });
 });
 
@@ -153,23 +160,33 @@ const refScript: UTxO = { ...REPUTATION_REF_UTXO_BARE, scriptRef: { type: 'Plutu
 const stakeNode = (extra: UTxO[] = []) => uplcEvaluatingProvider([STAKE_A.wallet, STAKE_A.registry, PARAMS_UTXO, CROSS_REFS_UTXO, refScript, ...extra], nowSlot());
 
 describe('vector_build_reputation_stake_open and vector_build_reputation_stake', () => {
-  test('step 1 shows the opening ref and what step 2 needs', async () => {
+  test('the current deployment takes no new stakes: both tools refuse with the neutral text before they read the node or the network', async () => {
+    const refusal = 'The current Module-3 deployment takes no new stakes. New stakes use the new Module-3 deployment, which is published after the identity release.';
+    assert.equal(NO_NEW_STAKES, refusal);
+    node = undefined;
+    const open = await call('vector_build_reputation_stake_open', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: STAKE_A.capabilities });
+    assert.equal(open, `Failed to build stake opening: ${refusal}`);
+    const stake = await call('vector_build_reputation_stake', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: STAKE_A.capabilities, opening_ref: `${STAKE_A.opening.txHash}#0` });
+    assert.equal(stake, `Failed to build reputation stake: ${refusal}`);
+    assert.deepEqual(requested, [], 'nothing is fetched');
+  });
+  test('with the build path on, step 1 shows the opening ref and what step 2 needs', async () => {
     const wallet: UTxO[] = [{ ...STAKE_A.wallet, txHash: 'ab'.repeat(32) }, { ...STAKE_A.wallet, txHash: 'ab'.repeat(32), outputIndex: 2, assets: { lovelace: 5_000_000n } }];
     node = uplcEvaluatingProvider([...wallet, STAKE_A.registry, PARAMS_UTXO, CROSS_REFS_UTXO, refScript], nowSlot());
-    const t = await call('vector_build_reputation_stake_open', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: STAKE_A.capabilities });
-    assert.ok(t.startsWith('# Unsigned Stake Opening Built (Not Submitted), step 1 of 2\n\n**Hold:** Do not use on mainnet until the Module-3 reputation module is fixed and redeployed.\n'), t.slice(0, 300));
+    const t = await callOn(building)('vector_build_reputation_stake_open', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: STAKE_A.capabilities });
+    assert.ok(t.startsWith('# Unsigned Stake Opening Built (Not Submitted), step 1 of 2\n\n**Opening ref (after submit):** '), t.slice(0, 300));
     const j = jsonOf(t);
     assert.equal(j.opening_ref, `${j.tx_hash}#0`);
     assert.deepEqual(j.capabilities, STAKE_A.capabilities);
     assert.match(t, /\*\*Locked:\*\* 2\.000000 \(returns as change when step 2 consumes it\)/);
     assert.ok(t.includes(`Once it confirms, call vector_build_reputation_stake with opening_ref \`${j.opening_ref}\` and the same agent_id and capabilities.\n\n${JSON_FENCE.slice(1)}`));
   });
-  test('step 2 shows the stake, its token and what locked means; the deployed validator accepts the transaction', async () => {
+  test('with the build path on, step 2 shows the stake and its token; the deployed validator accepts the transaction', async () => {
     const n = stakeNode([STAKE_A.opening]);
     node = n;
-    const t = await call('vector_build_reputation_stake', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: STAKE_A.capabilities, opening_ref: `${STAKE_A.opening.txHash}#0` });
-    assert.ok(t.startsWith('# Unsigned Reputation Stake Built (Not Submitted), step 2 of 2\n\n**Hold:** Do not use on mainnet until the Module-3 reputation module is fixed and redeployed.\n'), t.slice(0, 300));
-    assert.ok(t.includes(`**Stake locked:** 10.000000 with stake token \`${stakeTokenUnit(STAKE_A.agentDidHex)}\`. As deployed, the owner cannot withdraw a stake at the module's minimum; the module's oracle key can consume all of it through ClaimDecayRefund about 163 s after its last update; and a falsified capability slashes 1/N of it, where N is the number of staked capabilities (all of it when N = 1).\n`));
+    const t = await callOn(building)('vector_build_reputation_stake', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: STAKE_A.capabilities, opening_ref: `${STAKE_A.opening.txHash}#0` });
+    assert.ok(t.startsWith('# Unsigned Reputation Stake Built (Not Submitted), step 2 of 2\n\n**Stake ref (after submit):** '), t.slice(0, 300));
+    assert.ok(t.includes(`**Stake locked:** 10.000000 with stake token \`${stakeTokenUnit(STAKE_A.agentDidHex)}\`\n`));
     assert.match(t, /\*\*Valid until:\*\* \S+ \(sign and submit before then, or build it again\)/);
     const j = jsonOf(t);
     assert.equal(j.stake_ref, `${j.tx_hash}#0`);
@@ -177,9 +194,9 @@ describe('vector_build_reputation_stake_open and vector_build_reputation_stake',
     assert.equal(j.opening_ref, `${STAKE_A.opening.txHash}#0`);
     assert.equal(n.evaluations.length, 1);
   });
-  test('refusals name the rule: a capability the registry record does not list', async () => {
+  test('with the build path on, refusals name the rule: a capability the registry record does not list', async () => {
     node = stakeNode([STAKE_A.opening]);
-    const t = await call('vector_build_reputation_stake', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: ['data_analysis'], opening_ref: `${STAKE_A.opening.txHash}#0` });
+    const t = await callOn(building)('vector_build_reputation_stake', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: ['data_analysis'], opening_ref: `${STAKE_A.opening.txHash}#0` });
     assert.match(t, /^Failed to build reputation stake: Capability data_analysis is not in the registry record of did:vector:agent:/);
     assert.match(t, /\*\*Troubleshooting Tips:\*\*\n1\. opening_ref must be the confirmed output/);
   });
@@ -192,7 +209,7 @@ describe('the rate limit covers the new tools', () => {
     const limited = new Map<string, Handler>();
     registerMarketplaceTools(serverOf(limited), 'limited', () => { throw new Error('the node was touched'); }, spent);
     registerReputationTools(serverOf(limited), 'limited', () => { throw new Error('the node was touched'); }, spent);
-    for (const name of ['vector_build_marketplace_post_advert', 'vector_build_marketplace_retire_advert', 'vector_build_reputation_stake_open', 'vector_build_reputation_stake']) {
+    for (const name of ['vector_build_marketplace_post_advert', 'vector_build_marketplace_advert_retire', 'vector_build_reputation_stake_open', 'vector_build_reputation_stake']) {
       assert.match(await callOn(limited)(name, {}), /^Rate limit exceeded\. Retry after \d+ms\.$/, name);
     }
   });

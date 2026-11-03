@@ -12,6 +12,11 @@
 // multi-turn session capability, included), and a fleet route forced by the caller, before anything is sent; the fleet half of the
 // route table (marketplace-supplier.ts) stays, tested, as the transport for a later SDK-backed path.
 //
+// Both escrow layouts (Part 2 Section 6.1). With the server's identity deployment (`deployment`), an identity-marketplace escrow is
+// read at its own script credential and its advert at the identity advert address, and that advert must name the escrow's agent;
+// a legacy escrow is read as before. Without a deployment, an identity-marketplace escrow is refused with the words that say how to
+// configure the server.
+//
 // Who may send what to whom. Anyone can post an escrow, with an advert of their own on a host of their own, and buyer_pkh and
 // prompt_hash are public datum fields that anyone can copy into an escrow of theirs: neither can be taken at its word. So the ref must
 // be the Post output of an escrow that (1) names the key of the caller's buyerAddress as its buyer and (2) was funded by that key: the
@@ -54,6 +59,7 @@ import { resolveEscrowLineage, readEscrowOutput, koiosFailure } from './marketpl
 import { cell } from './marketplace-shared.js';
 import { routeFor, canonicalRef, isTimeout, callFailure, outOfScope, notThePostOutput, jsonObject, readTargetAdvert } from './marketplace-supplier.js';
 import type { Route, Call } from './marketplace-supplier.js';
+import type { IdentityDeployment } from './identity-deployment.js';
 
 // The routes and the policy for a call (marketplace-supplier.ts) and the check of a receipt (marketplace-verify.ts) belong to the transport as far
 // as a caller can tell: they are re-exported, so that everything is imported from this module.
@@ -214,7 +220,7 @@ export interface SendClock { startedAt?: number; now?: () => number }
  * claim limit (60 s) is left, nothing is sent: a POST abandoned while the supplier is still within its limit may have claimed the
  * escrow with no job id for the buyer to poll, whereas a send that was refused can simply be repeated.
  */
-export async function sendJob(provider: Provider, koiosUrl: string, p: { escrowRef: string; payload: string; buyerAddress: string; route?: Route['kind'] }, fetchImpl: typeof fetch = fetch, clock: SendClock = {}): Promise<SentJob> {
+export async function sendJob(provider: Provider, koiosUrl: string, p: { escrowRef: string; payload: string; buyerAddress: string; route?: Route['kind']; deployment?: IdentityDeployment | null }, fetchImpl: typeof fetch = fetch, clock: SendClock = {}): Promise<SentJob> {
   const now = clock.now ?? Date.now;
   const startedAt = clock.startedAt ?? now();
   const canonical = canonicalRef(p.escrowRef);
@@ -223,13 +229,13 @@ export async function sendJob(provider: Provider, koiosUrl: string, p: { escrowR
   const forced = outOfScope(p.route, undefined);
   if (forced !== null) throw refuse(forced);
   const buyerPkh = buyerKeyHash(p.buyerAddress, refuse);
-  const lineage = await resolveEscrowLineage(provider, koiosUrl, canonical, fetchImpl);
+  const lineage = await resolveEscrowLineage(provider, koiosUrl, canonical, fetchImpl, p.deployment ?? null);
   const { posted } = lineage;
   await checkBuyer(posted, koiosUrl, canonical, fetchImpl, { refuse, buyerPkh, buyerAddress: p.buyerAddress });
   // Live and Open comes before the advert is read: an escrow that is finished, Claimed or Submitted costs no read of its advert.
   if (lineage.current === null) throw refuse('no live output was found for it (it may be finished, or the chain index may be behind).');
   if (lineage.current.datum.state !== 'Open') throw refuse(`it is ${lineage.current.datum.state} and a job can only be sent while it is Open.`);
-  const advert = await readTargetAdvert(posted, koiosUrl, fetchImpl, { refuse, forSend: true });
+  const advert = await readTargetAdvert(posted, koiosUrl, fetchImpl, { refuse, forSend: true, deployment: p.deployment });
   if (promptHashForPayload(p.payload) !== posted.prompt_hash) throw refuse("the payload does not match the escrow's prompt_hash: it must be exactly the payload the escrow was posted with.");
   const route = routeFor(advert.capability_id, p.route);
   const { headers, body } = route.body(canonical, p.payload);
@@ -285,16 +291,16 @@ function wrongEscrow(text: string, canonical: string): JobView | null {
  * asked about is a failed view. `supplierPkh` is the key the advert names; the view is the supplier's own account (see JobView) and
  * `endpoint` the URL it came from.
  */
-export async function getJob(koiosUrl: string, p: { escrowRef: string; jobId: string; buyerAddress: string; route?: Route['kind'] }, fetchImpl: typeof fetch = fetch): Promise<PolledJob> {
+export async function getJob(koiosUrl: string, p: { escrowRef: string; jobId: string; buyerAddress: string; route?: Route['kind']; deployment?: IdentityDeployment | null }, fetchImpl: typeof fetch = fetch): Promise<PolledJob> {
   const canonical = canonicalRef(p.escrowRef);
   const refuse = (why: string) => new Error(`Cannot poll a job for escrow ${canonical}: ${why} Nothing was sent.`);
   if (typeof p.jobId !== 'string' || !JOB_ID.test(p.jobId)) throw refuse('the job id must be 1 to 128 letters, digits, hyphens or underscores.');
   const forced = outOfScope(p.route, undefined);
   if (forced !== null) throw refuse(forced);
   const buyerPkh = buyerKeyHash(p.buyerAddress, refuse);
-  const { datum: posted } = await readEscrowOutput(koiosUrl, canonical, fetchImpl);
+  const { datum: posted } = await readEscrowOutput(koiosUrl, canonical, fetchImpl, p.deployment ?? null);
   await checkBuyer(posted, koiosUrl, canonical, fetchImpl, { refuse, buyerPkh, buyerAddress: p.buyerAddress });
-  const advert = await readTargetAdvert(posted, koiosUrl, fetchImpl, { refuse, forSend: false });
+  const advert = await readTargetAdvert(posted, koiosUrl, fetchImpl, { refuse, forSend: false, deployment: p.deployment });
   const route = routeFor(advert.capability_id, p.route);
   let res: Awaited<ReturnType<typeof safeFetch>>;
   try {

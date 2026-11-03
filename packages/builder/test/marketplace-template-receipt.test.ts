@@ -24,7 +24,7 @@ const flipByte = (hex: string, index: number): string => {
 const states = (checks: ReceiptChecks) => Object.fromEntries(Object.entries(checks).map(([name, c]) => [name, c.state]));
 const ALL_PASS = {
   escrow_ref_matches: 'pass', response_hash_matches: 'pass', supplier_key_matches: 'pass', signature_valid: 'pass',
-  on_chain_hash_matches: 'pass', prompt_hash_matches: 'pass',
+  on_chain_hash_matches: 'pass', fields_match: 'pass', prompt_hash_matches: 'pass',
 };
 /** A canonicaliser that sorts the keys and nothing else: what it takes to see that the vector is not satisfied by an easy one. */
 const sortedOnly = (o: Record<string, unknown>): string =>
@@ -109,5 +109,11 @@ describe('a receipt made by the template\'s own code', () => {
     assert.equal(verifyReceipt(input({ escrowRef: otherEscrow })).checks.escrow_ref_matches.state, 'fail');
     assert.equal(verifyReceipt(input({ escrowPromptHash: flipByte(T.receipt.prompt_hash, 0) })).checks.prompt_hash_matches.state, 'fail');
     assert.equal(verifyReceipt(input({ escrowSupplierPkh: flipByte(T.supplierPkh, 0) })).checks.supplier_key_matches.state, 'fail');
+  });
+  test('has exactly the 8 fields of a legacy receipt: as an identity-marketplace receipt it fails check 6 alone', () => {
+    assert.equal(verifyReceipt(input()).checks.fields_match.state, 'pass');
+    const v = verifyReceipt(input({ escrowAgentId: 'ae'.repeat(32) }));
+    assert.deepEqual(states(v.checks), { ...ALL_PASS, fields_match: 'fail' });
+    assert.match(v.checks.fields_match.note, /identity-marketplace escrow has exactly the 9 receipt fields; it lacks agent_did/);
   });
 });

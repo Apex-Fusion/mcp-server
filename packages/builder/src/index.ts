@@ -30,6 +30,8 @@ import { registerVectorTools } from "./vector/index.js";
 import { loadAuthConfig, resolveIdentity, clientIpOf } from "./auth.js";
 import { intEnv } from "./env.js";
 import { RATE_LIMIT_PER_MINUTE } from "./vector/rate-limiter.js";
+import { describeDeployment, serverIdentityDeployment } from "./vector/identity-deployment.js";
+import { describeGovDeployment, serverGovDeployment } from "./vector/gov-deployment.js";
 // Single source of truth for the advertised server version. tsup/esbuild
 // resolves this named JSON import at build time and inlines only the field,
 // so the built artifact has no runtime dependency on package.json's location.
@@ -109,6 +111,12 @@ console.error(
   `Config: rate limit ${RATE_LIMIT_PER_MINUTE}/min per identity, /mcp session idle ${STREAMABLE_SESSION_IDLE_MS}ms, ` +
   `sweep every ${STREAMABLE_SESSION_SWEEP_MS}ms, cap ${MAX_SESSIONS_PER_IDENTITY} sessions/identity.`
 );
+
+// The identity registry deployment (did:vector): its values are read and its scripts applied once, here, so that a malformed
+// VECTOR_IDENTITY_* value stops the start with an error that names it. Without the values the identity tools say how to set them.
+console.error(`Identity registry: ${describeDeployment(serverIdentityDeployment())}`);
+// The Module-6 deployment on the identity registry (GOV_*): read once, here, for the same reason.
+console.error(`Module-6: ${describeGovDeployment(serverGovDeployment())}`);
 
 /**
  * Closes a /mcp session and drains it from every map, from any trigger other

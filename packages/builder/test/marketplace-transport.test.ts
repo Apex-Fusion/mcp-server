@@ -1028,7 +1028,7 @@ describe('the send deadline', () => {
 // way the template's supplier makes them: the eight fields, Ed25519 over canonicalize(receipt), and a result_receipt_hash on chain that
 // is sha256(canonicalize({receipt, signature})).
 const statesOf = (v: ReceiptVerdict) => Object.fromEntries(Object.entries(v.checks).map(([name, c]) => [name, c.state]));
-const PASSING = { escrow_ref_matches: 'pass', response_hash_matches: 'pass', supplier_key_matches: 'pass', signature_valid: 'pass', on_chain_hash_matches: 'pass', prompt_hash_matches: 'pass' };
+const PASSING = { escrow_ref_matches: 'pass', response_hash_matches: 'pass', supplier_key_matches: 'pass', signature_valid: 'pass', on_chain_hash_matches: 'pass', fields_match: 'pass', prompt_hash_matches: 'pass' };
 
 describe('verifyReceipt', () => {
   const receipt = receiptOf(SUPPLIER_KEY, ESCROW_REF);
@@ -1042,7 +1042,7 @@ describe('verifyReceipt', () => {
   test('a good receipt passes the five checks, in the design\'s order, and the extra row, and is verified', () => {
     const v = verifyReceipt(good);
     assert.equal(v.verdict, 'verified');
-    assert.deepEqual(Object.keys(v.checks), ['escrow_ref_matches', 'response_hash_matches', 'supplier_key_matches', 'signature_valid', 'on_chain_hash_matches', 'prompt_hash_matches']);
+    assert.deepEqual(Object.keys(v.checks), ['escrow_ref_matches', 'response_hash_matches', 'supplier_key_matches', 'signature_valid', 'on_chain_hash_matches', 'fields_match', 'prompt_hash_matches']);
     assert.deepEqual(statesOf(v), PASSING);
     for (const c of Object.values(v.checks)) assert.equal(c.note, '');
   });
@@ -1215,7 +1215,7 @@ describe('verifyReceipt', () => {
     }
     // with no report text and nothing on chain, those two checks have nothing to read it for
     const v = verifyReceipt({ ...good, receipt: null, result: undefined, resultReceiptHashOnChain: null });
-    assert.deepEqual(statesOf(v), { escrow_ref_matches: 'fail', response_hash_matches: 'skipped', supplier_key_matches: 'fail', signature_valid: 'fail', on_chain_hash_matches: 'skipped', prompt_hash_matches: 'fail' });
+    assert.deepEqual(statesOf(v), { escrow_ref_matches: 'fail', response_hash_matches: 'skipped', supplier_key_matches: 'fail', signature_valid: 'fail', on_chain_hash_matches: 'skipped', fields_match: 'fail', prompt_hash_matches: 'fail' });
   });
 
   // Not one of the design's five, and it counts all the same: a receipt made for another request is not a good one. The template

@@ -4,6 +4,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import * as CML from '@anastasia-labs/cardano-multiplatform-lib-nodejs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -11,7 +14,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { MnemonicKeySource } from '../../src/keysource.ts';
 import { loadConfig } from '../../src/config.ts';
-import { signTransaction } from '../../src/sign.ts';
+import { publicKeyOf, signTransaction } from '../../src/sign.ts';
 
 const TEST_MNEMONIC =
   'test walk nut penalty hip pave soap entry language right filter choice';
@@ -22,6 +25,7 @@ const FIXTURE_CBOR =
 const EXPECTED_TOOLS = [
   'vector_signer_decode_transaction',
   'vector_signer_get_address',
+  'vector_signer_get_public_key',
   'vector_signer_get_spend_limits',
   'vector_signer_sign',
 ];
@@ -49,6 +53,7 @@ before(async () => {
       VECTOR_SIGNER_AUDIT_LOG_PATH: join(dir, 'audit.json'),
       VECTOR_SIGNER_SPEND_LIMIT_PER_TX: '100000000',
       VECTOR_SIGNER_SPEND_LIMIT_DAILY: '500000000',
+      VECTOR_SIGNER_OGMIOS_URL: '',
     },
   });
   client = new Client({ name: 'signer-smoke', version: '1.0.0' });
@@ -61,7 +66,7 @@ after(async () => {
 });
 
 describe('signer MCP server over stdio', () => {
-  test('exposes exactly the four expected tools', async () => {
+  test('exposes exactly the five expected tools', async () => {
     const { tools } = await client.listTools();
     assert.deepStrictEqual(tools.map((t) => t.name).sort(), EXPECTED_TOOLS);
   });
@@ -78,6 +83,15 @@ describe('signer MCP server over stdio', () => {
 
   test('get_address returns the derived addr1 address', async () => {
     assert.match(await callText('vector_signer_get_address'), /addr1[0-9a-z]+/);
+  });
+
+  test('get_public_key returns the public key and key hash of the configured key, and nothing secret', async () => {
+    const identity = new MnemonicKeySource(TEST_MNEMONIC).load();
+    const { publicKeyHex, keyHashHex } = publicKeyOf(identity.privateKeyBech32);
+    const text = await callText('vector_signer_get_public_key');
+    assert.ok(text.includes(publicKeyHex) && text.includes(keyHashHex), text);
+    assert.ok(!text.includes(identity.privateKeyBech32));
+    for (const word of TEST_MNEMONIC.split(' ')) assert.ok(!text.includes(word), `mnemonic word "${word}" in: ${text}`);
   });
 
   test('decode_transaction reports the net outflow without signing', async () => {
@@ -152,6 +166,8 @@ async function spawnSigner(
     auditLogPath?: (dir: string) => string;
     perTx?: string;
     daily?: string;
+    /** VECTOR_SIGNER_OGMIOS_URL; resolution is off when absent, whatever the outer environment says. */
+    ogmiosUrl?: string;
   } = {}
 ): Promise<EdgeServer> {
   const dir = mkdtempSync(join(tmpdir(), 'signer-smoke-edge-'));
@@ -168,6 +184,7 @@ async function spawnSigner(
       VECTOR_SIGNER_AUDIT_LOG_PATH: auditLogPath,
       VECTOR_SIGNER_SPEND_LIMIT_PER_TX: opts.perTx ?? '100000000',
       VECTOR_SIGNER_SPEND_LIMIT_DAILY: opts.daily ?? '500000000',
+      VECTOR_SIGNER_OGMIOS_URL: opts.ogmiosUrl ?? '',
     },
     // Piped (not the brief's default 'inherit') specifically so the startup
     // banner can be captured and inspected for leaked key material below.
@@ -351,6 +368,7 @@ describe('stdout carries ONLY the MCP protocol — direct assertion, not an inci
       VECTOR_SIGNER_AUDIT_LOG_PATH: join(dir, 'audit.json'),
       VECTOR_SIGNER_SPEND_LIMIT_PER_TX: '100000000',
       VECTOR_SIGNER_SPEND_LIMIT_DAILY: '500000000',
+      VECTOR_SIGNER_OGMIOS_URL: '',
     });
     const client = new Client({ name: 'signer-smoke-stdout-purity', version: '1.0.0' });
     try {
@@ -711,6 +729,122 @@ describe('a lower-stakes decision: an audit append failure on the REFUSED path',
       await callToolText(server.client, 'vector_signer_sign', { txCbor: FIXTURE_CBOR });
       const limits = await callToolText(server.client, 'vector_signer_get_spend_limits');
       assert.match(limits, /Committed today:\s*0\.000000 AP3X/);
+    } finally {
+      await stopSigner(server);
+    }
+  });
+});
+
+// --- Input resolution (VECTOR_SIGNER_OGMIOS_URL) through the built server --------------------------------------
+//
+// The built signer, its real fetch and a local Ogmios stand-in on 127.0.0.1: the stand-in answers
+// queryLedgerState/utxo from a fixed table, and records every request so the test can check that only output
+// references left the signer.
+describe('input resolution against a local Ogmios stand-in', () => {
+  const OTHER_PARTY = new MnemonicKeySource(TEST_MNEMONIC, 1).load();
+  const STRANGER = 'addr1wx434t2jc3m5uhdf7tq05xjdqu3q5z7a2lhrmn5mapsd43srh7ll8';
+  const OWN_IN = { id: '0a'.repeat(32), index: 0 };
+  const OTHER_IN = { id: '0b'.repeat(32), index: 1 };
+  const BIG_OWN_IN = { id: '0c'.repeat(32), index: 2 };
+  const ledger = new Map<string, { address: string; lovelace: number }>([
+    [`${OWN_IN.id}#0`, { address: TEST_IDENTITY.address, lovelace: 10_000_000 }],
+    [`${OTHER_IN.id}#1`, { address: OTHER_PARTY.address, lovelace: 500_000_000 }],
+    [`${BIG_OWN_IN.id}#2`, { address: TEST_IDENTITY.address, lovelace: 500_000_000 }],
+  ]);
+  const requests: string[] = [];
+  let ogmios: Server;
+  let ogmiosUrl: string;
+
+  before(async () => {
+    ogmios = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk: Buffer) => { body += chunk.toString('utf8'); });
+      req.on('end', () => {
+        requests.push(body);
+        const refs = (JSON.parse(body).params.outputReferences as Array<{ transaction: { id: string }; index: number }>);
+        const result = refs
+          .map((r) => ({ r, o: ledger.get(`${r.transaction.id}#${r.index}`) }))
+          .filter(({ o }) => o)
+          .map(({ r, o }) => ({ transaction: r.transaction, index: r.index, address: o!.address, value: { ada: { lovelace: o!.lovelace } } }));
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', method: 'queryLedgerState/utxo', result, id: null }));
+      });
+    });
+    ogmios.listen(0, '127.0.0.1');
+    await once(ogmios, 'listening');
+    ogmiosUrl = `http://127.0.0.1:${(ogmios.address() as AddressInfo).port}/`;
+  });
+  after(async () => {
+    ogmios.close();
+    await once(ogmios, 'close');
+  });
+
+  function txOf(inputs: Array<{ id: string; index: number }>, outputs: Array<[string, bigint]>): string {
+    const list = CML.TransactionInputList.new();
+    for (const i of inputs) list.add(CML.TransactionInput.new(CML.TransactionHash.from_hex(i.id), BigInt(i.index)));
+    const outs = CML.TransactionOutputList.new();
+    for (const [address, lovelace] of outputs) outs.add(CML.TransactionOutput.new(CML.Address.from_bech32(address), CML.Value.from_coin(lovelace)));
+    return CML.Transaction.new(CML.TransactionBody.new(list, outs, 200_000n), CML.TransactionWitnessSet.new(), true, undefined).to_cbor_hex();
+  }
+  // The other party funds 500 AP3X and pays a stranger 300; the signer puts in 10 and takes 10 back.
+  const multiParty = () => txOf([OWN_IN, OTHER_IN], [[STRANGER, 300_000_000n], [OTHER_PARTY.address, 199_800_000n], [TEST_IDENTITY.address, 10_000_000n]]);
+
+  test('a 2-party transaction, already signed by the other party, passes the limit and comes back with both witnesses', async () => {
+    const server = await spawnSigner({ ogmiosUrl });
+    try {
+      requests.length = 0;
+      const partly = signTransaction(multiParty(), OTHER_PARTY.privateKeyBech32).signedCborHex;
+      const result = await callToolText(server.client, 'vector_signer_sign', { txCbor: partly });
+      assert.match(result, /^# Signed/);
+      assert.match(result, /Net outflow: 0\.200000 AP3X \(counted from this signer's own inputs/);
+
+      const signed = CML.Transaction.from_cbor_hex(result.match(/```\n([0-9a-f]+)\n```/)![1]);
+      const witnesses = signed.witness_set().vkeywitnesses()!;
+      assert.equal(witnesses.len(), 2);
+      assert.equal(witnesses.get(0).vkey().hash().to_hex(), publicKeyOf(OTHER_PARTY.privateKeyBech32).keyHashHex);
+      assert.equal(witnesses.get(1).vkey().hash().to_hex(), publicKeyOf(TEST_IDENTITY.privateKeyBech32).keyHashHex);
+
+      // What left the signer: one query, with output references and nothing else.
+      assert.equal(requests.length, 1);
+      assert.deepStrictEqual(JSON.parse(requests[0]), {
+        jsonrpc: '2.0',
+        method: 'queryLedgerState/utxo',
+        params: { outputReferences: [{ transaction: { id: OWN_IN.id }, index: 0 }, { transaction: { id: OTHER_IN.id }, index: 1 }] },
+        id: null,
+      });
+    } finally {
+      await stopSigner(server);
+    }
+  });
+
+  test('a transaction that spends the signer\'s own inputs to a stranger is still refused', async () => {
+    const server = await spawnSigner({ ogmiosUrl });
+    try {
+      const result = await callToolText(server.client, 'vector_signer_sign', { txCbor: txOf([BIG_OWN_IN], [[STRANGER, 499_800_000n]]) });
+      assert.match(result, /^REFUSED\. Net outflow 500\.000000 AP3X exceeds the per-transaction limit/);
+      assert.ok(!/Signed CBOR/i.test(result));
+    } finally {
+      await stopSigner(server);
+    }
+  });
+
+  test('an endpoint that cannot be reached gives the fallback rule, and the result says so', async () => {
+    // A port that was just free: nothing listens there.
+    const probe = createServer();
+    probe.listen(0, '127.0.0.1');
+    await once(probe, 'listening');
+    const deadUrl = `http://127.0.0.1:${(probe.address() as AddressInfo).port}/`;
+    probe.close();
+    await once(probe, 'close');
+
+    const server = await spawnSigner({ ogmiosUrl: deadUrl });
+    try {
+      const result = await callToolText(server.client, 'vector_signer_sign', { txCbor: multiParty() });
+      assert.match(result, /^REFUSED\. Net outflow 500\.000000 AP3X/);
+      assert.match(result, /\(fallback rule\), because input resolution failed \(Ogmios could not be reached \(network error or timeout\)\)/);
+      assert.ok(!result.includes(deadUrl), 'the endpoint is not repeated');
+      const limits = await callToolText(server.client, 'vector_signer_get_spend_limits');
+      assert.match(limits, /^Input resolution: on \(Ogmios at 127\.0\.0\.1:\d+\)$/m);
     } finally {
       await stopSigner(server);
     }

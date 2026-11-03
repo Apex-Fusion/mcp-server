@@ -25,7 +25,8 @@ import { blake2b } from '@noble/hashes/blake2b';
 import type { VectorUnsignedBuildResult } from '@apexfusion/vector-mcp-shared/types';
 import { toBuildResult } from './build.js';
 import { ensureSlotConfig, paymentKeyHashOf, ChainClockError } from './gov-build.js';
-import { REGISTRY_POLICY_ID, getRegistryAddress, parseDid, resolveAgentUtxo } from './registry-build.js';
+import { parseDid, resolveAgentUtxo } from './registry-build.js';
+import { LEGACY_REGISTRY_POLICY_ID, legacyRegistryAddress } from './legacy-registry.js';
 import { formatOutRef, parseOutRef } from './marketplace-datum.js';
 import { nodeFailure } from './marketplace-lineage.js';
 import { reserveCollateralInputs, assertCollateral, assertWalletIs } from './marketplace-build.js';
@@ -35,6 +36,15 @@ import { cell } from './marketplace-shared.js';
 // ─── Deployment (Vector mainnet) ───────────────────────────────────────────
 // From vector-agent-modules Module-3/deploy/mainnet/deploy_state.json (network "vector-mainnet"), each checked against the live chain
 // on 2026-10-21 (Koios utxo_info and script_info). Inlined, as the marketplace's are: the Docker image ships only build/.
+
+/**
+ * Whether the deployment these builders name takes new stakes. It does not: the stake tools refuse with NO_NEW_STAKES and build
+ * nothing (registerReputationTools takes the setting, so that tests run the build path). The builders stay, so that the move to the
+ * new Module-3 deployment can reuse them.
+ */
+export const REPUTATION_TAKES_NEW_STAKES = false;
+/** The refusal of the stake tools while the deployment takes no new stakes. */
+export const NO_NEW_STAKES = 'The current Module-3 deployment takes no new stakes. New stakes use the new Module-3 deployment, which is published after the identity release.';
 
 /** The reputation validator: one script, both the minting policy of the stake token and the script credential of the stake address. */
 export const REPUTATION_SCRIPT_HASH = '5168e1871cfdb1e55c18ee173acbcdce092044a48bc2e23f3ba35093';
@@ -164,10 +174,10 @@ export interface RegistryRecord { utxo: UTxO; agentDidHex: string; ownerPkh: str
 /** The registry record of a DID, from the registry address, with the owner a verification key and the capabilities as the bytes the record holds. */
 export async function readRegistryRecord(provider: Provider, agentId: string): Promise<RegistryRecord> {
   const { policyId, assetName } = parseDid(agentId);
-  if (policyId !== REGISTRY_POLICY_ID) throw new Error(`${cell(agentId)} is not a DID of the agent registry (its policy is not ${REGISTRY_POLICY_ID}).`);
+  if (policyId !== LEGACY_REGISTRY_POLICY_ID) throw new Error(`${cell(agentId)} is not a DID of the agent registry (its policy is not ${LEGACY_REGISTRY_POLICY_ID}).`);
   if (assetName.length !== 64) throw new Error('The DID\'s asset name must be 64 hex characters.');
   const { utxo, profile } = await resolveAgentUtxo(provider as unknown as Parameters<typeof resolveAgentUtxo>[0], agentId);
-  if (utxo.address !== getRegistryAddress()) throw new Error(`The registry token of ${agentId} is not at the registry address; nothing was built.`);
+  if (utxo.address !== legacyRegistryAddress()) throw new Error(`The registry token of ${agentId} is not at the registry address; nothing was built.`);
   const c = Data.from(utxo.datum!);
   const owner = c instanceof Constr ? c.fields[0] : undefined;
   const caps = c instanceof Constr ? c.fields[3] : undefined;
@@ -193,7 +203,7 @@ export function stakedCapabilities(requested: unknown, record: Pick<RegistryReco
     const hex = fromText(cap);
     if (out.includes(hex)) throw new Error(`Capability ${cell(cap)} is named twice.`);
     if (!listed.includes(hex)) {
-      throw new Error(`Capability ${cell(cap)} is not in the registry record of ${agentId}, which lists: ${listed.map((h) => cell(capabilityText(h), 64)).join(', ') || '(none)'}. The validator accepts only capabilities the record lists; add it with vector_build_update_agent first, or stake on listed ones.`);
+      throw new Error(`Capability ${cell(cap)} is not in the registry record of ${agentId}, which lists: ${listed.map((h) => cell(capabilityText(h), 64)).join(', ') || '(none)'}. The validator accepts only capabilities the record lists; stake on listed ones.`);
     }
     out.push(hex);
   }
