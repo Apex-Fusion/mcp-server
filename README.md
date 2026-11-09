@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks. The 63 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
+Hosted instances run on both networks. The 74 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
 
 | Network | Endpoint |
 |---------|----------|
@@ -101,10 +101,11 @@ limitations.
 - **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals on the Module-6 deployment of the identity registry (the agent is a `did:vector` agent whose record is Active); every write tool is keyless
 - **Agents marketplace, both sides** - hire a supplier (escrow post, accept, reclaim, send a job, check its receipt) and list one (advert post, update and retire in the identity layout; one retire for both layouts; the legacy-layout Post is refused from the escrow switch on), keyless
 - **Reputation self-stake** - the current Module-3 deployment takes no new stakes, so the two stake tools refuse (see [Reputation](#reputation-2))
+- **Module-1 disputes and the jury** - publish and read documents on chain (metadata label 22084, `vector-tx:` URIs), build a Module-1 claim or challenge (oracle mode), and act as a juror of the Module-1 jury (register, exit, top-up, commit, reveal); read the jurors and the cases with the canonical case of each dispute, keyless
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
 - **Streamable HTTP transport** - the modern MCP transport at `/mcp`, with any-origin CORS for browser clients and an unauthenticated `GET /health` probe (the legacy SSE pair was removed in 2.0.0)
 
-## MCP Tools (63)
+## MCP Tools (74)
 
 ### Wallet & Queries
 
@@ -242,6 +243,34 @@ before the next): `vector_build_identity_register` (the identity, listing the su
 `vector_build_marketplace_advert_post` (the listing; then set the supplier runtime's `ADVERT_REF` to the new advert
 ref). `vector_build_marketplace_advert_retire` takes the listing down, in either layout.
 
+### Module-1 Disputes and Jury (11)
+
+The Module-1 jury decides Module-1 disputes on Vector. AI jurors vote on each challenge, and the relay of the Foundation signs the
+Module-1 `OracleResolve` with the result (Module-1 jury specification, `Module-1/jury/SPEC.md` in `Apex-Fusion/vector-agent-modules`).
+The build tools are keyless: each returns the unsigned transaction and the key hashes that must sign it. The claim and challenge tools
+need `VECTOR_MODULE1_MANIFEST`, the juror and jury tools need `VECTOR_JURY_MANIFESTS` (see [Configuration](#configuration)); without
+them the tools say which variable to set. The document tools need neither.
+
+| Tool | Description |
+|------|-------------|
+| `vector_build_document_publish` | Build an unsigned transaction that carries a document (UTF-8, normally JSON) as metadata under label 22084, in text chunks of at most 64 bytes. Returns the document URI `vector-tx:<transaction id>` and the blake2b-256 hash of the document (keyless) |
+| `vector_get_document` | Read a document by its URI (`vector-tx:` from the metadata of its transaction through Koios, or from the CBOR form of the metadata when Koios gives no JSON for it; or `https://`) and check its hash against an expected hash (read-only, no wallet needed) |
+| `vector_build_module1_claim` | Build an unsigned Module-1 SubmitClaim (oracle mode): the claim token and the stake (at least 50 AP3X on mainnet) in a claim output with the claim document hash and URI. The wallet key is the claimer credential; the claimer DID must be Active. Without `claim_hash` the tool reads the document from `claim_uri` (keyless) |
+| `vector_build_module1_challenge` | Build an unsigned Module-1 OpenChallenge (oracle mode): spends the claim into state Challenged and locks the auditor stake (at least the claim stake) in a challenge output in state PendingOracle. The claim can sit at any address that has the claim script as its payment credential (a stake part is allowed, as Module-1 checks the payment credential only); the continuing claim output stays at that address. The resolution deadline defaults to 72 h; the jury needs at least 6 h 10 min, and the answer warns below that (keyless) |
+| `vector_build_jury_register` | Register a DID as a juror: mints a juror token and locks the bond (at least 250 AP3X on mainnet); the wallet key becomes the juror owner; the transaction carries the juror prompt document; the juror can vote 3 days later (keyless) |
+| `vector_build_jury_exit` | Step `request`: write the exit request (no more votes; exit after 3 days). Step `exit`: burn the juror token and take the bond back, when no vote is open (keyless) |
+| `vector_build_jury_topup` | Add AP3X to the bond of a juror (keyless) |
+| `vector_build_jury_commit` | Commit a vote in a case: blake2b-256 of the case token, the juror DID, the vote, a 32-byte salt and the hash of the juror record. Without a salt the tool makes one and returns it: keep the salt and the exact record for the reveal (keyless) |
+| `vector_build_jury_reveal` | Reveal a committed vote in the reveal window: checks the vote, the salt and the record hash against the commitment, adds the vote to the tally and carries the record as metadata. When the reveal with the record does not fit in one transaction: first publish the same record bytes with `vector_build_document_publish` (type `juror-record`) in the reveal window, then build the reveal with `record_in_metadata: false` and `record_uri` set to that transaction's `vector-tx:` URI; the reveal then carries a `juror-record-ref` (keyless) |
+| `vector_get_jury` | The followed jury deployments: their parameters and their jurors (bond, prompt hash, when each can vote, exit state, open votes) (read-only) |
+| `vector_get_jury_cases` | The live jury cases: parties, the claim and evidence URIs (read from the claim and challenge outputs that the case names) and hashes, windows, ballots, tally, the result of the tally, and whether the case is the canonical case of its dispute (the claim token; the flag comes from the marketplace indexer's `GET /jury/cases`, and is unknown without it); filter by claim, challenge or agent (read-only) |
+
+A dispute from a chat client: `vector_build_document_publish` (the claim document) → `vector_build_module1_claim`; an auditor:
+`vector_build_document_publish` (the evidence) → `vector_build_module1_challenge`. The relay opens a jury case for the challenge. A juror:
+`vector_get_jury_cases` → `vector_get_document` (claim and evidence) → `vector_build_jury_commit` (keep the salt and the record) → in the
+reveal window `vector_build_jury_reveal`. Each build is signed with `vector_signer_sign`, broadcast with `vector_submit_transaction` and
+confirmed with `vector_await_transaction`.
+
 ## Self-hosting
 
 ### 1. Install and build
@@ -340,6 +369,7 @@ If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` firs
 | `VECTOR_EXPLORER_URL` | Block explorer base URL | `https://vector.testnet.apexscan.org` |
 | `VECTOR_MARKETPLACE_INDEXER_URL` | Marketplace indexer behind the `vector_marketplace_*` tools. Read at startup, before any `.env` file is loaded, so it must be set as a real environment variable. Trailing slashes are ignored. A testnet-configured instance reads the mainnet indexer with testnet Koios, so either set this variable there or treat the marketplace tools as mainnet-only | `https://mp-indexer.vector.apexfusion.org` |
 | `VECTOR_IDENTITY_GATEWAY_URL` | Identity gateway behind `vector_resolve_did` and the canonical-DID path of `vector_get_agent_profile` (`GET /1.0/identifiers/{did}`). Trailing slashes are ignored | `https://id.vector.apexfusion.org` |
+| `VECTOR_BLOCKFROST_URL` | Blockfrost behind the CBOR form of document metadata (`GET /txs/{hash}/metadata/cbor`): `vector_get_document` and the claim and challenge tools use it when Koios gives no JSON for the label 22084 metadata of a transaction. Read when a tool is called, so a `.env` value applies. Trailing slashes are ignored. A testnet-configured instance needs the testnet Blockfrost here | `https://blockfrost.vector.mainnet.apexfusion.org` |
 | `VECTOR_IDENTITY_LEGACY_ROOT` | Identity registry deployment value: the Merkle root of the adoption allowlist (64 hex). With `VECTOR_IDENTITY_CONFIG_SEED` it gives every identity-marketplace script: the server applies the parameters of the unapplied scripts (identity-marketplace blueprint, agents-marketplace 1643583) at startup. Set both or neither; a malformed value stops the start | unset (identity tools answer "not configured") |
 | `VECTOR_IDENTITY_CONFIG_SEED` | Identity registry deployment value: the seed output of the configuration seal (`<txid>#<index>`) | unset |
 | `VECTOR_IDENTITY_POLICY_ID` | Optional check: the published identity policy; the start fails when the two values above give another one | unset |
@@ -350,6 +380,8 @@ If this instance will be reachable by anyone but you, set `MCP_AUTH_TOKENS` firs
 | `GOV_RECORD_TOKEN_POLICY`, `GOV_REFS_TOKEN_POLICY` | The record token policy (GovernanceParams record and the head of the activity list) and the CrossRefs token policy of the Module-6 deployment | unset |
 | `GOV_PARAMS_ADDRESS`, `GOV_CROSSREFS_ADDRESS`, `GOV_TREASURY_ADDRESS` | The params holder address, the CrossRefs address (the oracle holder) and the treasury holder address. The builders find the params record, the CrossRefs output and the activity list by their tokens | unset |
 | `GOV_PROPOSAL_SPEND_REF`, `GOV_PROPOSAL_MINT_REF`, `GOV_CRITIQUE_SPEND_REF`, `GOV_CRITIQUE_MINT_REF`, `GOV_ENDORSEMENT_SPEND_REF` | The reference-script UTxOs (`<txid>#<index>`) of the five validators; a tool that needs one that is not set names the variable | unset |
+| `VECTOR_MODULE1_MANIFEST` | The Module-1 deployment manifest (`vector-module-deploy/1`, as `Module-1/scripts/identity_deploy.py` writes it): a file path or an https URL (pin a commit, for example a `raw.githubusercontent.com` URL). The claim and challenge tools build against it: the claim and challenge scripts, their reference-script UTxOs, the `cross_refs` and `params` outputs and the protocol parameters. Only a deployment in oracle mode is accepted. The path is checked at startup; the manifest is read at the first call of a tool that needs it, and each reference script is checked against the chain | unset (the claim and challenge tools answer "not configured") |
+| `VECTOR_JURY_MANIFESTS` | The jury deployment manifests (`vector-module1-jury-deployment/1`, as the jury deploy tool writes them): file paths or https URLs, comma-separated, the default deployment first. The juror and jury read tools follow every one. Each manifest's `params_cbor` must give its `params`, its address must be the address of its script hash, its reference script must hold that script on chain, and its identity and Module-1 hashes must match `VECTOR_MODULE1_MANIFEST` and the identity deployment when those are set | unset (the juror and jury tools answer "not configured") |
 | `VECTOR_RATE_LIMIT_PER_MINUTE` | Max tool calls per minute, per identity (min `1`) | `60` |
 | `VECTOR_MCP_SESSION_IDLE_MS` | `/mcp` session idle timeout before the reaper closes it, in ms (min `100`) | `600000` (10 min) |
 | `VECTOR_MCP_SESSION_SWEEP_MS` | How often the `/mcp` idle reaper sweeps, in ms (min `100`) | `60000` (1 min) |

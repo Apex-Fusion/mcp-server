@@ -324,12 +324,12 @@ export interface LegacyDatum {
   registeredAt: bigint;
 }
 
-function credentialOf(x: Data, path: string): Credential {
+export function credentialOf(x: Data, path: string): Credential {
   const index = constrIndex(x, path, 2);
   const [hash] = constrFields(x, path, index, 1);
   return { type: index === 0 ? 'VerificationKey' : 'Script', hash: bytesOf(hash, `${path}.hash`, 28) };
 }
-function credentialData(c: Credential, path: string): Data {
+export function credentialData(c: Credential, path: string): Data {
   return new Constr(c.type === 'VerificationKey' ? 0 : 1, [hexData(c.hash, `${path}.hash`, 28)]);
 }
 

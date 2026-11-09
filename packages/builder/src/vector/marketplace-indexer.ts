@@ -153,7 +153,7 @@ export async function fetchEscrows(buyerPkh: string, opts: Opts = {}): Promise<u
  * POST a JSON payload to a Koios route that answers with a list, and return the list. The failures name the operation and the
  * status only (see readJson): an HTTP error, a body that is not JSON, a body that is not a list.
  */
-async function koiosPostList(koiosUrl: string, route: string, payload: unknown, fetchImpl: typeof fetch, query = ''): Promise<unknown[]> {
+export async function koiosPostList(koiosUrl: string, route: string, payload: unknown, fetchImpl: typeof fetch, query = ''): Promise<unknown[]> {
   const base = koiosUrl.replace(/\/+$/, '');
   const res = await fetchImpl(`${base}/api/v1/${route}${query}`, {
     method: 'POST',

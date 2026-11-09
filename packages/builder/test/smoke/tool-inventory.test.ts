@@ -28,7 +28,8 @@ import { startServer, stopServer, ServerContext } from '../setup.ts';
 // The identity registry slice (did:vector, Part 2 Section 10) took the list from 37 to 62: it removed the legacy register, update
 // and transfer tools and added 14 identity registry, 4 attestation, 2 delegation, 3 vault and 5 marketplace build tools. The Module-6
 // deployment on the identity registry took it to 64: a critique and an endorsement each take a lock and a creation step. One retire
-// tool for both advert layouts took it to 63: vector_build_marketplace_advert_retire also retires a legacy advert.
+// tool for both advert layouts took it to 63: vector_build_marketplace_advert_retire also retires a legacy advert. The Module-1 dispute
+// tools took it to 74: 2 document tools (publish, read), the Module-1 claim and challenge builds, 5 juror builds and 2 jury reads.
 const EXPECTED_TOOLS = [
   'vector_await_transaction',
   'vector_build_attestation_attest',
@@ -39,6 +40,7 @@ const EXPECTED_TOOLS = [
   'vector_build_delegation_undelegate',
   'vector_build_deploy_contract',
   'vector_build_deregister_agent',
+  'vector_build_document_publish',
   'vector_build_identity_adopt',
   'vector_build_identity_change_controller',
   'vector_build_identity_end_subagents',
@@ -54,6 +56,11 @@ const EXPECTED_TOOLS = [
   'vector_build_identity_unsuspend',
   'vector_build_identity_update',
   'vector_build_interact_contract',
+  'vector_build_jury_commit',
+  'vector_build_jury_exit',
+  'vector_build_jury_register',
+  'vector_build_jury_reveal',
+  'vector_build_jury_topup',
   'vector_build_marketplace_accept',
   'vector_build_marketplace_advert_post',
   'vector_build_marketplace_advert_retire',
@@ -63,6 +70,8 @@ const EXPECTED_TOOLS = [
   'vector_build_marketplace_reclaim',
   'vector_build_marketplace_refund_revoked',
   'vector_build_marketplace_release',
+  'vector_build_module1_challenge',
+  'vector_build_module1_claim',
   'vector_build_reputation_stake',
   'vector_build_reputation_stake_open',
   'vector_build_self_improvement_critique',
@@ -81,6 +90,9 @@ const EXPECTED_TOOLS = [
   'vector_dry_run',
   'vector_get_agent_profile',
   'vector_get_balance',
+  'vector_get_document',
+  'vector_get_jury',
+  'vector_get_jury_cases',
   'vector_get_transaction_history',
   'vector_get_utxos',
   'vector_marketplace_get_job',

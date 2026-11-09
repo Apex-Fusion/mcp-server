@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Added
+
+- **Module-1 disputes and the Module-1 jury** (`Module-1/jury/SPEC.md` of vector-agent-modules): 11 tools, 74 in all.
+  - Documents on chain: `vector_build_document_publish` builds a transaction that carries a UTF-8 document as
+    metadata under label 22084 (text chunks of at most 64 bytes, split at character boundaries, no chunk starts with
+    `0x`) and returns the URI `vector-tx:<unpadded base64url transaction id>` and the blake2b-256 hash.
+    `vector_get_document` reads a `vector-tx:` document from Koios (`tx_metadata`) or an https document, and checks
+    an expected hash. When Koios gives no JSON for the label 22084 metadata of a transaction (db-sync leaves out the
+    metadata of some transactions), the reader takes the CBOR form, as the specification says: Koios `tx_cbor`, then
+    Blockfrost `/txs/{hash}/metadata/cbor`. Both forms go through the same checks. `VECTOR_BLOCKFROST_URL` sets the
+    Blockfrost URL (default: the Vector mainnet Blockfrost).
+  - Module-1 in oracle mode: `vector_build_module1_claim` (SubmitClaim) and `vector_build_module1_challenge`
+    (OpenChallenge with MarkChallenged, state PendingOracle) port `build_submit_claim` and `build_open_challenge` of the
+    Python builders: the same datums, token names from the first input in ledger order, reference inputs, window and
+    signer. Without a document hash they read the document from its URI. URIs are at most 64 bytes. The challenge tool
+    warns when the resolution deadline leaves the jury less than 6 h 10 min. The challenge tool finds the claim by its
+    payment credential, as Module-1 does: a claim at an address with a stake part can be challenged (by token name
+    through Koios, or by output reference), and the continuing claim output stays at the address of the claim.
+  - Juror actions: `vector_build_jury_register`, `vector_build_jury_exit` (steps `request` and `exit`),
+    `vector_build_jury_topup`, `vector_build_jury_commit` (it makes the salt when none is given and returns it) and
+    `vector_build_jury_reveal` (it checks the commitment first and carries the juror record as metadata; with
+    `record_in_metadata: false` it builds the reveal without the record, for a record that does not fit, and says to
+    publish the record as a `juror-record` document in the reveal window). They check the rules of the jury contract
+    before they build, and Lucid runs the jury script on each build.
+  - Reads: `vector_get_jury` (deployments, parameters, jurors and when each can vote) and `vector_get_jury_cases`
+    (live cases with ballots, tally, windows, the result of the tally, the claim and evidence URIs from the claim and
+    challenge outputs of the case, and the canonical flag of the dispute from the marketplace indexer's
+    `GET /jury/cases`; filter by claim, challenge or agent).
+  - Document rules: a document with U+0000 or the JSON escape `\u0000` is refused; a reader refuses a type or media
+    type that starts with `0x`.
+  - Configuration: `VECTOR_MODULE1_MANIFEST` (the Module-1 manifest) and `VECTOR_JURY_MANIFESTS` (the jury
+    manifests, comma-separated, the default first), as file paths or https URLs. No defaults: without them the tools
+    say which variable to set. A malformed value stops the start; the manifests are checked against each other and
+    each reference script against the chain at the first call of a tool that needs them.
+
 ### Fixed
 
 - `vector_dry_run` of a given transaction (`txCbor`) shows the fee that the transaction declares. It showed
