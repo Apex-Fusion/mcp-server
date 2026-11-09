@@ -18,6 +18,7 @@ import { registerSelfImprovementTools } from './self-improvement.js';
 import { registerMarketplaceTools } from './marketplace.js';
 import { registerReputationTools } from './reputation-tools.js';
 import { registerIdentityFamily } from './identity-family.js';
+import { registerJuryFamily } from './jury-family.js';
 import type { VectorDryRunResult } from '@apexfusion/vector-mcp-shared/types';
 import {
   lucidForAddress, buildSendApex, buildSendTokens, buildMultiOutput,
@@ -710,6 +711,9 @@ ${txList}
 
   // Identity registry, attestation, delegation and vault build tools (did:vector): identity-family.ts is the entry
   registerIdentityFamily(server, identity);
+
+  // Module-1 dispute tools (documents on chain, claims, challenges, juror actions, jury reads): jury-family.ts is the entry
+  registerJuryFamily(server, identity);
 
   // Self-Improvement Module tools (Module 6)
   registerSelfImprovementTools(server, identity);

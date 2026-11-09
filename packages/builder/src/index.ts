@@ -32,6 +32,7 @@ import { intEnv } from "./env.js";
 import { RATE_LIMIT_PER_MINUTE } from "./vector/rate-limiter.js";
 import { describeDeployment, serverIdentityDeployment } from "./vector/identity-deployment.js";
 import { describeGovDeployment, serverGovDeployment } from "./vector/gov-deployment.js";
+import { describeJurySources, serverJurySources } from "./vector/jury-deployment.js";
 // Single source of truth for the advertised server version. tsup/esbuild
 // resolves this named JSON import at build time and inlines only the field,
 // so the built artifact has no runtime dependency on package.json's location.
@@ -117,6 +118,9 @@ console.error(
 console.error(`Identity registry: ${describeDeployment(serverIdentityDeployment())}`);
 // The Module-6 deployment on the identity registry (GOV_*): read once, here, for the same reason.
 console.error(`Module-6: ${describeGovDeployment(serverGovDeployment())}`);
+// The Module-1 and jury manifests (VECTOR_MODULE1_MANIFEST, VECTOR_JURY_MANIFESTS): parsed once, here; a malformed value stops the
+// start. The manifests themselves are read and checked against the chain at the first call of a tool that needs them.
+console.error(`Module-1 disputes: ${describeJurySources(serverJurySources())}`);
 
 /**
  * Closes a /mcp session and drains it from every map, from any trigger other
