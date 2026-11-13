@@ -2,9 +2,12 @@
 // Keyless builders of the two Module-1 actions that start a dispute, for the deployment in oracle mode (Module-1/jury/SPEC.md
 // Section 1): SubmitClaim and OpenChallenge. They port build_submit_claim and build_open_challenge of the Python builders
 // (Module-1/simulation/tx_builder.py): the same datums, token names, reference inputs, validity window and required signer. The
-// wallet inputs are chosen as Python chooses them (jury-chain.ts module1Inputs) and the build adds no other input, so the first input
-// in ledger order, which names the new token, is known before the build. Lucid runs the deployed scripts of the reference inputs on
-// the transaction (local evaluation), so a build that completes passes them, minus the signatures. Nothing is signed or submitted.
+// wallet inputs are chosen as Python chooses them (jury-chain.ts module1Inputs). They hold the stake and MODULE1_FEE_BUFFER for the
+// fee and the change, so Lucid's coin selection adds no input (it takes the kept collateral output only when the change needs more
+// than the buffer leaves), and the first input in ledger order, which names the new token, is known before the build; each build
+// checks it again. Coin selection stays on because Lucid adds the fee of the reference scripts only on that path: without it a script
+// that only the mint uses is not paid, and the node refuses the transaction. Lucid runs the deployed scripts of the reference inputs
+// on the transaction (local evaluation), so a build that completes passes them, minus the signatures. Nothing is signed or submitted.
 import type { LucidEvolution, Provider, UTxO } from '@lucid-evolution/lucid';
 import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
 import {
@@ -131,7 +134,7 @@ export async function buildSubmitClaim(ctx: Module1Context, p: SubmitClaimParams
     .addSignerKey(wallet.keyHash)
     .validFrom(window.lo)
     .validTo(window.hi)
-    .complete({ coinSelection: false });
+    .complete();
   const result = signedByResult(completed, window, signers, wallet.keyHash);
   const first = firstInput(result.txCbor);
   if (ledgerOrder(first, seed) !== 0) throw new Error(`The built transaction spends ${refText(first)} before the seed ${refText(seed)}, so the claim token would have another name; nothing is returned.`);
@@ -259,7 +262,7 @@ export async function buildOpenChallenge(ctx: Module1Context, p: OpenChallengePa
     .addSignerKey(wallet.keyHash)
     .validFrom(window.lo)
     .validTo(window.hi)
-    .complete({ coinSelection: false });
+    .complete();
   const result = signedByResult(completed, window, signers, wallet.keyHash);
   const first = firstInput(result.txCbor);
   if (ledgerOrder(first, seed) !== 0) throw new Error(`The built transaction spends ${refText(first)} before the seed ${refText(seed)}, so the challenge token would have another name; nothing is returned.`);

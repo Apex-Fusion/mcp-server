@@ -4,7 +4,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML, credentialToAddress, validatorToScriptHash } from '@lucid-evolution/lucid';
-import type { UTxO } from '@lucid-evolution/lucid';
+import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
 import { lucidForAddress } from '../src/vector/build.ts';
 import { buildOpenChallenge, buildSubmitClaim, defaultChallengeWindow, findClaim } from '../src/vector/module1-build.ts';
 import { SUBMIT_CLAIM_REDEEMER, TOKEN_PREFIX, decodeChallengeDatum, decodeClaimDatum, encodeClaimDatum, seedTokenName } from '../src/vector/jury-codec.ts';
@@ -28,6 +28,40 @@ function outputsOf(txCbor: string) {
     const o = outputs.get(i);
     return { address: o.address().to_bech32(), lovelace: o.amount().coin(), datum: o.datum()?.as_datum()?.to_cbor_hex() ?? null };
   });
+}
+
+/**
+ * The Conway minimum fee of a built transaction with the signature of the wallet key added: the size fee, the price of the execution
+ * units, and the price of each byte of the reference scripts that its reference inputs and its inputs hold. `referenceScriptBytes` is
+ * that number of bytes. The node refuses a transaction with a smaller fee (Ogmios error 3122).
+ */
+async function minimumFee(provider: FixtureProvider, lucid: LucidEvolution, txCbor: string): Promise<{ fee: bigint; referenceScriptBytes: number }> {
+  const pp = lucid.config().protocolParameters;
+  assert.ok(pp, 'the fixture provider gives the protocol parameters');
+  const tx = CML.Transaction.from_cbor_hex(txCbor);
+  const body = tx.body();
+  // A signature of a throwaway key has the size of the signature of the wallet key.
+  const witnesses = tx.witness_set();
+  const vkeys = CML.VkeywitnessList.new();
+  vkeys.add(CML.make_vkey_witness(CML.hash_transaction(body), CML.PrivateKey.generate_ed25519()));
+  witnesses.set_vkeywitnesses(vkeys);
+  const size = CML.Transaction.new(body, witnesses, true, tx.auxiliary_data()).to_cbor_bytes().length;
+  const redeemers = tx.witness_set().redeemers()?.to_flat_format();
+  let mem = 0n;
+  let steps = 0n;
+  for (let i = 0; i < (redeemers?.len() ?? 0); i++) {
+    mem += redeemers!.get(i).ex_units().mem();
+    steps += redeemers!.get(i).ex_units().steps();
+  }
+  // The prices are decimal fractions with at most 7 places (577/10000 and 721/10000000 on Vector): integer arithmetic keeps the ceiling exact.
+  const scale = 10_000_000n;
+  const execution = (mem * BigInt(Math.round(pp.priceMem * Number(scale))) + steps * BigInt(Math.round(pp.priceStep * Number(scale))) + scale - 1n) / scale;
+  const refsOf = (list: CML.TransactionInputList | undefined) => Array.from({ length: list?.len() ?? 0 }, (_, i) => ({ txHash: list!.get(i).transaction_id().to_hex(), outputIndex: Number(list!.get(i).index()) }));
+  const utxos = await provider.getUtxosByOutRef([...refsOf(body.reference_inputs()), ...refsOf(body.inputs())]);
+  const referenceScriptBytes = utxos.reduce((sum, u) => sum + (u.scriptRef ? u.scriptRef.script.length / 2 : 0), 0);
+  assert.ok(referenceScriptBytes <= 25_600, 'above 25,600 bytes the ledger raises the price of each further tier of bytes by 1.2');
+  const fee = BigInt(pp.minFeeA) * BigInt(size) + BigInt(pp.minFeeB) + execution + BigInt(pp.minFeeRefScriptCostPerByte) * BigInt(referenceScriptBytes);
+  return { fee, referenceScriptBytes };
 }
 
 describe('the fixture scripts are the mainnet Module-1 scripts', () => {
@@ -61,6 +95,15 @@ describe('buildSubmitClaim (real claim validator)', () => {
     const refTxs = Array.from({ length: refs.len() }, (_, i) => `${refs.get(i).transaction_id().to_hex()}#${refs.get(i).index()}`);
     for (const ref of [MODULE1.claim.ref, MODULE1.crossRefs, MODULE1.params]) assert.ok(refTxs.includes(`${ref.txHash}#${ref.outputIndex}`));
     assert.equal(body.inputs().len(), 3, 'every wallet output but the collateral is spent');
+  });
+
+  test('the fee pays for the claim script, which only the mint uses', async () => {
+    const provider = juryWorld();
+    const lucid = await lucidForAddress(provider, WALLET_ADDRESS);
+    const r = await buildSubmitClaim({ lucid, provider, module1: MODULE1 }, claimParams());
+    const minimum = await minimumFee(provider, lucid, r.txCbor);
+    assert.equal(minimum.referenceScriptBytes, CLAIM_SCRIPT.script.length / 2);
+    assert.ok(BigInt(r.fee) >= minimum.fee, `the fee ${r.fee} is below the ledger minimum ${minimum.fee}`);
   });
 
   test('a 30-minute window and a stake above the minimum are accepted', async () => {
@@ -122,6 +165,15 @@ describe('buildOpenChallenge (real challenge and claim validators)', () => {
     assert.equal(outputs[r.claimOutputIndex].lovelace, 50_000_000n);
     assert.equal(r.deadline, ch.challengedAt + 72 * HOUR);
     assert.ok(r.validTo <= decodeClaimDatum(claim.datum!).submittedAt + 4 * HOUR - 1000);
+  });
+
+  test('the fee pays for the claim script and for the challenge script, which only the mint uses', async () => {
+    const provider = juryWorld([claimUtxo(claimToken)]);
+    const lucid = await lucidForAddress(provider, WALLET_ADDRESS);
+    const r = await buildOpenChallenge({ lucid, provider, module1: MODULE1 }, params());
+    const minimum = await minimumFee(provider, lucid, r.txCbor);
+    assert.equal(minimum.referenceScriptBytes, (CLAIM_SCRIPT.script.length + CHALLENGE_SCRIPT.script.length) / 2);
+    assert.ok(BigInt(r.fee) >= minimum.fee, `the fee ${r.fee} is below the ledger minimum ${minimum.fee}`);
   });
 
   test('the claim can be named by its output reference', async () => {
@@ -243,7 +295,7 @@ describe('the Module-1 claim validator runs on every build', () => {
       .addSignerKey(WALLET.keyHash)
       .validFrom(window.lo)
       .validTo(window.hi)
-      .complete({ coinSelection: false });
+      .complete();
     await assert.rejects(claim(50_000_001n));
     assert.ok((await claim(50_000_000n)).toHash());
   });
