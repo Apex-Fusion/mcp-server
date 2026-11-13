@@ -107,9 +107,10 @@ export function firstInput(txCbor: string): OutRef {
 
 /**
  * The wallet inputs of a Module-1 build, chosen as the Python builders choose them (get_wallet_utxos_no_collateral): every wallet output
- * but one kept for the collateral (the smallest pure-AP3X output of at least 5 AP3X). The build then spends exactly these, with no
- * coin selection, so its first input in ledger order (which names the new token) is known before the build. When the other outputs
- * hold less than `need`, or there is no other output, the collateral output is spent too (the collateral may also be an input).
+ * but one kept for the collateral (the smallest pure-AP3X output of at least 5 AP3X). The build collects exactly these. They hold
+ * `need`, or they are the whole wallet, so Lucid's coin selection adds no input for the stake and the fee, and the first input in
+ * ledger order (which names the new token) is known before the build. When the other outputs hold less than `need`, or there is no
+ * other output, the collateral output is spent too (the collateral may also be an input).
  */
 export function module1Inputs(utxos: UTxO[], need: bigint): UTxO[] {
   const collateral = utxos

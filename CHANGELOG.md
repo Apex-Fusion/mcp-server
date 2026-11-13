@@ -39,6 +39,14 @@
 
 ### Fixed
 
+- `vector_build_module1_claim` and `vector_build_module1_challenge` pay the fee of the reference scripts
+  (15 lovelace for each byte of each reference script in the transaction). Their fee was below the ledger minimum:
+  by 0.107295 AP3X for a claim (the claim script) and by 0.185145 AP3X for a challenge (the challenge script), because
+  the fee of a reference script that only the mint uses was not added. The node refused each transaction that was
+  signed as built (Ogmios error 3122, "Insufficient fee"). The builds now complete with the coin selection of Lucid,
+  which adds this fee. The wallet inputs do not change. A challenge pays about 0.107 AP3X above the minimum, because
+  the fee counts the claim script two times: as a reference script, and as the script of the claim output that the
+  transaction spends.
 - `vector_dry_run` of a given transaction (`txCbor`) shows the fee that the transaction declares. It showed
   0 AP3X. A `txCbor` that does not decode as a transaction is refused before the evaluation.
 - `vector_get_agent_profile` of a canonical DID shows as "Registered" the block time of the transaction that first
