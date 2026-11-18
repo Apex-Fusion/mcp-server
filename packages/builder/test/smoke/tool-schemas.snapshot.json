@@ -2722,67 +2722,234 @@
     }
   },
   "vector_build_reputation_stake": {
-    "description": "The current Module-3 deployment takes no new stakes. New stakes use the new Module-3 deployment, which is published after the identity release. Until then this tool refuses and builds nothing. It builds step 2 of 2 of your agent's reputation self-stake on Vector: an UNSIGNED transaction that consumes the opening output from vector_build_reputation_stake_open, mints the agent's stake token and locks the module's minimum self-stake (read from the module's parameters on the ledger) behind the named capabilities, with your key as its owner. Takes no key material.",
+    "description": "Build step 2 of 2 of an agent's Module-3 reputation self-stake (CreateStake): an UNSIGNED transaction that consumes the opening output from vector_build_reputation_stake_open, mints the agent's stake token and locks the stake behind the named capabilities. The stake is at least the module minimum (read from the module's parameters: 10 AP3X); amount locks more. The owner of the stake is owner_key_hash when you pass it, else the owner key that step 1 named in the opening output, which the record must declare now. The validator reads the owner of the stake, not the owner in the opening output, so the answer says when the stake gets another owner than the opening output names. The agent's controller key and the owner key sign, and the wallet pays the fee; the build lists each key hash with its role. The stake time (last_updated) is the end of the validity window, and the stake can be decreased or its capabilities changed one cooldown after it (stake_cooldown, 24 h in the deployed parameters). The owner cannot withdraw the module minimum. Each agent has one stake through these tools: a second create is refused, and the refusal names the stake and vector_build_reputation_stake_increase. Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "The SAME owner wallet address used in step 1. Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
-        "agent_id": {
-          "description": "Agent DID in the legacy registry form: did:vector:agent:{policyId}:{nftAssetName}",
-          "type": "string"
+        "did": {
+          "description": "The DID of the agent that stakes: its identity DID, did:vector:<64 hex>. A DID of the legacy registry is refused: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
         },
         "capabilities": {
-          "description": "Capabilities to stake on: each must be one the agent's registry record lists, exactly (vector_get_agent_profile shows them); for a supplier, the capability_id of its advert",
+          "description": "Capabilities to stake on, as text: each must be one that the agent's identity record lists, byte for byte (vector_get_agent_profile shows them); for a supplier, the capability_id of its advert",
           "minItems": 1,
+          "maxItems": 16,
           "type": "array",
           "items": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 64
           }
         },
         "opening_ref": {
-          "description": "The CONFIRMED opening output '<txid>#0' that vector_build_reputation_stake_open returned",
+          "description": "The CONFIRMED opening output '<txid>#<index>' that vector_build_reputation_stake_open returned",
           "type": "string"
+        },
+        "owner_key_hash": {
+          "description": "The owner of the stake: a key that the agent's record declares (its controller key, or a listed key with the transaction purpose); it signs. Default: the owner key that the opening output names, when the record declares that key now",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{56}$"
+        },
+        "amount": {
+          "description": "The stake to lock: at least the module minimum, which is the default, in AP3X",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
         "changeAddress",
-        "agent_id",
+        "did",
         "capabilities",
         "opening_ref"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
-  "vector_build_reputation_stake_open": {
-    "description": "The current Module-3 deployment takes no new stakes. New stakes use the new Module-3 deployment, which is published after the identity release. Until then this tool refuses and builds nothing. It builds step 1 of 2 of a reputation self-stake for your registered agent on Vector: an UNSIGNED transaction that locks a 2-unit opening output at the reputation (Module-3) validator, naming the agent and the capabilities to stake on; step 2 is vector_build_reputation_stake. Takes no key material.",
+  "vector_build_reputation_stake_decrease": {
+    "description": "Build an UNSIGNED transaction that takes AP3X out of an agent's Module-3 stake (DecreaseStake), down to the module minimum. The cooldown of the stake (stake_cooldown, 24 h in the deployed parameters, counted from its last_updated) must be over, and no open challenge may lock the stake. The AP3X are paid to the stake's owner key while the agent's record still declares it, else to the agent's controller key; the result names the payee. Only the agent's controller key signs (besides the wallet): the owner key need not. The record can have any status, so a revoked or retired agent can exit. The owner cannot withdraw the module minimum. Name the stake with stake_ref when the agent has more than one. Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "changeAddress": {
-          "description": "The agent owner's wallet address (the wallet that registered the agent). Get it from vector_signer_get_address.",
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
           "type": "string"
         },
-        "agent_id": {
-          "description": "Agent DID in the legacy registry form: did:vector:agent:{policyId}:{nftAssetName}",
+        "did": {
+          "description": "The DID of the agent that stakes: its identity DID, did:vector:<64 hex>. A DID of the legacy registry is refused: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "amount": {
+          "description": "The AP3X to take out of the stake (the stake keeps at least the module minimum), in AP3X",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "stake_ref": {
+          "description": "The stake output '<txid>#<index>' to act on. Needed only when the agent has more than one stake",
           "type": "string"
         },
-        "capabilities": {
-          "description": "Capabilities to stake on: each must be one the agent's registry record lists, exactly (vector_get_agent_profile shows them); for a supplier, the capability_id of its advert",
-          "minItems": 1,
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
         }
       },
       "required": [
         "changeAddress",
-        "agent_id",
+        "did",
+        "amount"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_reputation_stake_increase": {
+    "description": "Build an UNSIGNED transaction that adds AP3X to an agent's Module-3 stake (IncreaseStake). The stake keeps its capabilities and its challenge locks and records a new last_updated (the end of the validity window). No cooldown applies. The agent's record must be Active and list each capability that the stake backs now; the agent's controller key and the stake's owner key sign, and the wallet pays the AP3X and the fee. Name the stake with stake_ref when the agent has more than one. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent that stakes: its identity DID, did:vector:<64 hex>. A DID of the legacy registry is refused: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "amount": {
+          "description": "The AP3X to add to the stake, in AP3X",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "stake_ref": {
+          "description": "The stake output '<txid>#<index>' to act on. Needed only when the agent has more than one stake",
+          "type": "string"
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did",
+        "amount"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_reputation_stake_open": {
+    "description": "Build step 1 of 2 of an agent's Module-3 reputation self-stake: an UNSIGNED transaction that locks an opening output at the reputation validator, naming the agent and the capabilities to stake on. The agent is an identity DID (did:vector:<64 hex>) whose record is Active and lists each capability; the owner key (default your wallet key) must be the record's controller key or a key it lists with the transaction purpose. It refuses when the agent already has a stake, and it checks that your wallet can pay step 2. It also refuses when an opening output that names the agent is already at the reputation address: step 2 can spend any of them with any owner key that the record declares, and the refusal lists them with their AP3X and owner (at most 5, those whose owner the record declares first). allow_second_opening builds a new opening output all the same. Only the wallet signs, and no script runs in this step. Only step 2 (vector_build_reputation_stake) can spend the opening output: it needs the agent's controller key and the owner key to sign, and the record must be Active. When step 2 never runs, the opening output stays locked. The answer names the owner_key_hash and the amount to pass to step 2. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent that stakes: its identity DID, did:vector:<64 hex>. A DID of the legacy registry is refused: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "capabilities": {
+          "description": "Capabilities to stake on, as text: each must be one that the agent's identity record lists, byte for byte (vector_get_agent_profile shows them); for a supplier, the capability_id of its advert",
+          "minItems": 1,
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "owner_key_hash": {
+          "description": "The owner credential of the stake: a key that the agent's record declares (its controller key, or a listed key with the transaction purpose); it signs. Default your wallet key: a key hash, 56 hex characters",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{56}$"
+        },
+        "amount": {
+          "description": "The stake that step 2 will lock; only used to check that the wallet can pay it (default the module minimum, 10 AP3X), in AP3X",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "allow_second_opening": {
+          "description": "Build a new opening output although one that names the agent is already at the reputation address. Use it only when step 2 cannot use the one that exists; each opening output locks its AP3X until a CreateStake spends it. Default false: the tool refuses and lists the opening outputs",
+          "type": "boolean"
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did",
+        "capabilities"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_build_reputation_stake_update_capabilities": {
+    "description": "Build an UNSIGNED transaction that replaces the capabilities that an agent's Module-3 stake backs (UpdateCapabilities). Each new capability must be one that the agent's record lists; the list cannot be empty. The cooldown of the stake (stake_cooldown, 24 h in the deployed parameters, counted from its last_updated) must be over, and no open challenge may lock the stake. Naming the same list again is allowed: it only records a new last_updated. The agent's controller key and the stake's owner key sign, and the wallet pays the fee. Name the stake with stake_ref when the agent has more than one. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "did": {
+          "description": "The DID of the agent that stakes: its identity DID, did:vector:<64 hex>. A DID of the legacy registry is refused: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "capabilities": {
+          "description": "Capabilities to stake on, as text: each must be one that the agent's identity record lists, byte for byte (vector_get_agent_profile shows them); for a supplier, the capability_id of its advert",
+          "minItems": 1,
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "stake_ref": {
+          "description": "The stake output '<txid>#<index>' to act on. Needed only when the agent has more than one stake",
+          "type": "string"
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "did",
         "capabilities"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
@@ -3563,6 +3730,30 @@
           "maxLength": 256
         }
       },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_get_reputation_stake": {
+    "description": "Read the Module-3 reputation stakes of 1 to 50 agents (identity DIDs) from the chain, with one indexer call. For each agent it lists each stake (output reference, stake_amount, staked capabilities, last_updated, number of challenge locks, stake_id, the AP3X in the output, owner key) and the sum of stake_amount; an agent with no stake has the sum 0. The sum counts stake_amount, which can be less than the AP3X in the output. An agent can have more than one stake. Read-only, no wallet needed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dids": {
+          "description": "The agents: 1 to 50 identity DIDs (did:vector:<64 hex>)",
+          "minItems": 1,
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "description": "The DID of an agent whose stakes to read: did:vector:<64 hex> (the bare 64-hex identifier also works)",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      },
+      "required": [
+        "dids"
+      ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },

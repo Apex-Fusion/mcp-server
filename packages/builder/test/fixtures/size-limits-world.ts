@@ -1,6 +1,6 @@
 // packages/builder/test/fixtures/size-limits-world.ts
 //
-// The world of input-size-limits.test.ts: the 74 tools of registerVectorTools behind an MCP client in the same process, a node that
+// The world of input-size-limits.test.ts: the 78 tools of registerVectorTools behind an MCP client in the same process, a node that
 // answers at once (no network, no wait), the texts that a caller can send, and the walk over the input schema of each tool that finds
 // every string input. The schema snapshot (test/smoke/tool-schemas.snapshot.json) is the list of tools and inputs.
 import './size-limits-env.ts'; // first: it sets the environment before the modules of the builder are loaded
@@ -134,7 +134,7 @@ function sampleString(name: string, schema: Schema, world: { txCbor: string }): 
   else if (/^(?:signer|author|delegator_signer)$/.test(name)) text = 'controller';
   else if (name === 'amount') text = '10';
   else if (name === 'metadata') text = '{"674":{"msg":["a note"]}}';
-  else if (/^(?:did|agent|agent_id|agentDid|delegate|delegator|owner_did|successor|parent|juror|case|claim|challenge|issuer_did|subject|proposerDid)$/.test(name)) text = DID;
+  else if (/^(?:did|dids|agent|agent_id|agentDid|delegate|delegator|owner_did|successor|parent|juror|case|claim|challenge|issuer_did|subject|proposerDid)$/.test(name)) text = DID;
   else if (name === 'jury') text = HEX56;
   else if (/uri$|url$|^locator$/i.test(name)) text = 'https://example.com/a';
   else if (/signature$/.test(name)) text = 'ab'.repeat(64);

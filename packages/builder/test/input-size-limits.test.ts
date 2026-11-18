@@ -32,14 +32,17 @@ const describeProbe = (p: Probe): string => `${p.input} with ${p.shape}, ${p.len
 /**
  * The tools that the configuration of this world does not reach: the jury and Module-1 manifests name the identity registry of mainnet, and
  * the server refuses them next to the identity registry of the fixtures (size-limits-world.ts). Their only string input without a bound in
- * the schema is the change address, and jury-tools.test.ts gives it a text of 131,072 characters in each of them.
+ * the schema is the change address, and jury-tools.test.ts gives it a text of 131,072 characters in each of them. The reputation build tools
+ * are the same: the reputation validator reads the identity registry of mainnet, and the server refuses them next to the one of the fixtures.
+ * Their strings without a bound in the schema are the change address and the references of a stake (`opening_ref`, `stake_ref`), and
+ * reputation-tools.test.ts gives each of them a text of 131,072 characters in each shape, in each of these tools.
  */
-const NOT_CONFIGURED = /^vector_(?:build_jury_|build_module1_|get_jury)/;
+const NOT_CONFIGURED = /^vector_(?:build_jury_|build_module1_|get_jury|build_reputation_stake)/;
 
 describe('the tools of the snapshot', () => {
   test('are the tools that the server registers', async () => {
     assert.deepEqual((await world.tools()).sort(), Object.keys(SNAPSHOT).sort());
-    assert.equal(Object.keys(SNAPSHOT).length, 74);
+    assert.equal(Object.keys(SNAPSHOT).length, 78);
   });
 
   test('are all answered by the tool itself for valid values: the configuration, the rate limit and the input schema do not stop a call', async () => {

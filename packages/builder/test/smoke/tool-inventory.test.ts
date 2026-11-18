@@ -29,7 +29,9 @@ import { startServer, stopServer, ServerContext } from '../setup.ts';
 // and transfer tools and added 14 identity registry, 4 attestation, 2 delegation, 3 vault and 5 marketplace build tools. The Module-6
 // deployment on the identity registry took it to 64: a critique and an endorsement each take a lock and a creation step. One retire
 // tool for both advert layouts took it to 63: vector_build_marketplace_advert_retire also retires a legacy advert. The Module-1 dispute
-// tools took it to 74: 2 document tools (publish, read), the Module-1 claim and challenge builds, 5 juror builds and 2 jury reads.
+// tools took it to 74: 2 document tools (publish, read), the Module-1 claim and challenge builds, 5 juror builds and 2 jury reads. The
+// reputation stake tools on the identity-era Module-3 deployment took it to 78: the increase, capability update and decrease builds and
+// the read of stakes (the two steps that make a stake were already tools).
 const EXPECTED_TOOLS = [
   'vector_await_transaction',
   'vector_build_attestation_attest',
@@ -73,7 +75,10 @@ const EXPECTED_TOOLS = [
   'vector_build_module1_challenge',
   'vector_build_module1_claim',
   'vector_build_reputation_stake',
+  'vector_build_reputation_stake_decrease',
+  'vector_build_reputation_stake_increase',
   'vector_build_reputation_stake_open',
+  'vector_build_reputation_stake_update_capabilities',
   'vector_build_self_improvement_critique',
   'vector_build_self_improvement_critique_spend',
   'vector_build_self_improvement_endorse',
@@ -93,6 +98,7 @@ const EXPECTED_TOOLS = [
   'vector_get_document',
   'vector_get_jury',
   'vector_get_jury_cases',
+  'vector_get_reputation_stake',
   'vector_get_transaction_history',
   'vector_get_utxos',
   'vector_marketplace_get_job',
