@@ -132,6 +132,55 @@ export function formatServiceError(
   return `${service} request failed (${operation}): ${status}${statusText ? ` ${statusText}` : ''}`;
 }
 
+/** The most characters of JSON text that an OgmiosRpcError keeps of the `data` of the error of the node. */
+export const OGMIOS_ERROR_DATA_LIMIT = 32_768;
+
+/**
+ * The largest `data` that OgmiosProvider reads from an error of the node: the lengths of all its strings and keys, and one for each
+ * value, add up to at most this number (an estimate of the size of its JSON text). A larger `data` is dropped. The provider stops
+ * reading at the first excess, so a large answer costs a bounded amount, whatever its size.
+ */
+export const OGMIOS_ERROR_DATA_INPUT_LIMIT = 131_072;
+
+/** The most levels of arrays and objects in the `data` of an error of the node that OgmiosProvider reads. A deeper `data` is dropped. */
+export const OGMIOS_ERROR_DATA_DEPTH_LIMIT = 32;
+
+/**
+ * The JSON-RPC error that Ogmios answered with, `{ error: { code, message, data? } }`, in an answer whose HTTP status is not OK or in an
+ * answer that is OK. OgmiosProvider throws it where it threw a plain Error of the same message: `message` is that message, byte for
+ * byte (formatServiceError), so a caller that catches Error sees no change. The other fields hold what the node said, and nothing of
+ * the request or of the endpoint. `method` is the name of the JSON-RPC method. `code` and `rpcMessage` are the node's own, with URL-shaped
+ * text and the hosts that this provider is configured with removed from `rpcMessage` (scrubUrls does the same for a submission
+ * rejection). An evaluation of a transaction whose scripts fail is answered with HTTP 400 and the code 3010, and `data` lists each
+ * validator with its own error.
+ *
+ * `data` is the `data` of the node's error as JSON text, in one of three states. `undefined`: the node sent no `data`. A text of at
+ * most OGMIOS_ERROR_DATA_LIMIT characters: the same removal is made in each string and in each key of the data before the text is
+ * made, so the text is JSON (keys that are equal after the removal are one key, and the last value stays); `dataTruncated` says that
+ * the text was cut, and a cut text is no longer JSON. `null`: the provider dropped the `data`, and `dataDropped` is true. It drops a
+ * `data` that is larger than OGMIOS_ERROR_DATA_INPUT_LIMIT or deeper than OGMIOS_ERROR_DATA_DEPTH_LIMIT levels, and a `data` for
+ * which anything fails while the text is made (a cycle, a getter that throws, a value that has no JSON text). A failure with the data
+ * never replaces the error: the same OgmiosRpcError comes, with the same `message`, and `data` is null.
+ */
+export class OgmiosRpcError extends Error {
+  readonly method: string;
+  readonly code: number;
+  readonly rpcMessage: string;
+  readonly data: string | null | undefined;
+  readonly dataTruncated: boolean;
+  readonly dataDropped: boolean;
+  constructor(message: string, method: string, code: number, rpcMessage: string, data: string | null | undefined, dataTruncated: boolean) {
+    super(message);
+    this.name = 'OgmiosRpcError';
+    this.method = method;
+    this.code = code;
+    this.rpcMessage = rpcMessage;
+    this.data = data;
+    this.dataTruncated = dataTruncated;
+    this.dataDropped = data === null;
+  }
+}
+
 // Longest caller-visible submission-rejection body returned verbatim (after
 // scrubbing) - bounds how much of a large upstream error page (some
 // reverse proxies return full HTML) ends up in a tool response.
@@ -167,7 +216,22 @@ function escapeRegExp(s: string): string {
  * rationale as parseSubmitResponse above.
  */
 export function scrubUrls(text: string, knownHosts: string[] = []): string {
-  let scrubbed = text.replace(/https?:\/\/\S+/gi, '[endpoint]');
+  return cutScrubbed(removeEndpoints(text, endpointPatterns(knownHosts)));
+}
+
+/** `scrubbed` cut at MAX_SCRUBBED_LENGTH characters: what scrubUrls does after it removes the endpoints. */
+function cutScrubbed(scrubbed: string): string {
+  return scrubbed.length > MAX_SCRUBBED_LENGTH
+    ? `${scrubbed.slice(0, MAX_SCRUBBED_LENGTH)} [truncated]`
+    : scrubbed;
+}
+
+/**
+ * The patterns that remove the endpoints from a text: every http(s) URL, and each host of `knownHosts` with or without a scheme.
+ * They are built once and serve any number of texts (removeEndpoints).
+ */
+function endpointPatterns(knownHosts: string[]): RegExp[] {
+  const patterns = [/https?:\/\/\S+/gi];
   for (const host of knownHosts) {
     if (!host) continue;
     let hostname = host;
@@ -177,11 +241,67 @@ export function scrubUrls(text: string, knownHosts: string[] = []): string {
       // Not a full URL - treat the value itself as the bare hostname.
     }
     if (!hostname) continue;
-    scrubbed = scrubbed.replace(new RegExp(escapeRegExp(hostname), 'gi'), '[endpoint]');
+    patterns.push(new RegExp(escapeRegExp(hostname), 'gi'));
   }
-  return scrubbed.length > MAX_SCRUBBED_LENGTH
-    ? `${scrubbed.slice(0, MAX_SCRUBBED_LENGTH)} [truncated]`
-    : scrubbed;
+  return patterns;
+}
+
+/** `text` without what `patterns` (endpointPatterns) match. */
+function removeEndpoints(text: string, patterns: RegExp[]): string {
+  let scrubbed = text;
+  for (const pattern of patterns) scrubbed = scrubbed.replace(pattern, '[endpoint]');
+  return scrubbed;
+}
+
+/**
+ * Is `value` (the `data` of an error of the node) within OGMIOS_ERROR_DATA_DEPTH_LIMIT levels and OGMIOS_ERROR_DATA_INPUT_LIMIT
+ * characters? It stops at the first excess, so its cost has a bound whatever the size of `value`, and a cycle is too deep.
+ */
+function withinErrorDataLimits(value: unknown): boolean {
+  let left = OGMIOS_ERROR_DATA_INPUT_LIMIT;
+  const visit = (node: unknown, level: number): boolean => {
+    left -= 1;
+    if (typeof node === 'string') left -= node.length;
+    else if (typeof node === 'object' && node !== null) {
+      if (level >= OGMIOS_ERROR_DATA_DEPTH_LIMIT) return false;
+      if (Array.isArray(node)) {
+        for (const child of node) if (!visit(child, level + 1)) return false;
+      } else {
+        for (const key of Object.keys(node)) {
+          left -= key.length;
+          if (!visit(Reflect.get(node, key), level + 1)) return false;
+        }
+      }
+    }
+    return left >= 0;
+  };
+  return visit(value, 0);
+}
+
+/**
+ * The `data` of an error of the node as OgmiosRpcError keeps it (see there): JSON text with the endpoints removed from every string and
+ * every key, cut at OGMIOS_ERROR_DATA_LIMIT. Each string and key is scrubbed alone, because the URL pattern runs to the next space, and
+ * in compact JSON text that is the end of the text. `data` is undefined when the node sent none, and null when the data is dropped.
+ * It never throws.
+ */
+function keptErrorData(error: unknown, patterns: RegExp[]): { data: string | null | undefined; truncated: boolean } {
+  try {
+    const raw = fieldOf(error, 'data');
+    if (raw === undefined) return { data: undefined, truncated: false };
+    if (!withinErrorDataLimits(raw)) return { data: null, truncated: false };
+    const text = JSON.stringify(raw, (_key, value) => {
+      if (typeof value === 'string') return removeEndpoints(value, patterns);
+      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        return Object.fromEntries(Object.entries(value).map(([key, child]) => [removeEndpoints(key, patterns), child]));
+      }
+      return value;
+    });
+    return text.length > OGMIOS_ERROR_DATA_LIMIT
+      ? { data: text.slice(0, OGMIOS_ERROR_DATA_LIMIT), truncated: true }
+      : { data: text, truncated: false };
+  } catch {
+    return { data: null, truncated: false };
+  }
 }
 
 /**
@@ -264,6 +384,22 @@ export class OgmiosProvider implements Provider {
   }
 
   /**
+   * The error that rpc() throws for an error of the node: an OgmiosRpcError when `body` (the answer, parsed) holds `{ error: { code,
+   * message } }` with a numeric code and a text message, else a plain Error. `message` is the sanitised summary in both cases. The
+   * patterns that remove the endpoints are built once for the whole error. What goes wrong with the `data` never replaces the error:
+   * the OgmiosRpcError has `data` null then (keptErrorData).
+   */
+  private rpcError(message: string, method: string, body: unknown): Error {
+    const error = fieldOf(body, 'error');
+    const code = fieldOf(error, 'code');
+    const rpcMessage = fieldOf(error, 'message');
+    if (typeof code !== 'number' || !Number.isFinite(code) || typeof rpcMessage !== 'string') return new Error(message);
+    const patterns = endpointPatterns(this.knownHosts());
+    const { data, truncated } = keptErrorData(error, patterns);
+    return new OgmiosRpcError(message, method, code, cutScrubbed(removeEndpoints(rpcMessage, patterns)), data, truncated);
+  }
+
+  /**
    * Send a JSON-RPC request to Ogmios.
    *
    * Every failure mode a bare `await fetch(...)` can produce is caught here
@@ -295,7 +431,9 @@ export class OgmiosProvider implements Provider {
     if (!response.ok) {
       const text = await response.text();
       console.error(`[OgmiosProvider] Ogmios RPC error (${method}) at ${this.ogmiosUrl}: ${response.status} ${response.statusText} - ${text}`);
-      throw new Error(formatServiceError('Ogmios', method, response.status, response.statusText));
+      let body: unknown;
+      try { body = JSON.parse(text); } catch { body = undefined; }
+      throw this.rpcError(formatServiceError('Ogmios', method, response.status, response.statusText), method, body);
     }
 
     let json: any;
@@ -308,7 +446,7 @@ export class OgmiosProvider implements Provider {
 
     if (json.error) {
       console.error(`[OgmiosProvider] Ogmios RPC error (${method}) at ${this.ogmiosUrl}:`, json.error);
-      throw new Error(formatServiceError('Ogmios', method, json.error?.code ?? 'error', json.error?.message ?? 'RPC error'));
+      throw this.rpcError(formatServiceError('Ogmios', method, json.error?.code ?? 'error', json.error?.message ?? 'RPC error'), method, json);
     }
 
     return json.result;

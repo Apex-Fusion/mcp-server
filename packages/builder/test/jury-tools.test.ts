@@ -74,6 +74,7 @@ describe('without manifests', () => {
     assert.match(await call('vector_get_jury_cases', {}), /set VECTOR_JURY_MANIFESTS/);
     assert.match(await call('vector_build_jury_commit', { changeAddress: WALLET_ADDRESS, juror: JUROR_TOKEN, case: CASE_TOKEN, vote: 'ClaimerWins', record_hash: 'ab'.repeat(32) }), /set VECTOR_JURY_MANIFESTS/);
     assert.match(await call('vector_build_module1_claim', { changeAddress: WALLET_ADDRESS, agent: CLAIMER_ID, claim_uri: 'https://x.example/c.json', claim_hash: 'ab'.repeat(32), claim_type: 'x', stake: 50 }), /Module-1 is not configured on this server: set VECTOR_MODULE1_MANIFEST/);
+    assert.match(await call('vector_build_module1_withdraw_claim', { changeAddress: WALLET_ADDRESS, claim: CLAIM_TOKEN }), /Module-1 is not configured on this server: set VECTOR_MODULE1_MANIFEST/);
   });
 
   test('the document tools need no manifest', async () => {
@@ -145,6 +146,45 @@ describe('Module-1 claim and challenge tools (real Module-1 scripts)', () => {
     assert.match(short, /WARNING: the resolution deadline is shorter than 6 h 10 min/);
     assert.equal(jsonOf(short).jury_time_warning, true);
     assert.match(await call('vector_build_module1_challenge', { ...args, claim: 'not-a-claim' }), /Name the claim by its claim token name/);
+  });
+
+  describe('a claim withdrawal', () => {
+    const claimer = { type: 'VerificationKey' as const, hash: WALLET.keyHash };
+    /** A claim of the wallet key whose 4 h window ended an hour before NOW. */
+    const mine = (overrides: Record<string, unknown> = {}) => claimUtxo(CLAIM_TOKEN, { claimerCredential: claimer, ...overrides }, 5 * HOUR);
+    const withdraw = (claim: UTxO, claimName: string = CLAIM_TOKEN) => tools({ extra: [claim] })('vector_build_module1_withdraw_claim', { changeAddress: WALLET_ADDRESS, claim: claimName });
+
+    test('takes the stake of a claim back after its window: the payout is output 0 and exactly the stake, signed by the claimer', async () => {
+      const answer = await withdraw(mine());
+      assert.match(answer, /# Module-1 Claim Withdrawal Built \(Unsigned, Not Submitted\)/);
+      const json = jsonOf(answer);
+      assert.equal(json.claim_token, CLAIM_TOKEN);
+      assert.equal(json.claim_input, `${'cc'.repeat(32)}#0`);
+      assert.equal(json.payout_utxo, `${json.tx_hash}#0`);
+      assert.equal(json.stake_lovelace, '50000000');
+      assert.equal(json.claimer_did, `did:vector:${CLAIMER_ID}`);
+      assert.equal(json.challenge_deadline, NOW - HOUR);
+      assert.equal(json.valid_from, NOW - 60_000, 'the window starts a minute before the clock of the tool: the challenge window ended long before');
+      assert.equal(json.valid_to, NOW + 30 * 60_000);
+      assert.deepEqual((json.required_signers as Array<{ key_hash: string }>).map((s) => s.key_hash), [WALLET.keyHash]);
+      const outputs = CML.Transaction.from_cbor_hex(txCborOf(answer)).body().outputs();
+      assert.equal(outputs.get(0).amount().coin(), 50_000_000n);
+      assert.equal(outputs.get(0).address().to_bech32(), WALLET_ADDRESS);
+      assert.match(answer, /Payout:\*\* [0-9a-f]{64}#0, 50\.000000 AP3X to your wallet \(exactly the stake\)/);
+    });
+
+    test('names the claim by its token or its output reference, and refuses a name that is none', async () => {
+      const byRef = jsonOf(await withdraw(mine(), `${'CC'.repeat(32)}#0`));
+      assert.equal(byRef.claim_token, CLAIM_TOKEN);
+      assert.match(await withdraw(mine(), 'not-a-claim'), /^Failed to build Module-1 claim withdrawal: Name the claim by its claim token name/);
+      assert.match(await withdraw(mine(), CLAIM_TOKEN.replace(/0f/g, '0e')), /No live claim holds the claim token/);
+    });
+
+    test('refuses with the rule: a window that has not ended, a claim that was challenged, a wallet that is not the claimer', async () => {
+      assert.match(await withdraw(claimUtxo(CLAIM_TOKEN, { claimerCredential: claimer }, 3 * HOUR)), /^Failed to build Module-1 claim withdrawal: Too early: the challenge window of the claim ends at 2026-11-15T13:00:00\.000Z, and a withdrawal must start after it \(2026-11-15T13:00:01\.000Z\)/);
+      assert.match(await withdraw(mine({ state: 'Challenged' })), /is Challenged; only an Open claim can be withdrawn/);
+      assert.match(await withdraw(claimUtxo(CLAIM_TOKEN, {}, 5 * HOUR)), /is not the claimer credential of the claim/);
+    });
   });
 });
 
@@ -279,6 +319,7 @@ describe('a change address of 131,072 characters', () => {
     ['vector_build_jury_reveal', { juror: JUROR_TOKEN, case: CASE_TOKEN, vote: 'ClaimerWins', salt: '42'.repeat(32), record_text: '{}' }],
     ['vector_build_module1_claim', { agent: CLAIMER_ID, claim_uri: documentUri('cd'.repeat(32)), claim_hash: 'ab'.repeat(32), claim_type: 'x', stake: 50 }],
     ['vector_build_module1_challenge', { agent: AUDITOR_ID, claim: CLAIM_TOKEN, evidence_uri: 'https://example.org/e.json', evidence_hash: 'ed'.repeat(32), stake: 50 }],
+    ['vector_build_module1_withdraw_claim', { claim: CLAIM_TOKEN }],
   ];
   for (const [name, args] of calls) {
     test(`${name} refuses it at once, and the answer holds its length and its start, not the text`, async () => {

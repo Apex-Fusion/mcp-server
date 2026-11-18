@@ -1,20 +1,25 @@
 // packages/builder/test/module1-build.test.ts
-// The Module-1 SubmitClaim and OpenChallenge builders against the applied mainnet claim and challenge scripts (jury-world.ts): Lucid
-// runs the real validators on each build, so a build that completes is one that Module-1 accepts, minus the signatures. No network.
+// The Module-1 SubmitClaim, OpenChallenge and WithdrawClaim builders against the applied mainnet claim and challenge scripts (jury-world.ts):
+// Lucid runs the real validators on each build, so a build that completes is one that Module-1 accepts, minus the signatures. No network.
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML, credentialToAddress, validatorToScriptHash } from '@lucid-evolution/lucid';
 import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
 import { lucidForAddress } from '../src/vector/build.ts';
-import { buildOpenChallenge, buildSubmitClaim, defaultChallengeWindow, findClaim } from '../src/vector/module1-build.ts';
-import { SUBMIT_CLAIM_REDEEMER, TOKEN_PREFIX, decodeChallengeDatum, decodeClaimDatum, encodeClaimDatum, seedTokenName } from '../src/vector/jury-codec.ts';
+import { assertPayoutIsOutputZero, buildOpenChallenge, buildSubmitClaim, buildWithdrawClaim, defaultChallengeWindow, findClaim } from '../src/vector/module1-build.ts';
+import {
+  SUBMIT_CLAIM_REDEEMER, TOKEN_PREFIX, WITHDRAW_CLAIM_REDEEMER, blake2b256Hex, decodeChallengeDatum, decodeClaimDatum, encodeClaimDatum, seedTokenName,
+} from '../src/vector/jury-codec.ts';
+import type { ClaimDatum } from '../src/vector/jury-codec.ts';
 import { utf8Hex } from '../src/vector/identity-codec.ts';
 import { chainClock, windowAt } from '../src/vector/identity-chain.ts';
 import {
-  AUDITOR_ID, CHALLENGE_SCRIPT, CLAIMER_ID, CLAIM_SCRIPT, DAY, HOUR, IDENTITY_ADDRESS, IDENTITY_HASH, MODULE1, NOW, STRANGER, WALLET, WALLET_ADDRESS,
-  WALLET_UTXOS, agentRecord, claimUtxo, juryWorld, recordUtxo,
+  AUDITOR_ID, CHALLENGE_SCRIPT, CLAIMER_ID, CLAIM_SCRIPT, DAY, HOUR, IDENTITY_ADDRESS, IDENTITY_HASH, MODULE1, MODULE1_UTXOS, NOW, STRANGER, WALLET,
+  WALLET_ADDRESS, WALLET_UTXOS, agentRecord, claimUtxo, juryWorld, recordUtxo,
 } from './fixtures/jury-world.ts';
-import type { FixtureProvider } from './fixtures/fixture-provider.ts';
+import { FixtureProvider } from './fixtures/fixture-provider.ts';
 
 const claimParams = (extra: Record<string, unknown> = {}) => ({
   changeAddress: WALLET_ADDRESS, agentId: CLAIMER_ID, claimHash: 'ab'.repeat(32), claimUri: utf8Hex('vector-tx:cu8SkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
@@ -270,6 +275,18 @@ describe('a claim at an address with a stake part (SPEC Section 5.7: Module-1 re
       await assert.rejects(findClaim(withIndex(juryWorld([output]), output), MODULE1, { token: claimToken }), /No live claim holds the claim token/, why);
     }
   });
+
+  test('a withdrawal can be built against it, by token name and by output reference, and the stake goes to the wallet', async () => {
+    const mine = { ...claimUtxo(claimToken, { claimerCredential: { type: 'VerificationKey', hash: WALLET.keyHash } }, 5 * HOUR), address: STAKED };
+    for (const named of [{ token: claimToken }, { ref: refOf(mine) }]) {
+      const provider = withIndex(juryWorld([mine]), mine);
+      const lucid = await lucidForAddress(provider, WALLET_ADDRESS);
+      const r = await buildWithdrawClaim({ lucid, provider, module1: MODULE1 }, { changeAddress: WALLET_ADDRESS, claim: named, nowMs: NOW });
+      assert.equal(r.claimToken, claimToken);
+      assert.equal(r.claimInput, `${'cc'.repeat(32)}#0`);
+      assert.deepEqual(outputsOf(r.txCbor)[0], { address: WALLET_ADDRESS, lovelace: 50_000_000n, datum: null });
+    }
+  });
 });
 
 describe('the Module-1 claim validator runs on every build', () => {
@@ -298,5 +315,224 @@ describe('the Module-1 claim validator runs on every build', () => {
       .complete();
     await assert.rejects(claim(50_000_001n));
     assert.ok((await claim(50_000_000n)).toHash());
+  });
+});
+
+// ─── WithdrawClaim ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+const MAINNET_WITHDRAWAL = JSON.parse(readFileSync(resolve(import.meta.dirname!, 'fixtures/module1-withdrawal-mainnet.json'), 'utf8'));
+interface CapturedUtxo { ref: string; address: string; lovelace: string; assets: Record<string, string>; datum?: string }
+const utxoFrom = (u: CapturedUtxo): UTxO => ({
+  txHash: u.ref.slice(0, 64), outputIndex: Number(u.ref.slice(65)), address: u.address,
+  assets: { lovelace: BigInt(u.lovelace), ...Object.fromEntries(Object.entries(u.assets).map(([unit, quantity]) => [unit, BigInt(quantity)])) },
+  ...(u.datum ? { datum: u.datum } : {}),
+});
+const WITHDRAW_HASH = blake2b256Hex(Buffer.from(WITHDRAW_CLAIM_REDEEMER, 'hex'));
+const refText = (r: { txHash: string; outputIndex: number }): string => `${r.txHash}#${r.outputIndex}`;
+
+/** What a transaction says, in the terms of the fixture of the mainnet withdrawal: sorted references, the mint, the redeemers, the outputs and the signers. */
+function shapeOf(txCbor: string) {
+  const tx = CML.Transaction.from_cbor_hex(txCbor);
+  const body = tx.body();
+  const refsOf = (list: CML.TransactionInputList | undefined) => Array.from({ length: list?.len() ?? 0 }, (_, i) => `${list!.get(i).transaction_id().to_hex()}#${list!.get(i).index()}`).sort();
+  const assetsOf = (multi: CML.MultiAsset | CML.Mint | undefined): Record<string, string> => {
+    const assets: Record<string, string> = {};
+    for (let i = 0; multi && i < multi.keys().len(); i++) {
+      const policy = multi.keys().get(i);
+      const names = multi.get_assets(policy)!;
+      for (let j = 0; j < names.keys().len(); j++) assets[`${policy.to_hex()}${names.keys().get(j).to_hex()}`] = String(names.get(names.keys().get(j)));
+    }
+    return assets;
+  };
+  const flat = tx.witness_set().redeemers()?.to_flat_format();
+  const redeemers = Array.from({ length: flat?.len() ?? 0 }, (_, i) => ({
+    purpose: ['spend', 'mint'][flat!.get(i).tag()] ?? `tag ${flat!.get(i).tag()}`, index: Number(flat!.get(i).index()),
+    dataHash: blake2b256Hex(Buffer.from(flat!.get(i).data().to_cbor_hex(), 'hex')),
+  })).sort((a, b) => (a.purpose < b.purpose ? -1 : a.purpose > b.purpose ? 1 : 0));
+  const outputs = Array.from({ length: body.outputs().len() }, (_, i) => {
+    const o = body.outputs().get(i);
+    return { address: o.address().to_bech32(), lovelace: o.amount().coin().toString(), assets: assetsOf(o.amount().multi_asset()), datum: o.datum()?.as_datum()?.to_cbor_hex() ?? null };
+  });
+  const signers = body.required_signers();
+  return {
+    inputs: refsOf(body.inputs()), referenceInputs: refsOf(body.reference_inputs()), minted: assetsOf(body.mint()), redeemers, outputs,
+    requiredSigners: Array.from({ length: signers?.len() ?? 0 }, (_, i) => signers!.get(i).to_hex()).sort(), validFromSlot: body.validity_interval_start()?.toString(),
+  };
+}
+
+describe('buildWithdrawClaim (real claim validator)', () => {
+  const claimToken = `636c6d5f${'0f'.repeat(28)}`;
+  const unit = `${MODULE1.claim.hash}${claimToken}`;
+  const WALLET_CREDENTIAL = { type: 'VerificationKey' as const, hash: WALLET.keyHash };
+  /** A claim of the wallet key, 50 AP3X: its window of 4 h ended `endedMs` before NOW. */
+  const mine = (overrides: Partial<ClaimDatum> = {}, endedMs = HOUR) => claimUtxo(claimToken, { claimerCredential: WALLET_CREDENTIAL, ...overrides }, 4 * HOUR + endedMs);
+  const world = async (claim: UTxO) => { const provider = juryWorld([claim]); return { provider, lucid: await lucidForAddress(provider, WALLET_ADDRESS) }; };
+  const withdraw = async (claim: UTxO, extra: Record<string, unknown> = {}) => {
+    const { provider, lucid } = await world(claim);
+    return buildWithdrawClaim({ lucid, provider, module1: MODULE1 }, { changeAddress: WALLET_ADDRESS, claim: { token: claimToken }, nowMs: NOW, ...extra });
+  };
+
+  test('the redeemer is WithdrawClaim, constructor 1: the Data of the mainnet withdrawal', () => {
+    assert.equal(WITHDRAW_CLAIM_REDEEMER, 'd87a80');
+    for (const redeemer of MAINNET_WITHDRAWAL.tx.redeemers) assert.equal(redeemer.dataHash, WITHDRAW_HASH);
+  });
+
+  test('the claim script accepts it: the claim is spent and its token burned with WithdrawClaim, the stake goes back in one output, no claim output continues', async () => {
+    const r = await withdraw(mine());
+    const shape = shapeOf(r.txCbor);
+    assert.equal(r.claimInput, `${'cc'.repeat(32)}#0`);
+    assert.ok(shape.inputs.includes(r.claimInput), 'the claim output is spent');
+    assert.deepEqual(shape.referenceInputs, [MODULE1.claim.ref, MODULE1.crossRefs, MODULE1.params].map(refText).sort(), 'the claim script, cross_refs and params');
+    assert.deepEqual(shape.minted, { [unit]: '-1' });
+    assert.deepEqual(shape.redeemers.map((x) => [x.purpose, x.dataHash]), [['mint', WITHDRAW_HASH], ['spend', WITHDRAW_HASH]]);
+    assert.equal(shape.outputs.length, 2, 'the stake and the change');
+    assert.deepEqual(shape.outputs[0], { address: WALLET_ADDRESS, lovelace: '50000000', assets: {}, datum: null });
+    assert.equal(r.payoutRef, `${r.txHash}#0`);
+    assert.ok(shape.outputs.every((o) => o.address === WALLET_ADDRESS), 'no output is at the claim script');
+    assert.deepEqual(shape.requiredSigners, [WALLET.keyHash]);
+    assert.deepEqual(r.requiredSigners.map((s) => s.keyHash), [WALLET.keyHash]);
+    assert.equal(r.claim.state, 'Open');
+    assert.equal(r.challengeDeadline, NOW - HOUR);
+    assert.ok(r.validFrom > r.challengeDeadline && r.validTo - r.validFrom <= HOUR, 'the window starts after the challenge window and is at most an hour');
+  });
+
+  test('the shape of the build is the shape of the mainnet withdrawal b3a165bd…, for the same claim and wallet', async () => {
+    const m = MAINNET_WITHDRAWAL;
+    const provider = new FixtureProvider([...MODULE1_UTXOS, utxoFrom(m.claim), ...m.wallet.map(utxoFrom)]);
+    const walletAddress: string = m.wallet[0].address;
+    const lucid = await lucidForAddress(provider, walletAddress);
+    // The Python builder started the window one minute before its tip slot: the tip was 60 slots after invalidBefore.
+    const nowMs = (await provider.getSystemStartMs()) + (Number(m.tx.invalidBefore) + 60) * 1000;
+    const r = await buildWithdrawClaim({ lucid, provider, module1: MODULE1 }, { changeAddress: walletAddress, claim: { ref: { txHash: m.claim.ref.slice(0, 64), outputIndex: 0 } }, nowMs });
+    const shape = shapeOf(r.txCbor);
+    assert.deepEqual(shape.inputs, m.tx.inputs);
+    assert.deepEqual(shape.referenceInputs, m.tx.referenceInputs);
+    assert.deepEqual(shape.minted, m.tx.minted);
+    assert.deepEqual(shape.redeemers.map((x) => [x.purpose, x.dataHash]), m.tx.redeemers.map((x: { purpose: string; dataHash: string }) => [x.purpose, x.dataHash]));
+    assert.equal(shape.redeemers.find((x) => x.purpose === 'spend')!.index, 0, 'the claim output is the first input');
+    assert.deepEqual(shape.outputs.map((o) => [o.address, o.assets]), m.tx.outputs.map((o: { address: string; assets: unknown }) => [o.address, o.assets]));
+    assert.equal(shape.outputs[0].lovelace, m.tx.outputs[0].lovelace, 'exactly the stake to the claimer');
+    assert.deepEqual(shape.requiredSigners, m.tx.requiredSigners);
+    assert.equal(decodeClaimDatum(m.claim.datum).claimerCredential.hash, m.tx.requiredSigners[0], 'the required signer is the claimer credential');
+    assert.equal(shape.validFromSlot, m.tx.invalidBefore, 'the window starts in the same slot');
+    assert.equal(r.claimToken, Object.keys(m.tx.minted)[0].slice(MODULE1.claim.hash.length));
+    // What the build pays for the Python fee-less difference: its change is the wallet output less its own fee.
+    assert.equal(BigInt(shape.outputs[1].lovelace), BigInt(m.wallet[0].lovelace) - BigInt(r.fee));
+  });
+
+  test('the fee pays for the claim script, which the spend and the burn both use', async () => {
+    const { provider, lucid } = await world(mine());
+    const r = await buildWithdrawClaim({ lucid, provider, module1: MODULE1 }, { changeAddress: WALLET_ADDRESS, claim: { token: claimToken }, nowMs: NOW });
+    const minimum = await minimumFee(provider, lucid, r.txCbor);
+    assert.equal(minimum.referenceScriptBytes, CLAIM_SCRIPT.script.length / 2);
+    assert.ok(BigInt(r.fee) >= minimum.fee, `the fee ${r.fee} is below the ledger minimum ${minimum.fee}`);
+  });
+
+  test('the claim can be named by its token or by its output reference', async () => {
+    const byToken = await withdraw(mine());
+    const byRef = await withdraw(mine(), { claim: { ref: { txHash: 'cc'.repeat(32), outputIndex: 0 } } });
+    for (const r of [byToken, byRef]) assert.deepEqual([r.claimToken, r.claimInput], [claimToken, `${'cc'.repeat(32)}#0`]);
+  });
+
+  test('refuses a claim whose challenge window has not ended, and builds from the first second after it', async () => {
+    const claim = mine({}, 0);
+    assert.equal(decodeClaimDatum(claim.datum!).submittedAt + decodeClaimDatum(claim.datum!).challengeWindow, NOW, 'the window ends at NOW');
+    const early = /Too early: the challenge window of the claim ends at 2026-11-15T12:00:00\.000Z, and a withdrawal must start after it \(2026-11-15T12:00:01\.000Z\)\. Build again after that time/;
+    await assert.rejects(withdraw(claim), early);
+    await assert.rejects(withdraw(claim, { nowMs: NOW + 999 }), early);
+    const r = await withdraw(claim, { nowMs: NOW + 1000 });
+    assert.equal(r.validFrom, NOW + 1000);
+    assert.equal(r.challengeDeadline, NOW);
+    assert.equal((await withdraw(mine({}, HOUR))).validFrom, NOW - 60_000, 'a window that ended long ago leaves the usual start, a minute before now');
+  });
+
+  test('a deadline inside a second: the first whole second after it is the first start', async () => {
+    // submitted_at has no whole second (another builder can write one): the window ends 500 ms after NOW.
+    const claim = mine({ submittedAt: NOW - 4 * HOUR + 500 }, 0);
+    assert.equal(decodeClaimDatum(claim.datum!).submittedAt + decodeClaimDatum(claim.datum!).challengeWindow, NOW + 500);
+    await assert.rejects(withdraw(claim), /Too early: the challenge window of the claim ends at 2026-11-15T12:00:00\.500Z, .* \(2026-11-15T12:00:01\.000Z\)/);
+    const r = await withdraw(claim, { nowMs: NOW + 1000 });
+    assert.equal(r.validFrom, NOW + 1000, 'the claim script accepts a start 500 ms after the deadline');
+  });
+
+  test('refuses a claim that is not Open, and builds the Open claim', async () => {
+    for (const state of ['Challenged', 'Validated', 'Invalidated'] as const) {
+      await assert.rejects(withdraw(mine({ state })), new RegExp(`is ${state}; only an Open claim can be withdrawn`));
+    }
+    assert.equal((await withdraw(mine({ state: 'Open' }))).claim.state, 'Open');
+  });
+
+  test('refuses a wallet key that is not the claimer credential, and builds for the claimer', async () => {
+    const stranger = claimUtxo(claimToken, { claimerCredential: { type: 'VerificationKey', hash: STRANGER.keyHash } }, 5 * HOUR);
+    await assert.rejects(withdraw(stranger), new RegExp(`The wallet key ${WALLET.keyHash} is not the claimer credential of the claim .* \\(${STRANGER.keyHash}\\): only the claimer credential can withdraw it`));
+    const script = claimUtxo(claimToken, { claimerCredential: { type: 'Script', hash: 'ab'.repeat(28) } }, 5 * HOUR);
+    await assert.rejects(withdraw(script), /\(a script, abab/);
+    // A script credential can never sign, even when its hash is the hash of the wallet key.
+    const sameHash = claimUtxo(claimToken, { claimerCredential: { type: 'Script', hash: WALLET.keyHash } }, 5 * HOUR);
+    await assert.rejects(withdraw(sameHash), /\(a script, /);
+    assert.deepEqual((await withdraw(mine())).requiredSigners.map((s) => s.keyHash), [WALLET.keyHash]);
+  });
+
+  test('refuses a claim that is not on the node, and a name that is none', async () => {
+    const { provider, lucid } = await world(mine());
+    const ctx = { lucid, provider, module1: MODULE1 };
+    await assert.rejects(buildWithdrawClaim(ctx, { changeAddress: WALLET_ADDRESS, claim: { token: `636c6d5f${'0e'.repeat(28)}` }, nowMs: NOW }), /No live claim holds the claim token/);
+    await assert.rejects(buildWithdrawClaim(ctx, { changeAddress: WALLET_ADDRESS, claim: {}, nowMs: NOW }), /Name the claim by its token name or by its output reference/);
+  });
+
+  test('the payout is output 0: the check passes for the build and refuses another address, another amount and the change', async () => {
+    const r = await withdraw(mine());
+    assertPayoutIsOutputZero(r.txCbor, WALLET_ADDRESS, 50_000_000n);
+    assert.throws(() => assertPayoutIsOutputZero(r.txCbor, WALLET_ADDRESS, 50_000_001n), /does not have the payout of the stake as output 0/);
+    assert.throws(() => assertPayoutIsOutputZero(r.txCbor, MODULE1.claim.address, 50_000_000n), /does not have the payout of the stake as output 0/);
+    const change = BigInt(shapeOf(r.txCbor).outputs[1].lovelace);
+    assert.throws(() => assertPayoutIsOutputZero(r.txCbor, WALLET_ADDRESS, change), /does not have the payout of the stake as output 0/);
+  });
+});
+
+describe('the claim script refuses a withdrawal that breaks one of its rules (claim.ak validate_withdraw_claim)', () => {
+  const claimToken = `636c6d5f${'0f'.repeat(28)}`;
+  const unit = `${MODULE1.claim.hash}${claimToken}`;
+  /** A claim of the wallet key whose window ended at `deadline`. */
+  const deadline = NOW - HOUR;
+  const mine = (overrides: Partial<ClaimDatum> = {}) => claimUtxo(claimToken, { claimerCredential: { type: 'VerificationKey', hash: WALLET.keyHash }, ...overrides }, 5 * HOUR);
+  /** The transaction of buildWithdrawClaim, put together by hand, with `o` breaking one rule. Lucid evaluates the claim script on it. */
+  async function assemble(claim: UTxO, o: { from?: number; signer?: string; pay?: bigint; burn?: boolean; continuing?: boolean } = {}) {
+    const provider = juryWorld([claim]);
+    const lucid = await lucidForAddress(provider, WALLET_ADDRESS);
+    await chainClock(provider);
+    const refs = await provider.getUtxosByOutRef([MODULE1.claim.ref, MODULE1.crossRefs, MODULE1.params]);
+    const stake = decodeClaimDatum(claim.datum!).stakeAmount;
+    let tx = lucid.newTx().collectFrom([claim], WITHDRAW_CLAIM_REDEEMER);
+    if (o.burn !== false) tx = tx.mintAssets({ [unit]: -1n }, WITHDRAW_CLAIM_REDEEMER);
+    tx = tx.pay.ToAddress(WALLET_ADDRESS, { lovelace: o.pay ?? stake });
+    if (o.continuing) tx = tx.pay.ToContract(MODULE1.claim.address, { kind: 'inline', value: claim.datum! }, { lovelace: stake });
+    return tx.readFrom(refs).addSignerKey(o.signer ?? WALLET.keyHash).validFrom(o.from ?? deadline + 1000).validTo(NOW + 30 * 60_000).complete();
+  }
+  const failed = /failed script execution/;
+
+  test('a start at the end of the challenge window fails, a start one second later completes', async () => {
+    await assert.rejects(assemble(mine(), { from: deadline }), failed);
+    assert.ok((await assemble(mine(), { from: deadline + 1000 })).toHash());
+  });
+  test('a claim that was challenged fails, the Open claim completes', async () => {
+    await assert.rejects(assemble(mine({ state: 'Challenged' })), failed);
+    assert.ok((await assemble(mine())).toHash());
+  });
+  test('a required signer that is not the claimer credential fails, the claimer completes', async () => {
+    await assert.rejects(assemble(mine(), { signer: STRANGER.keyHash }), failed);
+    assert.ok((await assemble(mine(), { signer: WALLET.keyHash })).toHash());
+  });
+  test('a payout of one lovelace more than the stake fails, the exact stake completes', async () => {
+    await assert.rejects(assemble(mine(), { pay: 50_000_001n }), failed);
+    assert.ok((await assemble(mine(), { pay: 50_000_000n })).toHash());
+  });
+  test('a claim output that continues fails, none completes', async () => {
+    await assert.rejects(assemble(mine(), { continuing: true }), failed);
+    assert.ok((await assemble(mine(), { continuing: false })).toHash());
+  });
+  test('a claim token that is not burned fails, the burn completes', async () => {
+    await assert.rejects(assemble(mine(), { burn: false }), failed);
+    assert.ok((await assemble(mine(), { burn: true })).toHash());
   });
 });

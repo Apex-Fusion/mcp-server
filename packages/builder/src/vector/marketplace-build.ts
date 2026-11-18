@@ -21,7 +21,7 @@ import {
   COLLATERAL_MIN_LOVELACE, MIN_UTXO_LOVELACE, REDEEMER, MAX_ESCROW_LOVELACE, ESCROW_SWITCH_SLOT, ESCROW_SWITCH_AT,
 } from './marketplace-constants.js';
 import {
-  advertTextFieldsRoundTrip, encodeEscrowDatum, encodeIdentityEscrowDatum, requestSpecHash, promptHashForPayload,
+  advertTextFieldsRoundTrip, decodeIdentityAdvertDatum, encodeEscrowDatum, encodeIdentityEscrowDatum, requestSpecHash, promptHashForPayload,
   escrowLockFloor, identityEscrowLockFloor, parseOutRef, formatOutRef,
 } from './marketplace-datum.js';
 import type { AdvertDatum, EscrowDatum, IdentityAdvertDatum, IdentityEscrowDatum, Refund } from './marketplace-datum.js';
@@ -107,11 +107,24 @@ export type PostEscrowBuild = VectorUnsignedBuildResult & PostEscrowTerms & {
   requiredSigners: SignedByBuild['requiredSigners'];
 };
 
+/** What a refusal of the escrow planner is about. A caller that must tell the refusals apart (buildVaultPay with `ledgerDecides`) needs no text. */
+export type EscrowPlanFault = 'advert_retired' | 'buyer_is_supplier' | 'advert_terms' | 'value_cap';
+
+/** A refusal of the escrow planner: an Error with the message of old, and `fault` says what it is about. */
+export class EscrowPlanRefusal extends Error {
+  readonly fault: EscrowPlanFault;
+  constructor(fault: EscrowPlanFault, message: string) {
+    super(message);
+    this.name = 'EscrowPlanRefusal';
+    this.fault = fault;
+  }
+}
+
 /** The host the endpoint URL really connects to (userinfo dropped, port kept, IDN in punycode), or an error: a signer must be able to see who is paid. */
 function endpointHostOf(endpointUrl: string, advertRef: string): string {
   let host = '';
   try { host = new URL(endpointUrl).host; } catch { /* refused below */ }
-  if (!host) throw new Error(`Advert ${advertRef} has an endpoint that is not a usable URL with a host, so a job could not be delivered to it.`);
+  if (!host) throw new EscrowPlanRefusal('advert_terms', `Advert ${advertRef} has an endpoint that is not a usable URL with a host, so a job could not be delivered to it.`);
   return host;
 }
 
@@ -122,7 +135,7 @@ function endpointHostOf(endpointUrl: string, advertRef: string): string {
  */
 function assertWithinCap(advertRef: string, economic: bigint): void {
   if (economic > MAX_ESCROW_LOVELACE) {
-    throw new Error(`Advert ${advertRef} asks for price + both bonds of ${ap3x(economic)} AP3X, above the ${ap3x(MAX_ESCROW_LOVELACE)} AP3X value cap of an escrow (F-29): such an escrow cannot be claimed, so it is not built.`);
+    throw new EscrowPlanRefusal('value_cap', `Advert ${advertRef} asks for price + both bonds of ${ap3x(economic)} AP3X, above the ${ap3x(MAX_ESCROW_LOVELACE)} AP3X value cap of an escrow (F-29): such an escrow cannot be claimed, so it is not built.`);
   }
 }
 
@@ -164,23 +177,24 @@ export function planPostEscrow(advert: AdvertDatum, advertRef: string, buyerPkh:
  * full window (and deliver_by is far inside the vault's limit of hi + 7 days). The escrow output holds exactly payment + both bonds,
  * as the vault requires of every escrow it pays: when the lock floor is above the advert's amounts, the difference is added to the
  * buyer bond, which returns to the vault on Accept and on every refund.
+ * With `options.capped` false the value cap is not checked: the vault script checks it, and buildVaultPay with `ledgerDecides` leaves it to the ledger.
  */
-export function planVaultEscrow(advert: AdvertDatum, advertRef: string, buyerPkh: string, payload: string, window: Window, identity: IdentityPostTerms): PostEscrowPlan {
+export function planVaultEscrow(advert: AdvertDatum, advertRef: string, buyerPkh: string, payload: string, window: Window, identity: IdentityPostTerms, options: { capped?: boolean } = {}): PostEscrowPlan {
   if (typeof payload !== 'string' || payload.length === 0) throw new Error('payload must be a non-empty string');
   const processing = advert.max_processing_ms;
-  if (!Number.isInteger(processing) || processing < 0) throw new Error(`Advert ${advertRef} has an unusable processing window (${processing} ms).`);
-  if (processing > MAX_PROCESSING_MS_CEILING) throw new Error(`Advert ${advertRef} advertises a processing window of ${processing} ms, longer than the ${MAX_PROCESSING_MS_CEILING} ms (24 h) a Post will lock funds for.`);
+  if (!Number.isInteger(processing) || processing < 0) throw new EscrowPlanRefusal('advert_terms', `Advert ${advertRef} has an unusable processing window (${processing} ms).`);
+  if (processing > MAX_PROCESSING_MS_CEILING) throw new EscrowPlanRefusal('advert_terms', `Advert ${advertRef} advertises a processing window of ${processing} ms, longer than the ${MAX_PROCESSING_MS_CEILING} ms (24 h) a Post will lock funds for.`);
   const times = { postedAt: window.lo + 60_000, deliverBy: window.hi + processing + DELIVER_BY_BUFFER_MS, validTo: window.hi, endpointHost: endpointHostOf(advert.endpoint_url, advertRef) };
-  return escrowPlanAt(advert, advertRef, buyerPkh, payload, times, identity, true);
+  return escrowPlanAt(advert, advertRef, buyerPkh, payload, times, identity, true, options.capped !== false);
 }
 
-/** The checks and the datum of an escrow posted at `times.postedAt`; `exactLock` puts the floor top-up into the buyer bond (planVaultEscrow). */
+/** The checks and the datum of an escrow posted at `times.postedAt`; `exactLock` puts the floor top-up into the buyer bond (planVaultEscrow); `capped` false leaves the value cap to the ledger. */
 function escrowPlanAt(
   advert: AdvertDatum, advertRef: string, buyerPkh: string, payload: string,
-  times: { postedAt: number; deliverBy: number; validTo: number; endpointHost: string }, identity: IdentityPostTerms | undefined, exactLock: boolean,
+  times: { postedAt: number; deliverBy: number; validTo: number; endpointHost: string }, identity: IdentityPostTerms | undefined, exactLock: boolean, capped = true,
 ): PostEscrowPlan {
-  if (advert.status !== 'Active') throw new Error(`Advert ${advertRef} is retired; pick another supplier.`);
-  if (advert.supplier_pkh === buyerPkh) throw new Error('The buyer cannot be the supplier of the same advert.');
+  if (advert.status !== 'Active') throw new EscrowPlanRefusal('advert_retired', `Advert ${advertRef} is retired; pick another supplier.`);
+  if (advert.supplier_pkh === buyerPkh) throw new EscrowPlanRefusal('buyer_is_supplier', 'The buyer cannot be the supplier of the same advert.');
   const ref = parseOutRef(advertRef);
   const legacy: EscrowDatum = {
     buyer_pkh: buyerPkh, supplier_pkh: advert.supplier_pkh,
@@ -192,7 +206,7 @@ function escrowPlanAt(
   let economic = advert.price_lovelace + advert.buyer_bond_lovelace + advert.supplier_bond_lovelace;
   // The advert's numbers are the supplier's to choose. The datum writer refuses what it cannot frame (negative, past
   // uint64); say so in terms of the advert instead of leaking a bare RangeError.
-  const unfit = (why: string) => new Error(`Advert ${advertRef} cannot be posted: its terms do not fit an escrow datum (${why}).`);
+  const unfit = (why: string) => new EscrowPlanRefusal('advert_terms', `Advert ${advertRef} cannot be posted: its terms do not fit an escrow datum (${why}).`);
   let datum: EscrowDatum = legacy;
   let datumHex: string;
   let lockLovelace: bigint;
@@ -210,7 +224,7 @@ function escrowPlanAt(
     } catch (err) { throw unfit(errorText(err)); }
     datum = identityDatum;
   }
-  assertWithinCap(advertRef, economic);
+  if (capped) assertWithinCap(advertRef, economic);
   return {
     datum, datumHex, layout: identity === undefined ? 'legacy' : 'identity', lockLovelace, deliverBy: times.deliverBy, validTo: times.validTo,
     supplierPkh: advert.supplier_pkh, endpointHost: times.endpointHost, capabilityId: advert.capability_id,
@@ -262,6 +276,17 @@ async function assertAdvertAuthor(advertRef: string, creatingTxHash: string, sup
 export type HireableAdvert = Exclude<AdvertRead, { error: string }> & { ref: string };
 
 /**
+ * The words of the refusal of an advert of a fleet capability, or null for any other capability. vector_marketplace_send_job serves
+ * template-contract suppliers only, and a fleet supplier checks another hash of the request than the prompt_hash that a Post commits: a
+ * fleet hire could never be sent, and its lock would wait for a Reclaim after deliver_by. A Post and a vault payment both refuse it.
+ */
+export function fleetAdvertRefusal(ref: string, capabilityId: string): string | null {
+  return isFleetCapability(capabilityId)
+    ? `Advert ${ref} serves ${cell(capabilityId)}, a fleet capability (llm.text.generate.*, llm.chat.*, ocr.page.extract.* or audio.synthesize.*). vector_marketplace_send_job serves template-contract suppliers only in this release, so the job could never be sent and the lock would wait for a Reclaim after deliver_by. Pick a template-contract supplier.`
+    : null;
+}
+
+/**
  * Reads the advert `advertRef` in either layout (the identity layout with `deployment`) and refuses one that a Post must not hire:
  * spent, of a spent status Koios does not report, with text fields that are not valid UTF-8, or of a fleet capability.
  * `fetchImpl` stands in for fetch in the Koios call (tests).
@@ -276,10 +301,31 @@ export async function readHireableAdvert(advertRef: string, fetchImpl: typeof fe
   if (utxo.is_spent !== false) throw new Error(`Koios did not report whether advert ${ref} is unspent; refusing to hire it.`);
   const advertDatumHex = utxo.inline_datum?.bytes;
   if (!advertDatumHex || !advertTextFieldsRoundTrip(advertDatumHex)) throw new Error(`Advert ${ref} has text fields that are not valid UTF-8, so the escrow could not carry its capability id faithfully; refusing to hire it.`);
-  // vector_marketplace_send_job serves template-contract suppliers only, and a fleet supplier checks another hash of the request than
-  // the prompt_hash a Post commits: a fleet hire could never be sent, and its lock would wait for a Reclaim after deliver_by.
-  if (isFleetCapability(advert.capability_id)) throw new Error(`Advert ${ref} serves ${cell(advert.capability_id)}, a fleet capability (llm.text.generate.*, llm.chat.*, ocr.page.extract.* or audio.synthesize.*). vector_marketplace_send_job serves template-contract suppliers only in this release, so the job could never be sent and the lock would wait for a Reclaim after deliver_by. Pick a template-contract supplier.`);
+  const fleet = fleetAdvertRefusal(ref, advert.capability_id);
+  if (fleet !== null) throw new Error(fleet);
   return { ...read, ref };
+}
+
+/**
+ * The identity-marketplace advert `advertRef` as the node has it, for a payment that the ledger is to judge (buildVaultPay with
+ * `ledgerDecides`): the unspent output at the advert address of `deployment`, with an inline advert datum of 14 fields whose text fields
+ * are valid UTF-8 as stored (the escrow carries the capability id as text). Neither Koios nor the indexer is asked, so no listing
+ * decides for the node. Returns `{ error }` in words when there is no such output or it is no such advert; a failure of the node throws.
+ */
+export async function readAdvertFromNode(
+  provider: Pick<Provider, 'getUtxosByOutRef'>, advertRef: string, deployment: IdentityDeployment,
+): Promise<{ error: string } | { ref: string; advert: IdentityAdvertDatum; agentId: string }> {
+  let parsed: { txHash: string; outputIndex: number };
+  try { parsed = parseOutRef(advertRef); } catch (err) { return { error: errorText(err) }; }
+  const ref = formatOutRef(parsed.txHash, parsed.outputIndex);
+  const [utxo] = await provider.getUtxosByOutRef([parsed]);
+  if (!utxo) return { error: `The node has no unspent output ${ref}: the advert was spent (its supplier retired or replaced it), or it is not confirmed yet.` };
+  if (utxo.address !== deployment.advert.address) return { error: `UTxO ${ref} is not at the advert address of the identity marketplace, so it is no advert that a vault can pay.` };
+  if (!utxo.datum) return { error: `The advert ${ref} has no inline datum.` };
+  let advert: IdentityAdvertDatum;
+  try { advert = decodeIdentityAdvertDatum(utxo.datum); } catch (err) { return { error: `UTxO ${ref} holds no identity-marketplace advert datum (${errorText(err)}).` }; }
+  if (!advertTextFieldsRoundTrip(utxo.datum)) return { error: `Advert ${ref} has text fields that are not valid UTF-8, so the escrow could not carry its capability id faithfully.` };
+  return { ref, advert, agentId: advert.agent_id };
 }
 
 /**

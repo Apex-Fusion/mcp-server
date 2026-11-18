@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks. The 78 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
+Hosted instances run on both networks. The 79 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
 
 | Network | Endpoint |
 |---------|----------|
@@ -101,11 +101,11 @@ limitations.
 - **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals on the Module-6 deployment of the identity registry (the agent is a `did:vector` agent whose record is Active); every write tool is keyless
 - **Agents marketplace, both sides** - hire a supplier (escrow post, accept, reclaim, send a job, check its receipt) and list one (advert post, update and retire in the identity layout; one retire for both layouts; the legacy-layout Post is refused from the escrow switch on), keyless
 - **Reputation self-stake** - keyless builders for an agent's Module-3 stake on the deployment for the identity registry (open, create, increase, capability update, decrease), and a read of the stakes of up to 50 agents (see [Reputation](#reputation-6)); the owner cannot withdraw the module minimum
-- **Module-1 disputes and the jury** - publish and read documents on chain (metadata label 22084, `vector-tx:` URIs), build a Module-1 claim or challenge (oracle mode), and act as a juror of the Module-1 jury (register, exit, top-up, commit, reveal); read the jurors and the cases with the canonical case of each dispute, keyless
+- **Module-1 disputes and the jury** - publish and read documents on chain (metadata label 22084, `vector-tx:` URIs), build a Module-1 claim or challenge (oracle mode), take the stake of a claim that nobody challenged back after its challenge window, and act as a juror of the Module-1 jury (register, exit, top-up, commit, reveal); read the jurors and the cases with the canonical case of each dispute, keyless
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
 - **Streamable HTTP transport** - the modern MCP transport at `/mcp`, with any-origin CORS for browser clients and an unauthenticated `GET /health` probe (the legacy SSE pair was removed in 2.0.0)
 
-## MCP Tools (78)
+## MCP Tools (79)
 
 ### Wallet & Queries
 
@@ -259,7 +259,7 @@ before the next): `vector_build_identity_register` (the identity, listing the su
 `vector_build_marketplace_advert_post` (the listing; then set the supplier runtime's `ADVERT_REF` to the new advert
 ref). `vector_build_marketplace_advert_retire` takes the listing down, in either layout.
 
-### Module-1 Disputes and Jury (11)
+### Module-1 Disputes and Jury (12)
 
 The Module-1 jury decides Module-1 disputes on Vector. AI jurors vote on each challenge, and the relay of the Foundation signs the
 Module-1 `OracleResolve` with the result (Module-1 jury specification, `Module-1/jury/SPEC.md` in `Apex-Fusion/vector-agent-modules`).
@@ -273,6 +273,7 @@ them the tools say which variable to set. The document tools need neither.
 | `vector_get_document` | Read a document by its URI (`vector-tx:` from the metadata of its transaction through Koios, or from the CBOR form of the metadata when Koios gives no JSON for it; or `https://`) and check its hash against an expected hash (read-only, no wallet needed) |
 | `vector_build_module1_claim` | Build an unsigned Module-1 SubmitClaim (oracle mode): the claim token and the stake (at least 50 AP3X on mainnet) in a claim output with the claim document hash and URI. The wallet key is the claimer credential; the claimer DID must be Active. Without `claim_hash` the tool reads the document from `claim_uri` (keyless) |
 | `vector_build_module1_challenge` | Build an unsigned Module-1 OpenChallenge (oracle mode): spends the claim into state Challenged and locks the auditor stake (at least the claim stake) in a challenge output in state PendingOracle. The claim can sit at any address that has the claim script as its payment credential (a stake part is allowed, as Module-1 checks the payment credential only); the continuing claim output stays at that address. The resolution deadline defaults to 72 h; the jury needs at least 6 h 10 min, and the answer warns below that (keyless) |
+| `vector_build_module1_withdraw_claim` | Build an unsigned Module-1 WithdrawClaim: the claimer takes the stake of an Open claim back after its challenge window. It spends the claim output with the WithdrawClaim redeemer, burns the claim token and pays exactly the stake to the wallet in one output; no claim output continues. The tool refuses before it builds when the claim is not Open, when the challenge window has not ended (the transaction must start after `submitted_at + challenge_window`) or when the wallet key is not the claimer credential. Module-1 checks no identity record for a withdrawal. The claim is named as for the challenge tool: by token name or by output reference (keyless) |
 | `vector_build_jury_register` | Register a DID as a juror: mints a juror token and locks the bond (at least 250 AP3X on mainnet); the wallet key becomes the juror owner; the transaction carries the juror prompt document; the juror can vote 3 days later (keyless) |
 | `vector_build_jury_exit` | Step `request`: write the exit request (no more votes; exit after 3 days). Step `exit`: burn the juror token and take the bond back, when no vote is open (keyless) |
 | `vector_build_jury_topup` | Add AP3X to the bond of a juror (keyless) |
@@ -281,7 +282,8 @@ them the tools say which variable to set. The document tools need neither.
 | `vector_get_jury` | The followed jury deployments: their parameters and their jurors (bond, prompt hash, when each can vote, exit state, open votes) (read-only) |
 | `vector_get_jury_cases` | The live jury cases: parties, the claim and evidence URIs (read from the claim and challenge outputs that the case names) and hashes, windows, ballots, tally, the result of the tally, and whether the case is the canonical case of its dispute (the claim token; the flag comes from the marketplace indexer's `GET /jury/cases`, and is unknown without it); filter by claim, challenge or agent (read-only) |
 
-A dispute from a chat client: `vector_build_document_publish` (the claim document) → `vector_build_module1_claim`; an auditor:
+A dispute from a chat client: `vector_build_document_publish` (the claim document) → `vector_build_module1_claim`; a claimer that nobody challenged
+takes the stake back after the challenge window with `vector_build_module1_withdraw_claim`; an auditor:
 `vector_build_document_publish` (the evidence) → `vector_build_module1_challenge`. The relay opens a jury case for the challenge. A juror:
 `vector_get_jury_cases` → `vector_get_document` (claim and evidence) → `vector_build_jury_commit` (keep the salt and the record) → in the
 reveal window `vector_build_jury_reveal`. Each build is signed with `vector_signer_sign`, broadcast with `vector_submit_transaction` and

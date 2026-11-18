@@ -85,6 +85,47 @@
     manifests, comma-separated, the default first), as file paths or https URLs. No defaults: without them the tools
     say which variable to set. A malformed value stops the start; the manifests are checked against each other and
     each reference script against the chain at the first call of a tool that needs them.
+- **`vector_build_module1_withdraw_claim`** (Module-1 `WithdrawClaim`): the claimer takes the stake of a claim that nobody
+  challenged back after its challenge window. The build spends the claim with the `WithdrawClaim` redeemer, burns the
+  claim token with the same redeemer, and pays exactly the stake to the wallet in one output. No claim output continues.
+  The claim script, the cross_refs output and the params output are reference inputs, as in the withdrawals of the Python
+  builder (`build_withdraw_claim`). The tool refuses before it builds when the claim is not Open, when the challenge
+  window has not ended (the transaction must start after `submitted_at + challenge_window`, so it says the first second
+  to build from) and when the wallet key is not the claimer credential. The claim is named as for the challenge tool, by
+  token name or by output reference. Module-1 checks no identity record for a withdrawal. The build pays the fee of the
+  claim script, which the spend and the burn both use. 79 tools in all.
+- **`ledgerDecides` option of the vault payment builder** (`buildVaultPay` in `vault-build.ts`, library only: the hosted
+  tool `vector_build_vault_pay` takes no new input and does not change). With the option, the builder makes no refusal of
+  its own for the per-transaction limit, the period total, the use checks of the delegation, the delegator, the other
+  assets of the vault, the value cap, the indexer listing and the listing rule. The refusal of a fleet capability stays.
+  The builder reads the advert from the node (`readAdvertFromNode`), and the node evaluates the scripts
+  (`localUPLCEval: false`). The result has four kinds, told apart by type. A build. `VaultPayRefused`: a validator of the
+  transaction ran and failed (the node answered `evaluateTransaction` with the code 3010 and a validator error 3012 in its
+  data). It holds the code and the message of the node (`evaluationError`), the error of each validator (`validators`:
+  purpose, index, code, message, detail, traces) and the draft transaction that the node evaluated. `VaultPayNotEvaluated`:
+  the node answered with an error and no validator failed, for example a validity range beyond the end of the era that the
+  node can foresee (the code 3004 inside 3010). The scripts were not evaluated, so it is no refusal. `VaultPayImpossible`
+  with a `reason`: no vault output, a vault that is not Live, no delegation output or record to read, no advert output or a
+  retired one, a delegate key that is the supplier key (`buyer_is_supplier`), advert terms that no escrow can carry or an
+  advert of a fleet capability (`advert_terms`), and a rest below the ledger minimum of the vault output. Any other error is
+  no answer of the node: a network error, a timeout, an answer that is no JSON-RPC error, an error of another provider. It
+  stays an ordinary error and is no verdict. `judgeEvaluation` gives the kind of an error. `isLedgerRefusal` is true only for
+  the failed validator: the `OgmiosRpcError` above, and the `VaultPayRefused` that holds it (a `VaultPayNotEvaluated` is false,
+  whatever its cause is). The draft transaction
+  (`draftTx`) holds the placeholder witnesses that Lucid adds to size it (no real key, no real signature) and no collateral.
+  It is no transaction to submit.
+- **`OgmiosRpcError`** (`@apexfusion/vector-mcp-shared/provider`): OgmiosProvider throws it, in place of a plain Error, when
+  Ogmios answers with a JSON-RPC error object (`{ error: { code, message, data? } }`), with an HTTP status that is not OK or
+  with one that is OK. Its `message` is the message of the plain Error, byte for byte, so no tool text changes. It adds
+  `method`, `code`, `rpcMessage` and `data`. URLs and the configured hosts are removed from `rpcMessage`, and from each string
+  and each key of the data before the text is made, so `data` stays valid JSON. Nothing of the request is in the error. The
+  lines of `console.error` do not change. `data` has three states. `undefined`: the node sent no data. A text of at most
+  `OGMIOS_ERROR_DATA_LIMIT` characters (`dataTruncated` says that it was cut, and a cut text is no longer JSON). `null`:
+  the provider dropped the data, and `dataDropped` is true. It drops a data that is larger than
+  `OGMIOS_ERROR_DATA_INPUT_LIMIT` (the lengths of the strings and keys, and one for each value) or deeper than
+  `OGMIOS_ERROR_DATA_DEPTH_LIMIT` levels, without reading the rest of it, and a data for which anything fails while the
+  text is made. A failure with the data never replaces the error: the same `OgmiosRpcError` comes, with the same message.
+  The patterns that remove the endpoints are built once for each error.
 
 ### Changed
 
@@ -125,7 +166,7 @@
   63 levels of lists and maps, or more than 16,384 bytes (the most that a transaction has). Before, Lucid or the
   library refused such metadata, and a refusal of Lucid repeated
   the metadata. Nothing else changes: no tool text, no schema, and no answer for an input
-  inside the limits. A test gives each string input of each of the 78 tools a text of up to 131,072 characters in
+  inside the limits. A test gives each string input of each of the 79 tools a text of up to 131,072 characters in
   several shapes, also JSON with many levels, and checks that the tool answers within one second.
 
 ### Fixed
