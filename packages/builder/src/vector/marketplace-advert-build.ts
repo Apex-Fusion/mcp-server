@@ -12,8 +12,9 @@
 // live, independent and Active, and lists the supplier key with the transaction purpose and the capability), so that the advert they
 // write is one the indexer lists. Every transaction lists the supplier key as a required signer: the listing rule's first condition.
 // Nothing is signed or submitted.
-import { Data, Constr, CML, calculateMinLovelaceFromUTxO, fromText, toText, getAddressDetails } from '@lucid-evolution/lucid';
+import { Data, Constr, CML, calculateMinLovelaceFromUTxO, fromText, toText } from '@lucid-evolution/lucid';
 import type { LucidEvolution, Provider, UTxO } from '@lucid-evolution/lucid';
+import { addressDetails } from './guarded-decode.js';
 import { isIP } from 'node:net';
 import {
   ADVERT_DEPOSIT_FLOOR_LOVELACE, ADVERT_SCRIPT_HASH, DATUM_BYTES_MAX, EMPTY_DETAIL_HASH, MAX_ESCROW_LOVELACE, MAX_PROCESSING_MS_CEILING,
@@ -188,7 +189,7 @@ export async function advertLayoutAt(provider: Provider, advertRef: string, depl
 
 /** The script hash of an address's payment credential, or undefined (a key credential, or not an address). */
 function scriptHashOf(address: string): string | undefined {
-  try { const c = getAddressDetails(address).paymentCredential; return c?.type === 'Script' ? c.hash : undefined; } catch { return undefined; }
+  try { const c = addressDetails(address).paymentCredential; return c?.type === 'Script' ? c.hash : undefined; } catch { return undefined; }
 }
 
 // ─── The identity-marketplace advert ────────────────────────────────────────

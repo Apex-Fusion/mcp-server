@@ -2,7 +2,8 @@
 // The chain clock and the payment key hash that the keyless builders share. The identity, attestation, delegation, vault and
 // marketplace builders import them from here; this file held the first keyless builder family (self-improvement), which is now in
 // gov-tx.ts with its deployment (gov-deployment.ts) and codecs (gov-codec.ts).
-import { getAddressDetails, SLOT_CONFIG_NETWORK } from '@lucid-evolution/lucid';
+import { SLOT_CONFIG_NETWORK } from '@lucid-evolution/lucid';
+import { addressDetails } from './guarded-decode.js';
 
 // ─── Slot/time config ───────────────────────────────────────────────────────
 
@@ -47,7 +48,7 @@ export async function ensureSlotConfig(provider: Pick<SlotClockProvider, 'getSys
 export function paymentKeyHashOf(address: string): string {
   let details;
   try {
-    details = getAddressDetails(address);
+    details = addressDetails(address);
   } catch (e) {
     throw new Error(`Invalid address: ${e instanceof Error ? e.message : String(e)}`);
   }

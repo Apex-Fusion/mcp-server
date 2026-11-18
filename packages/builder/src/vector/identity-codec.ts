@@ -12,8 +12,9 @@
 //
 // Decoders check the shape: constructor indices, field counts, fixed byte lengths and integer ranges. They do not check the limits
 // of a valid record (Part 2 Section 3.3); identity-rules.ts does. Every error is `<what>: <field path>: <problem>`.
-import { Constr, Data, credentialToAddress, getAddressDetails } from '@lucid-evolution/lucid';
+import { Constr, Data, credentialToAddress } from '@lucid-evolution/lucid';
 import type { AddressDetails } from '@lucid-evolution/lucid';
+import { addressDetails } from './guarded-decode.js';
 
 // ─── Shared readers and writers ─────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -589,7 +590,7 @@ export function plutusAddressOf(x: Data, path = 'address'): PlutusAddress {
 /** The Plutus form of a bech32 address with a key or script payment credential; pointer and Byron addresses are refused. */
 export function plutusAddressFromBech32(address: string): PlutusAddress {
   let details: AddressDetails;
-  try { details = getAddressDetails(address); } catch { return fail('address', 'not a valid address'); }
+  try { details = addressDetails(address); } catch { return fail('address', 'not a valid address'); }
   const cred = (c: { type: 'Key' | 'Script'; hash: string }): Credential => ({ type: c.type === 'Key' ? 'VerificationKey' : 'Script', hash: c.hash.toLowerCase() });
   if (!details.paymentCredential || (details.type !== 'Base' && details.type !== 'Enterprise')) fail('address', `a ${details.type} address cannot be used here`);
   return {

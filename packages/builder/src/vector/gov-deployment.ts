@@ -10,8 +10,9 @@
 // policy, the params holder address, the CrossRefs address (the oracle holder), the treasury holder address and the reference-script
 // outputs. The params record, the CrossRefs output and the head of the activity list are found by their tokens, because each of them
 // moves when it is spent (a parameter update, a CrossRefs move, an insertion after the head).
-import { credentialToAddress, getAddressDetails, validatorToScriptHash } from '@lucid-evolution/lucid';
+import { credentialToAddress, validatorToScriptHash } from '@lucid-evolution/lucid';
 import type { Provider, UTxO } from '@lucid-evolution/lucid';
+import { addressDetails } from './guarded-decode.js';
 import {
   ACTIVITY_HEAD_TOKEN, PARAMS_TOKEN, TOKEN_PREFIX, decodeActivityDatum, decodeCrossRefs, decodeGovernanceParams, decodeProposalDatum,
   deriveActivityTokenName, deriveProposalTokenName,
@@ -124,7 +125,7 @@ function hashValue(name: HashName, value: string): string {
 function scriptAddressValue(name: AddressName, value: string): string {
   const address = value.trim();
   let credential: { type: string; hash: string } | undefined;
-  try { credential = getAddressDetails(address).paymentCredential; } catch { /* refused below */ }
+  try { credential = addressDetails(address).paymentCredential; } catch { /* refused below */ }
   if (!credential) throw new GovConfigError(`${GOV_ENV[name]} is not a valid address.`);
   if (credential.type !== 'Script') throw new GovConfigError(`${GOV_ENV[name]} must be a script address (a holder script of the deployment).`);
   if (name === 'treasuryAddress' && address === PREVIOUS_GOV_DEPLOYMENT.treasuryAddress) {

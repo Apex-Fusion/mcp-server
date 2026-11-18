@@ -37,6 +37,33 @@
     say which variable to set. A malformed value stops the start; the manifests are checked against each other and
     each reference script against the chain at the first call of a tool that needs them.
 
+### Changed
+
+- `vector_dry_run` reads the fee of a given transaction (`txCbor`) from its bytes, and does not decode the
+  transaction. A transaction whose fee it can read (the unsigned integer under key 2 of its body) goes to the
+  evaluation of the node, and the node judges the rest of it. A `txCbor` from which it cannot read the fee is refused
+  with the same message as before. The fee shows in full above 2^53 lovelace. The reader is
+  `packages/builder/src/vector/tx-fee.ts`.
+- The builder reads every address through one checked function (`addressDetails` in
+  `packages/builder/src/vector/guarded-decode.ts`). It refuses the empty string with the message that Lucid gives
+  for text that is not an address, and then calls `getAddressDetails`. No tool text changes. A test names each call
+  of `getAddressDetails`.
+- After each tool call the server checks that the stack pointer of the decoder library is back at its start value,
+  and puts it back when a failed call left it changed. It reads the start value two times when it starts. A pointer
+  below the start value is put back, and one line with the difference goes to stderr. A pointer at the start value
+  or above it is not touched. A library with no such export is not checked. The put back runs before the check of the
+  known value (next entry), so a call that left the pointer low does not stop a process whose library works again.
+  The put back does not give back other memory that a failed call of the library took: the check with the stop stays
+  the last line.
+- The server stops when its decoder library cannot decode a known value, so that its supervisor starts it again.
+  After each tool call, the decoder decodes one known value (the Plutus data `d87980`). When it cannot, the server
+  writes one line to stderr, stops listening, and ends with code 1 when the answer of the call is written, at the
+  latest 3 seconds later. A call of another client that needs longer than that gets no answer. The containers run
+  with `--restart unless-stopped`, so a process that ends comes back by itself. Nothing changes for a decoder that
+  works. The check covers the decoder library only, not the script evaluator of Lucid (a separate WebAssembly
+  instance). The entry point (`packages/builder/src/index.ts`) sets the stop and starts the check of the stack
+  pointer: a program that imports the builder as a library gets neither.
+
 ### Fixed
 
 - `vector_build_module1_claim` and `vector_build_module1_challenge` pay the fee of the reference scripts
@@ -48,7 +75,7 @@
   the fee counts the claim script two times: as a reference script, and as the script of the claim output that the
   transaction spends.
 - `vector_dry_run` of a given transaction (`txCbor`) shows the fee that the transaction declares. It showed
-  0 AP3X. A `txCbor` that does not decode as a transaction is refused before the evaluation.
+  0 AP3X. A `txCbor` from which the fee cannot be read is refused before the evaluation.
 - `vector_get_agent_profile` of a canonical DID shows as "Registered" the block time of the transaction that first
   minted the identifier (`created` of the resolution result). It showed the record's `created_at`, which is the end
   of the validity window of the creating transaction (up to one hour later). The record's `created_at` shows on its

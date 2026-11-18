@@ -18,12 +18,13 @@
 // about 51 days off. Here the time comes from the node's own chain start, and that start is pinned to Vector mainnet's and held against
 // this server's wall clock before anything is built.
 import {
-  Data, Constr, CML, fromText, toText, validatorToScriptHash, credentialToAddress, getAddressDetails, calculateMinLovelaceFromUTxO,
+  Data, Constr, CML, fromText, toText, validatorToScriptHash, credentialToAddress, calculateMinLovelaceFromUTxO,
 } from '@lucid-evolution/lucid';
 import type { LucidEvolution, Provider, TxSignBuilder, UTxO } from '@lucid-evolution/lucid';
 import { blake2b } from '@noble/hashes/blake2b';
 import type { VectorUnsignedBuildResult } from '@apexfusion/vector-mcp-shared/types';
 import { toBuildResult } from './build.js';
+import { addressDetails } from './guarded-decode.js';
 import { ensureSlotConfig, paymentKeyHashOf, ChainClockError } from './gov-build.js';
 import { parseDid, resolveAgentUtxo } from './registry-build.js';
 import { LEGACY_REGISTRY_POLICY_ID, legacyRegistryAddress } from './legacy-registry.js';
@@ -140,7 +141,7 @@ export function decodeCrossRefs(hex: string): { reputation: string; endorsement:
 }
 
 const outRefOf = (r: { txHash: string; outputIndex: number }) => formatOutRef(r.txHash, r.outputIndex);
-const paymentHashOf = (address: string): string | undefined => { try { return getAddressDetails(address).paymentCredential?.hash; } catch { return undefined; } };
+const paymentHashOf = (address: string): string | undefined => { try { return addressDetails(address).paymentCredential?.hash; } catch { return undefined; } };
 
 /** The three module UTxOs every CreateStake reads (reference script, parameters, cross references), read from the node and checked. */
 export async function readModuleReferences(provider: Provider): Promise<{ script: UTxO; params: UTxO; crossRefs: UTxO; stakeParams: StakeParams }> {

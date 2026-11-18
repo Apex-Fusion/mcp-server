@@ -4,7 +4,8 @@
 // Live { owner, delegation, spent, period_start } or Returned { owner } (an escrow refund). Each builder checks the rules it can check
 // before it builds, so that a refusal names the rule; the vault script then runs on the build (local evaluation of the applied script
 // that the reference input holds). Nothing is signed or submitted.
-import { calculateMinLovelaceFromUTxO, getAddressDetails } from '@lucid-evolution/lucid';
+import { calculateMinLovelaceFromUTxO } from '@lucid-evolution/lucid';
+import { addressDetails } from './guarded-decode.js';
 import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
 import { encodeVaultDatum, encodeVaultSpend, decodeVaultDatum, plutusAddressFromBech32, sameDelegator } from './identity-codec.js';
 import type { Delegator, ValueLimit, VaultDatum } from './identity-codec.js';
@@ -43,7 +44,7 @@ async function readVault(ctx: IdentityContext, vaultRef: string): Promise<VaultU
   const [utxo] = await ctx.provider.getUtxosByOutRef([parsed]);
   if (!utxo) throw new Error(`Vault ${ref} is not an unspent output on the node: it has been spent or closed, or it is not confirmed yet.`);
   let credential: string | undefined;
-  try { const c = getAddressDetails(utxo.address).paymentCredential; credential = c?.type === 'Script' ? c.hash : undefined; } catch { /* refused below */ }
+  try { const c = addressDetails(utxo.address).paymentCredential; credential = c?.type === 'Script' ? c.hash : undefined; } catch { /* refused below */ }
   if (credential !== ctx.deployment.vault.hash) throw new Error(`UTxO ${ref} is not at the vault address.`);
   if (!utxo.datum) throw new Error(`Vault ${ref} has no inline datum.`);
   let vault: VaultDatum;

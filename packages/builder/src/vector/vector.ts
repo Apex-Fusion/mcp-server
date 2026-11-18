@@ -25,6 +25,7 @@ import {
   buildDeployContract, buildInteractContract, declaredFee,
 } from './build.js';
 import { walletBuildText } from './wallet-build-text.js';
+import { withDecoderCheck } from './decoder-health.js';
 
 // Direct .env loading
 const __filename = fileURLToPath(import.meta.url);
@@ -54,9 +55,11 @@ export type BuildNode = Provider & Pick<OgmiosProvider, 'evaluateTransaction'>;
 
 /**
  * Register all Vector MCP tools. The server passes only `server` and `identity`; `nodeFor` (the node of the wallet build tools and
- * vector_dry_run) is for tests, which hand in a fixture node.
+ * vector_dry_run) is for tests, which hand in a fixture node. Every tool, in this file and in the families that it calls, is registered
+ * through `withDecoderCheck`: after each call the decoder decodes a known value (decoder-health.ts).
  */
 export function registerVectorTools(server: McpServer, identity: string, nodeFor: () => BuildNode = makeProvider) {
+  server = withDecoderCheck(server);
   const rateLimiter = limiterFor(identity);
 
   // vector_get_balance - Get balance for any address
