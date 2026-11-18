@@ -126,6 +126,61 @@
   `OGMIOS_ERROR_DATA_DEPTH_LIMIT` levels, without reading the rest of it, and a data for which anything fails while the
   text is made. A failure with the data never replaces the error: the same `OgmiosRpcError` comes, with the same message.
   The patterns that remove the endpoints are built once for each error.
+- **Read and check tools for attestations, delegations and vaults** (Part 2 Sections 4, 5.2 and 5.3 of the identity registry): 6 tools, 85 in all. They only read: they build, sign and submit nothing.
+  - `vector_get_attestation` shows an attestation by its identifier: every datum field, the status now, the output, the
+    deposit, and the time from which the issuer can withdraw the deposit. The reason of a revocation is shown exactly, whatever its
+    size. `vector_list_attestations` lists the attestations about a subject, from an issuer (a DID, a key hash, a public key, or
+    64 hex that name an identifier or a key), or both, newest first, with an optional type, a limit and an offset. Koios lists the
+    outputs at the attestation credential that hold an attestation token and whose datum holds the bytes of the subject (or, with no
+    subject, of the issuer), in one read: the limit of 5,000 or more outputs is then the limit of one subject or one issuer. An issuer
+    that is given by its key hash alone has no bytes in a datum to filter by, so that read takes every attestation output and fails
+    when 5,000 or more exist. Each row must be an authentic output (exactly at the attestation address, with exactly one attestation
+    token). The subject, the issuer and the type are compared on the decoded datum. An output without the token is not listed and does
+    not count. An attestation whose datum writes those bytes in a non-standard form (a byte string in chunks) is not listed:
+    `vector_get_attestation` reads it by its identifier. With neither a subject nor an issuer, Koios pages the list in the order of the
+    output reference, the answer has no total, and a type needs a subject or an issuer. The rows are as Koios lists them:
+    `vector_get_attestation` and `vector_check_attestation` confirm one attestation on the node. A revoked attestation whose reason is
+    above 2^53 stays in the list.
+  - `vector_check_attestation` checks an attestation against the validity rule of Section 4.3 at a time (default now). It lists each
+    condition with its result: authentic, active, inside `valid_from` and `valid_until` and not more than one hour before `issued_at`,
+    the envelope signature, and no invalid-from time of the issuer identity or its ancestors at or before `issued_at`. It then lists
+    each expectation of the caller: type, subject, issuer (a DID matches `issuer_id`; a key hash or public key matches the issuer key
+    by its key hash; 64 hex match by either reading) and digest. `issued_at` is the end of the validity window of the transaction, so
+    the check does not refuse an attestation because `issued_at` lies after the time of the check. It refuses a time more than one
+    hour before `issued_at`, because the attestation did not exist then.
+  - `vector_get_delegation` shows a live delegation with its chain of parents up to the root, or says that it is not live.
+    `vector_check_delegation_use` lists the problems that stop a delegation from being used for an action on a resource at one
+    instant: the delegation and every ancestor exist, each delegate is Active and lists its delegation key, a root delegator agent is
+    Active, the period holds the instant, and the patterns cover the action and the resource (the pattern rule of Section 5.1). A
+    transaction needs its whole validity window inside the period, so usable is for that one instant. An optional minimum number of
+    confirmations applies to each link. Each record is read once for a call.
+  - `vector_get_vault` shows vault outputs, Live and Returned, by output reference, by owner key hash or by delegation, in pages (`limit`
+    and `offset`). Anyone can write a vault output with any datum, so the outputs whose owner is the delegator of their delegation come
+    first, the one with the most AP3X first, then the other Live outputs, then the Returned ones. An output whose datum is not a vault
+    datum is not listed (a read by output reference says why). When 5,000 or more delegations exist, the delegations are not read for
+    the order: it is by output reference only, and the answer says so. Only the outputs of a page are read further, each delegation and
+    each record once. One request to the node confirms the page: a row that the node does not hold is spent, or the indexer is ahead,
+    and it cannot pay. For a Live output it says whether the output can pay a marketplace escrow now (the owner is the delegator, no
+    link is missing, the use checks find no problem, and a payment can lock at least the ledger minimum of the smallest escrow
+    output) and, if not, why not. The smallest escrow output is the Open escrow with the delegate key and the refund to the vault. The
+    answer gives its ledger minimum and the floor of `vector_build_vault_pay`, which is higher. Only an output that can pay gets
+    `remaining` and `next_max`. `next_max` is the most that the next payment may lock: it also keeps the ledger minimum of the next
+    output. A delegation that cannot be read is reported on its output and does not stop the others. A read also fails when 5,000 or
+    more outputs match one Koios filter: read by delegation instead of by owner key hash, or the reverse. An organisation of an owner
+    above 64 bytes is not shown.
+  - Each of the six tools runs inside one budget of 30 s. The call ends with an error when the node or Koios answers too slowly, or
+    when the read needs too many requests. At the end of the budget each Koios request of the call is aborted, and no request starts
+    after it. A node request that is already open ends by the time limit of its HTTP client.
+  - Text from the chain (a locator, a contest reply, an organisation, a pattern) is cleaned in the markdown and in the JSON text fields:
+    one line, no pipe or backtick, no invisible or direction-changing character (zero-width characters, the soft hyphen, the byte
+    order mark, variation selectors, tag characters), a length limit. The `_hex` fields keep the verbatim bytes.
+  - The library files `ledger-read.ts`, `attestation-read.ts`, `delegation-read.ts` and `vault-read.ts` hold the reads with typed results,
+    and `escrowPaidFromVault` (in `vault-read.ts`) tells whether an escrow was paid from a vault under a delegation: it reads the
+    transaction that made the escrow and looks for a vault input that the vault script spent with the Pay redeemer. A transaction with
+    a vault input and no script list is an error. Each script run of a Koios row has a `valid_contract`, and the top level of a row of
+    the Vector Koios has none. A Pay run of the vault script counts only when its own `valid_contract` is true: false is
+    `contract_failed`, and no value, or one that is not true or false, is an error, never `paid` and never `not_a_payment`. A caller
+    waits for confirmations before it trusts the answer. Koios answers are read to 16 MiB at most. `readVault` is exported.
 
 ### Changed
 
@@ -166,11 +221,15 @@
   63 levels of lists and maps, or more than 16,384 bytes (the most that a transaction has). Before, Lucid or the
   library refused such metadata, and a refusal of Lucid repeated
   the metadata. Nothing else changes: no tool text, no schema, and no answer for an input
-  inside the limits. A test gives each string input of each of the 79 tools a text of up to 131,072 characters in
+  inside the limits. A test gives each string input of each of the 85 tools a text of up to 131,072 characters in
   several shapes, also JSON with many levels, and checks that the tool answers within one second.
 
 ### Fixed
 
+- `cell`, which cleans the text of a datum or an advert for one line of a tool answer, handles more characters. A C1 control (U+0080 to
+  U+009F) becomes a space, as a C0 control does. The zero-width characters and direction marks (U+200B to U+200F), the embedding and
+  override controls (U+202A to U+202E) and the isolate controls (U+2066 to U+2069) are removed. They could hide a word or reorder
+  the text around them in a line that the assistant reads.
 - `vector_build_module1_claim` and `vector_build_module1_challenge` pay the fee of the reference scripts
   (15 lovelace for each byte of each reference script in the transaction). Their fee was below the ledger minimum:
   by 0.107295 AP3X for a claim (the claim script) and by 0.185145 AP3X for a challenge (the challenge script), because

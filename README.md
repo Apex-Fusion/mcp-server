@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks. The 79 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
+Hosted instances run on both networks. The 85 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
 
 | Network | Endpoint |
 |---------|----------|
@@ -97,7 +97,7 @@ limitations.
 - **Keyless transaction building** - build unsigned AP3X/token/multi-output transactions and contract interactions; sign locally, broadcast via submit
 - **Smart contracts** - deploy Plutus/Aiken validators, lock and spend UTxOs at script addresses (keyless)
 - **Agent identity** - resolve `did:vector` DIDs through the identity gateway, read an agent's profile by DID (canonical or legacy form), and discover agents with listed adverts through the marketplace indexer
-- **Identity registry** (`did:vector`) - keyless builders for every record action (register, also subagents; adopt a legacy record; update; change controller; suspend and unsuspend; revoke; retire; reclaim; successor; recovery; end subagents), attestations, delegations and vaults; every build returns the unsigned transaction and the key hashes that must sign it, and each key holder signs in turn. The legacy registry writes (register, update, transfer) are retired; a legacy record that does not adopt can still deregister
+- **Identity registry** (`did:vector`) - keyless builders for every record action (register, also subagents; adopt a legacy record; update; change controller; suspend and unsuspend; revoke; retire; reclaim; successor; recovery; end subagents), attestations, delegations and vaults; every build returns the unsigned transaction and the key hashes that must sign it, and each key holder signs in turn. Read tools show attestations, delegations and vaults, and check an attestation against the validity rule and a delegation against the use checks. The legacy registry writes (register, update, transfer) are retired; a legacy record that does not adopt can still deregister
 - **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals on the Module-6 deployment of the identity registry (the agent is a `did:vector` agent whose record is Active); every write tool is keyless
 - **Agents marketplace, both sides** - hire a supplier (escrow post, accept, reclaim, send a job, check its receipt) and list one (advert post, update and retire in the identity layout; one retire for both layouts; the legacy-layout Post is refused from the escrow switch on), keyless
 - **Reputation self-stake** - keyless builders for an agent's Module-3 stake on the deployment for the identity registry (open, create, increase, capability update, decrease), and a read of the stakes of up to 50 agents (see [Reputation](#reputation-6)); the owner cannot withdraw the module minimum
@@ -105,7 +105,7 @@ limitations.
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
 - **Streamable HTTP transport** - the modern MCP transport at `/mcp`, with any-origin CORS for browser clients and an unauthenticated `GET /health` probe (the legacy SSE pair was removed in 2.0.0)
 
-## MCP Tools (79)
+## MCP Tools (85)
 
 ### Wallet & Queries
 
@@ -180,6 +180,19 @@ Every tool below is keyless: it builds an unsigned transaction and lists every k
 | `vector_build_vault_open` | Open a vault that a delegation may spend from (`marketplace.hire.v1` on the escrow script) |
 | `vector_build_vault_pay` | The delegate hires a listed supplier from a vault, within the delegation's value limits |
 | `vector_build_vault_close` | The owner takes the funds of vault outputs (live or returned refunds) back |
+
+### Attestation, Delegation and Vault Reads (6)
+
+Every tool below only reads: it builds, signs and submits nothing. The server needs the identity deployment values (see Configuration).
+
+| Tool | Description |
+|------|-------------|
+| `vector_get_attestation` | Show an attestation by its identifier: every datum field, the status now, the output, the deposit and the time from which the issuer can withdraw it |
+| `vector_list_attestations` | List the attestations about a subject, from an issuer (a DID, a key hash, a public key, or 64 hex that name an identifier or a key), or both; newest first, with an optional type and paging. With neither, it lists every attestation a page at a time, in the order of the output reference. Koios narrows the read by the bytes of the subject or the issuer, and the rows are as Koios lists them |
+| `vector_check_attestation` | Check an attestation against the validity rule of Part 2 Section 4.3 at a time, and against an expected type, subject, issuer and digest; every condition and expectation shows its result |
+| `vector_get_delegation` | Show a live delegation with its terms and its chain of parents up to the root, or say that it is not live |
+| `vector_check_delegation_use` | List the problems that stop a delegation from being used for an action on a resource at one instant (an empty list means usable at that instant); optional minimum confirmations |
+| `vector_get_vault` | Show vault outputs (Live and Returned) by output reference, owner key hash or delegation, in pages. The outputs whose owner is the delegator of their delegation come first, the one with the most AP3X first. The page is confirmed on the node. For an output that can pay, it gives the value limit of the delegation, what the period still allows, and the ledger minimum of the smallest escrow output |
 
 ### Self-Improvement Module
 

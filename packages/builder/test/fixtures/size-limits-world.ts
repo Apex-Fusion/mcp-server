@@ -1,6 +1,6 @@
 // packages/builder/test/fixtures/size-limits-world.ts
 //
-// The world of input-size-limits.test.ts: the 79 tools of registerVectorTools behind an MCP client in the same process, a node that
+// The world of input-size-limits.test.ts: the 85 tools of registerVectorTools behind an MCP client in the same process, a node that
 // answers at once (no network, no wait), the texts that a caller can send, and the walk over the input schema of each tool that finds
 // every string input. The schema snapshot (test/smoke/tool-schemas.snapshot.json) is the list of tools and inputs.
 import './size-limits-env.ts'; // first: it sets the environment before the modules of the builder are loaded
@@ -180,6 +180,9 @@ export function baseArguments(tool: string, leaf: Leaf | undefined, world: { txC
   };
   const base = build(SNAPSHOT[tool].inputSchema, []) as Record<string, unknown>;
   if (tool === 'vector_await_transaction') base.timeoutSeconds = 1;
+  // The check of a delegation use needs an action and a resource that follow the rules (Part 2 Section 5.1), and a vault read needs exactly one of its three selectors.
+  if (tool === 'vector_check_delegation_use') Object.assign(base, { action: 'marketplace.hire.v1', resource: `script:${HEX56}` });
+  if (tool === 'vector_get_vault' && leaf === undefined) base.delegation = HEX64;
   return base;
 }
 

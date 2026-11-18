@@ -15,18 +15,23 @@ import { registerIdentityRegistryTools } from './identity-tools.js';
 import { registerAttestationTools } from './attestation-tools.js';
 import { registerDelegationTools } from './delegation-tools.js';
 import { registerVaultTools } from './vault-tools.js';
+import { registerLedgerReadTools } from './ledger-read-tools.js';
+import type { LedgerReadAccess } from './ledger-read-tools.js';
 
 function newProvider(): Provider { return new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL }); }
 
-/** Registers every identity family tool. `provider`, `limiter` and `deployment` are for tests. */
+/** Registers every identity family tool. `provider`, `limiter`, `deployment` and `options` (`access`: Koios and fetch for the reads) are for tests. */
 export function registerIdentityFamily(
   server: McpServer, identity: string,
   provider: () => Provider = newProvider, limiter: Pick<RateLimiter, 'check'> = limiterFor(identity),
   deployment: () => IdentityDeployment = requireIdentityDeployment,
+  options: { access?: LedgerReadAccess } = {},
 ) {
+  const { access = { koiosUrl: VECTOR_KOIOS_URL, fetchImpl: fetch } } = options;
   const gate = rateGate(limiter);
   registerIdentityRegistryTools(server, gate, provider, deployment);
   registerAttestationTools(server, gate, provider, deployment);
   registerDelegationTools(server, gate, provider, deployment);
   registerVaultTools(server, gate, provider, deployment);
+  registerLedgerReadTools(server, gate, provider, deployment, access);
 }

@@ -43,7 +43,7 @@ function vaultMinimum(lucid: LucidEvolution, deployment: IdentityDeployment, dat
 
 /** A vault output on the node: an unspent output with the vault script's credential and a vault datum. */
 interface VaultUtxo { ref: string; utxo: UTxO; vault: VaultDatum }
-async function readVault(ctx: IdentityContext, vaultRef: string): Promise<VaultUtxo> {
+export async function readVault(ctx: IdentityContext, vaultRef: string): Promise<VaultUtxo> {
   const parsed = parseOutRef(vaultRef);
   const ref = formatOutRef(parsed.txHash, parsed.outputIndex);
   const [utxo] = await ctx.provider.getUtxosByOutRef([parsed]);
