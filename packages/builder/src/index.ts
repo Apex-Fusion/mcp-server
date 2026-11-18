@@ -33,6 +33,8 @@ import { RATE_LIMIT_PER_MINUTE } from "./vector/rate-limiter.js";
 import { describeDeployment, serverIdentityDeployment } from "./vector/identity-deployment.js";
 import { describeGovDeployment, serverGovDeployment } from "./vector/gov-deployment.js";
 import { describeJurySources, serverJurySources } from "./vector/jury-deployment.js";
+import { setDecoderStop, watchStackPointer } from "./vector/decoder-health.js";
+import { stopServer } from "./stop-server.js";
 // Single source of truth for the advertised server version. tsup/esbuild
 // resolves this named JSON import at build time and inlines only the field,
 // so the built artifact has no runtime dependency on package.json's location.
@@ -48,6 +50,9 @@ function createMcpServer(identity: string) {
 }
 
 console.error('Vector MCP Server starting...');
+// After each tool call the server checks that the stack pointer of the decoder library is back at its start value, and puts it back when a
+// failed call left it changed (decoder-health.ts). The start value is read here: the library is loaded and no call into it is in progress.
+console.error(`Decoder library: ${watchStackPointer() ? 'the stack pointer is checked after each tool call' : 'no stack pointer export: the stack pointer is not checked'}.`);
 
 const authConfig = loadAuthConfig();
 if (authConfig.enabled) {
@@ -297,6 +302,12 @@ const httpServer = createServer(async (req, res) => {
 httpServer.listen(PORT, () => {
   console.error(`Vector MCP Server listening on port ${PORT}`);
 });
+
+// The process ends when its decoder library cannot decode a known value (decoder-health.ts), so that its supervisor starts it again
+// (the containers run with `--restart unless-stopped`). stopServer stops listening, lets the answers that are being written finish, and
+// ends the process with code 1, after the grace time at the latest: a call of another client that needs longer than that gets no answer.
+const DECODER_STOP_GRACE_MS = 3000;
+setDecoderStop(() => stopServer(httpServer, DECODER_STOP_GRACE_MS, (code) => process.exit(code)));
 
 httpServer.on('error', (err: Error) => {
   console.error('Fatal error in HTTP server:', err.message);

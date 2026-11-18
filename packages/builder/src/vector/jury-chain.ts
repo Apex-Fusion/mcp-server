@@ -3,9 +3,10 @@
 // names, the identity check that Module-1 (identity_ok) and the jury (SPEC Section 5.8) make, a validity window inside the time
 // bounds of an action, the ledger minimum of an output, the first input of a built transaction, the wallet inputs of a Module-1
 // build, and the lookup of a Module-1 claim or challenge by its token at any address of its script. Reads only; the builders assemble.
-import { CML, calculateMinLovelaceFromUTxO, getAddressDetails } from '@lucid-evolution/lucid';
+import { CML, calculateMinLovelaceFromUTxO } from '@lucid-evolution/lucid';
 import type { Assets, LucidEvolution, Provider, UTxO } from '@lucid-evolution/lucid';
 import { decodeIdentityDatum } from './identity-codec.js';
+import { addressDetails } from './guarded-decode.js';
 import { didOf, findTokenOutput, recordsById, windowAt, COLLATERAL_MIN_LOVELACE } from './identity-chain.js';
 import type { RecordUtxo, Window } from './identity-chain.js';
 import { MAX_DEPTH, PURPOSE, activeKey, effectiveStatus, keyHashOf } from './identity-rules.js';
@@ -126,7 +127,7 @@ export function module1Inputs(utxos: UTxO[], need: bigint): UTxO[] {
 /** The payment credential of `address` when it is a script's, whatever its stake part; else null (a key address, or no address). */
 function scriptCredentialOf(address: string): string | null {
   try {
-    const credential = getAddressDetails(address).paymentCredential;
+    const credential = addressDetails(address).paymentCredential;
     return credential?.type === 'Script' ? credential.hash : null;
   } catch { return null; }
 }

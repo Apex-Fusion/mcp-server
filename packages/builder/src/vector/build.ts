@@ -6,11 +6,13 @@
 // material anywhere in this package) and returns UNSIGNED CBOR. Signing
 // happens on the user's local signer; submission via vector_submit_transaction.
 import {
-  CML, Lucid, fromText, Data, applyDoubleCborEncoding, validatorToAddress,
-  validatorToScriptHash, getAddressDetails,
+  Lucid, fromText, Data, applyDoubleCborEncoding, validatorToAddress,
+  validatorToScriptHash,
 } from '@lucid-evolution/lucid';
 import type { LucidEvolution, Provider, SpendingValidator, TxSignBuilder } from '@lucid-evolution/lucid';
 import { lovelaceToAda, apexToLovelace } from '@apexfusion/vector-mcp-shared/tx';
+import { addressDetails } from './guarded-decode.js';
+import { readTransactionFee } from './tx-fee.js';
 import type {
   TxOutput, VectorUnsignedBuildResult, VectorBuildDeployResult, VectorBuildInteractResult,
 } from '@apexfusion/vector-mcp-shared/types';
@@ -23,7 +25,7 @@ import type {
  */
 export async function lucidForAddress(provider: Provider, changeAddress: string): Promise<LucidEvolution> {
   try {
-    getAddressDetails(changeAddress);
+    addressDetails(changeAddress);
   } catch (err) {
     throw new Error(`Invalid change address: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -48,20 +50,19 @@ export function toBuildResult(completed: TxSignBuilder): VectorUnsignedBuildResu
 }
 
 /**
- * The fee that a transaction declares in its body, in lovelace: what vector_dry_run reports for a transaction it is given. Throws a
- * readable error when `txCbor` does not decode as a transaction.
+ * The fee that a transaction declares in its body, in lovelace: what vector_dry_run reports for a transaction it is given. The fee is
+ * read from the bytes (tx-fee.ts) and no decoder library reads the transaction. A transaction whose fee can be read goes to the
+ * evaluation of the node, and the node judges the rest of it. Throws a readable error when the bytes hold no fee.
  */
 export function declaredFee(txCbor: string): string {
-  try {
-    return CML.Transaction.from_cbor_hex(txCbor).body().fee().toString();
-  } catch {
-    throw new Error('txCbor does not decode as a transaction (expected the hex CBOR of a built transaction), so it cannot be evaluated.');
-  }
+  const fee = readTransactionFee(Buffer.from(txCbor, 'hex'));
+  if (fee !== undefined) return fee.toString();
+  throw new Error('txCbor does not decode as a transaction (expected the hex CBOR of a built transaction), so it cannot be evaluated.');
 }
 
 function requireValidRecipient(address: string): void {
   try {
-    getAddressDetails(address);
+    addressDetails(address);
   } catch (err) {
     throw new Error(`Invalid recipient address: ${err instanceof Error ? err.message : String(err)}`);
   }

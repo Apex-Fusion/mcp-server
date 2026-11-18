@@ -7,7 +7,7 @@
 // 16-field datum that adds agent_id and refund). An escrow output's layout is the layout of its payment credential, and every output
 // that carries it on has the same layout. The legacy escrow finds the continuation of a Claim or Submit by payment credential, any
 // stake part; the identity escrow writes it at exactly its enterprise address, and keeps agent_id and refund as well.
-import { getAddressDetails } from '@lucid-evolution/lucid';
+import { addressDetails } from './guarded-decode.js';
 import type { Provider, UTxO } from '@lucid-evolution/lucid';
 import { ESCROW_SCRIPT_HASH } from './marketplace-constants.js';
 import { decodeEscrowDatum, decodeIdentityEscrowDatum, encodeEscrowDatum, encodeIdentityEscrowDatum, parseOutRef, formatOutRef } from './marketplace-datum.js';
@@ -29,7 +29,7 @@ export type EscrowLayout = 'legacy' | 'identity';
 function scriptCredentialOf(address: unknown): string | null {
   if (typeof address !== 'string') return null;
   try {
-    const credential = getAddressDetails(address).paymentCredential;
+    const credential = addressDetails(address).paymentCredential;
     return credential?.type === 'Script' ? credential.hash : null;
   } catch { return null; }
 }

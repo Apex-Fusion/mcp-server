@@ -7,11 +7,12 @@
 // ownership on-chain; the verifyOwnership() check here is a fail-fast courtesy.
 // The legacy registry's script, policy, address and deposit live in
 // legacy-registry.ts.
-import { toText, Data, Constr, getAddressDetails } from '@lucid-evolution/lucid';
+import { toText, Data, Constr } from '@lucid-evolution/lucid';
 import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
 import type { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
 import type { VectorBuildAgentOpResult } from '@apexfusion/vector-mcp-shared/types';
 import { toBuildResult } from './build.js';
+import { addressDetails } from './guarded-decode.js';
 import { LEGACY_REGISTRY_POLICY_ID, legacyRegistryScript, legacyRegistryAddress, legacyDid } from './legacy-registry.js';
 
 export interface RegistryAgentProfile {
@@ -29,7 +30,7 @@ export interface RegistryAgentProfile {
 export function paymentKeyHashOf(address: string): string {
   let details;
   try {
-    details = getAddressDetails(address);
+    details = addressDetails(address);
   } catch (e) {
     throw new Error(`Invalid address: ${e instanceof Error ? e.message : String(e)}`);
   }
