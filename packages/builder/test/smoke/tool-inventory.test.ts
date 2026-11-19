@@ -32,6 +32,8 @@ import { startServer, stopServer, ServerContext } from '../setup.ts';
 // tools took it to 74: 2 document tools (publish, read), the Module-1 claim and challenge builds, 5 juror builds and 2 jury reads. The
 // reputation stake tools on the identity-era Module-3 deployment took it to 78: the increase, capability update and decrease builds and
 // the read of stakes (the two steps that make a stake were already tools). The Module-1 claim withdrawal took it to 79.
+// The reads and checks of attestations, delegations and vaults took it to 85: 3 attestation reads (get, list, check), 2 delegation reads
+// (get, check use) and 1 vault read.
 const EXPECTED_TOOLS = [
   'vector_await_transaction',
   'vector_build_attestation_attest',
@@ -92,16 +94,22 @@ const EXPECTED_TOOLS = [
   'vector_build_vault_close',
   'vector_build_vault_open',
   'vector_build_vault_pay',
+  'vector_check_attestation',
+  'vector_check_delegation_use',
   'vector_discover_agents',
   'vector_dry_run',
   'vector_get_agent_profile',
+  'vector_get_attestation',
   'vector_get_balance',
+  'vector_get_delegation',
   'vector_get_document',
   'vector_get_jury',
   'vector_get_jury_cases',
   'vector_get_reputation_stake',
   'vector_get_transaction_history',
   'vector_get_utxos',
+  'vector_get_vault',
+  'vector_list_attestations',
   'vector_marketplace_get_job',
   'vector_marketplace_get_supplier',
   'vector_marketplace_list_capabilities',

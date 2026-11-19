@@ -19,7 +19,15 @@ export function host(url: string): string { try { return new URL(url).host; } ca
  * the assistant's context. The fenced JSON block carries the verbatim value.
  */
 export function cell(s: unknown, max = 80): string {
-  const flat = String(s ?? '').replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\|/g, '¦').replace(/`/g, "'").trim();
+  // The C0 and C1 controls (the C1 NEL breaks a line) and the line and paragraph separators become a space. The characters that draw
+  // nothing are removed: the zero-width characters and the direction marks (U+200B to U+200F), the embedding, override and isolate controls
+  // (U+202A to U+202E, U+2066 to U+2069), the word joiner and the invisible operators (U+2060 to U+2064), the soft hyphen (U+00AD), the
+  // Arabic letter mark (U+061C), the Mongolian vowel separator (U+180E), the byte order mark (U+FEFF), the variation selectors (U+FE00 to
+  // U+FE0F, U+E0100 to U+E01EF) and the tag characters (U+E0000 to U+E007F). They can reorder or hide the text around them, and the tag
+  // characters can write a whole hidden text. An emoji that carries a variation selector loses only the selector, and keeps its base character.
+  const flat = String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
+    .replace(/[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufe00-\ufe0f\ufeff\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu, '')
+    .replace(/\|/g, '¦').replace(/`/g, "'").trim();
   const chars = Array.from(flat);
   return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : flat;
 }

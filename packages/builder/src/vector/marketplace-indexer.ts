@@ -151,9 +151,10 @@ export async function fetchEscrows(buyerPkh: string, opts: Opts = {}): Promise<u
 
 /**
  * POST a JSON payload to a Koios route that answers with a list, and return the list. The failures name the operation and the
- * status only (see readJson): an HTTP error, a body that is not JSON, a body that is not a list.
+ * status only (see readJson): an HTTP error, a body that is not JSON, a body that is not a list. With `maxBytes` the body is read to
+ * that many bytes at most (readJsonCapped): a longer answer is refused, by its content-length or as soon as the stream passes the cap.
  */
-export async function koiosPostList(koiosUrl: string, route: string, payload: unknown, fetchImpl: typeof fetch, query = ''): Promise<unknown[]> {
+export async function koiosPostList(koiosUrl: string, route: string, payload: unknown, fetchImpl: typeof fetch, query = '', maxBytes?: number): Promise<unknown[]> {
   const base = koiosUrl.replace(/\/+$/, '');
   const res = await fetchImpl(`${base}/api/v1/${route}${query}`, {
     method: 'POST',
@@ -162,14 +163,14 @@ export async function koiosPostList(koiosUrl: string, route: string, payload: un
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`Koios ${route} answered ${res.status}`);
-  const body = await readJson<unknown>(res, `Koios ${route}`);
+  const body = maxBytes === undefined ? await readJson<unknown>(res, `Koios ${route}`) : await readJsonCapped<unknown>(res, `Koios ${route}`, maxBytes);
   if (!Array.isArray(body)) throw new Error(`Koios ${route}: Koios returned a non-list response`);
   return body;
 }
 
-/** Koios utxo_info: returns inline datum bytes even for spent outputs. */
-export async function koiosUtxoInfo(koiosUrl: string, refs: string[], fetchImpl: typeof fetch = fetch): Promise<KoiosUtxo[]> {
-  return (await koiosPostList(koiosUrl, 'utxo_info', { _utxo_refs: refs, _extended: true }, fetchImpl)) as KoiosUtxo[];
+/** Koios utxo_info: returns inline datum bytes even for spent outputs. `maxBytes` caps the answer (koiosPostList). */
+export async function koiosUtxoInfo(koiosUrl: string, refs: string[], fetchImpl: typeof fetch = fetch, maxBytes?: number): Promise<KoiosUtxo[]> {
+  return (await koiosPostList(koiosUrl, 'utxo_info', { _utxo_refs: refs, _extended: true }, fetchImpl, '', maxBytes)) as KoiosUtxo[];
 }
 
 /**
@@ -189,6 +190,31 @@ export class TooManyOutputs extends Error {
   }
 }
 
+/** The query tail that the filters of a credential_utxos read ask for (koiosCredentialUtxos and koiosCredentialPage). */
+function credentialFilter(opts: { datumContains?: string; assetPolicy?: string }): string {
+  let filter = '';
+  if (opts.datumContains !== undefined) {
+    if (!/^[0-9a-f]{2,256}$/i.test(opts.datumContains)) throw new Error('The datum slice to look for must be 1 to 128 bytes of hex.');
+    filter += `&inline_datum->>bytes=like.*${opts.datumContains.toLowerCase()}*`;
+  }
+  if (opts.assetPolicy !== undefined) {
+    if (!/^[0-9a-f]{56}$/i.test(opts.assetPolicy)) throw new Error('The asset policy must be 28 bytes of hex (56 characters).');
+    // PostgREST containment on the asset list of each row: the outputs that hold a token of the policy.
+    filter += `&asset_list=cs.${encodeURIComponent(JSON.stringify([{ policy_id: opts.assetPolicy.toLowerCase() }]))}`;
+  }
+  return filter;
+}
+
+/** Adds the entries of `page` that have a hash and an index to `rows`, by reference and in the order first seen. */
+function keepRows(rows: Map<string, KoiosUtxo>, page: unknown[]): void {
+  for (const entry of page) {
+    const row = entry as Partial<KoiosUtxo> | null;
+    if (row === null || typeof row !== 'object' || typeof row.tx_hash !== 'string' || !Number.isInteger(row.tx_index)) continue;
+    const ref = `${row.tx_hash.toLowerCase()}#${row.tx_index}`;
+    if (!rows.has(ref)) rows.set(ref, row as KoiosUtxo);
+  }
+}
+
 /**
  * Koios credential_utxos: the unspent outputs at every address whose payment credential is `paymentCredential` (28 bytes, hex),
  * whatever its stake part. The escrow validator finds the continuation of a Claim or Submit by payment credential alone, so the
@@ -200,19 +226,17 @@ export class TooManyOutputs extends Error {
  * entries are read, counting everything Koios sent whether or not it is a usable row: the last page asked for is cut to what the
  * cap leaves, and a full page that reaches the cap is refused (TooManyOutputs), as it cannot say there is no more. A Koios that sends full pages
  * of junk, or the same page again and again, cannot keep the read going. `pageSize` and `maxRows` must be positive whole numbers.
- * Errors name the operation and the status only.
+ * Errors name the operation and the status only. `assetPolicy` (56 hex) narrows the read on the server to the outputs that hold at
+ * least one token of that policy, so that outputs without one (anyone can lock them) do not count toward `maxRows`; the caller still
+ * checks every row it gets. `maxPageBytes` caps the body of each page (koiosPostList).
  */
 export async function koiosCredentialUtxos(
   koiosUrl: string, paymentCredential: string, fetchImpl: typeof fetch = fetch,
-  opts: { datumContains?: string; pageSize?: number; maxRows?: number } = {},
+  opts: { datumContains?: string; assetPolicy?: string; pageSize?: number; maxRows?: number; maxPageBytes?: number } = {},
 ): Promise<KoiosUtxo[]> {
   const credential = paymentCredential.toLowerCase();
   if (!/^[0-9a-f]{56}$/.test(credential)) throw new Error('The payment credential must be 28 bytes of hex (56 characters).');
-  let filter = '';
-  if (opts.datumContains !== undefined) {
-    if (!/^[0-9a-f]{2,256}$/i.test(opts.datumContains)) throw new Error('The datum slice to look for must be 1 to 128 bytes of hex.');
-    filter = `&inline_datum->>bytes=like.*${opts.datumContains.toLowerCase()}*`;
-  }
+  const filter = credentialFilter(opts);
   const pageSize = opts.pageSize ?? 100;
   const maxRows = opts.maxRows ?? CREDENTIAL_UTXOS_MAX_ROWS;
   // With a page size below one every page would count as full and add nothing to `read`: the loop below could not end. A cap
@@ -223,17 +247,32 @@ export async function koiosCredentialUtxos(
   let read = 0; // entries Koios has sent so far, which is also where the next page starts
   for (;;) {
     const limit = Math.min(pageSize, maxRows - read); // never ask for more than the cap leaves
-    const page = await koiosPostList(koiosUrl, 'credential_utxos', { _payment_credentials: [credential], _extended: true }, fetchImpl, `?order=tx_hash.asc,tx_index.asc&offset=${read}&limit=${limit}${filter}`);
+    const page = await koiosPostList(koiosUrl, 'credential_utxos', { _payment_credentials: [credential], _extended: true }, fetchImpl, `?order=tx_hash.asc,tx_index.asc&offset=${read}&limit=${limit}${filter}`, opts.maxPageBytes);
     read += page.length;
-    for (const entry of page) {
-      const row = entry as Partial<KoiosUtxo> | null;
-      if (row === null || typeof row !== 'object' || typeof row.tx_hash !== 'string' || !Number.isInteger(row.tx_index)) continue;
-      const ref = `${row.tx_hash.toLowerCase()}#${row.tx_index}`;
-      if (!rows.has(ref)) rows.set(ref, row as KoiosUtxo);
-    }
+    keepRows(rows, page);
     if (page.length < limit) return [...rows.values()];
     if (read >= maxRows) throw new TooManyOutputs(maxRows);
   }
+}
+
+/**
+ * One page of the list that koiosCredentialUtxos reads: `limit` rows from row `offset`, in the same order (tx hash, index) and with the
+ * same filters, and whether more rows follow. It asks Koios for one row more than `limit`, and it never asks for the rest, so no number of
+ * matching outputs makes it fail. A page is at most 999 rows: Koios sends 1,000 at most. A row that has no hash and no index is left out;
+ * the caller checks every other row. `maxPageBytes` caps the body (koiosPostList). Errors name the operation and the status only.
+ */
+export async function koiosCredentialPage(
+  koiosUrl: string, paymentCredential: string, fetchImpl: typeof fetch,
+  opts: { datumContains?: string; assetPolicy?: string; offset: number; limit: number; maxPageBytes?: number },
+): Promise<{ rows: KoiosUtxo[]; more: boolean }> {
+  const credential = paymentCredential.toLowerCase();
+  if (!/^[0-9a-f]{56}$/.test(credential)) throw new Error('The payment credential must be 28 bytes of hex (56 characters).');
+  if (!Number.isInteger(opts.offset) || opts.offset < 0) throw new Error('The offset must be a whole number of at least 0.');
+  if (!Number.isInteger(opts.limit) || opts.limit < 1 || opts.limit > 999) throw new Error('The limit must be a whole number from 1 to 999.');
+  const page = await koiosPostList(koiosUrl, 'credential_utxos', { _payment_credentials: [credential], _extended: true }, fetchImpl, `?order=tx_hash.asc,tx_index.asc&offset=${opts.offset}&limit=${opts.limit + 1}${credentialFilter(opts)}`, opts.maxPageBytes);
+  const rows = new Map<string, KoiosUtxo>();
+  keepRows(rows, page.slice(0, opts.limit));
+  return { rows: [...rows.values()], more: page.length > opts.limit };
 }
 
 // The tx_info call behind koiosTxInputCreds and koiosTxInputRefs. It asks for the inputs and the assets: without `_inputs` Koios
