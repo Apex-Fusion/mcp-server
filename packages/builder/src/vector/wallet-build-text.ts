@@ -3,7 +3,7 @@
 // vector_build_deploy_contract and vector_build_interact_contract): the facts of the build, every key that must sign, the unsigned
 // CBOR, the signing flow, and a JSON block whose required_signers have the shape of the identity and marketplace tools
 // ([{ key_hash, roles }]). An unsigned transaction that is submitted is refused, so the answer names each key before the CBOR.
-import { CML } from '@lucid-evolution/lucid';
+import { decodeTransaction } from './guarded-decode.js';
 import type { VectorUnsignedBuildResult } from '@apexfusion/vector-mcp-shared/types';
 import { paymentKeyHashOf } from './gov-build.js';
 import { SignerList } from './identity-chain.js';
@@ -16,7 +16,7 @@ import { signersLine, signersJson } from './marketplace-shared.js';
  * inputs and the fee, and the collateral of a script spend), and each key hash that the transaction body names as a required signer.
  */
 export function walletSigners(txCbor: string, changeAddress: string): RequiredSigner[] {
-  const body = CML.Transaction.from_cbor_hex(txCbor).body();
+  const body = decodeTransaction(txCbor).body();
   const collateral = (body.collateral_inputs()?.len() ?? 0) > 0;
   const signers = new SignerList().add(paymentKeyHashOf(changeAddress), collateral ? 'wallet (inputs, fee and collateral)' : 'wallet (inputs and fee)');
   const named = body.required_signers();

@@ -2,6 +2,7 @@
 // Read-only clients for the public marketplace indexer and Koios utxo_info.
 // No supplier URLs are contacted here (marketplace-transport.ts does that, through safeFetch).
 import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
+import { assertCborHexDepth } from '@apexfusion/vector-mcp-shared/cbor-depth';
 import { ADVERT_ADDRESS, INDEXER_URL } from './marketplace-constants.js';
 import { decodeAdvertDatum, decodeIdentityAdvertDatum, formatOutRef, parseOutRef } from './marketplace-datum.js';
 import type { AdvertDatum, IdentityAdvertDatum } from './marketplace-datum.js';
@@ -168,9 +169,25 @@ export async function koiosPostList(koiosUrl: string, route: string, payload: un
   return body;
 }
 
+/**
+ * `row` as it is, or without its inline datum when that is nested too deep or is not CBOR at all. The row keeps its other fields. The
+ * readers of a row (the decoders of marketplace-datum.ts, jury-codec.ts and identity-codec.ts) take a row with no inline datum for one
+ * whose datum is not of their type.
+ */
+function withReadableDatum(row: KoiosUtxo): KoiosUtxo {
+  const bytes = row?.inline_datum?.bytes;
+  if (typeof bytes !== 'string') return row;
+  try {
+    assertCborHexDepth(bytes, { what: 'The datum' });
+    return row;
+  } catch {
+    return { ...row, inline_datum: null };
+  }
+}
+
 /** Koios utxo_info: returns inline datum bytes even for spent outputs. `maxBytes` caps the answer (koiosPostList). */
 export async function koiosUtxoInfo(koiosUrl: string, refs: string[], fetchImpl: typeof fetch = fetch, maxBytes?: number): Promise<KoiosUtxo[]> {
-  return (await koiosPostList(koiosUrl, 'utxo_info', { _utxo_refs: refs, _extended: true }, fetchImpl, '', maxBytes)) as KoiosUtxo[];
+  return ((await koiosPostList(koiosUrl, 'utxo_info', { _utxo_refs: refs, _extended: true }, fetchImpl, '', maxBytes)) as KoiosUtxo[]).map(withReadableDatum);
 }
 
 /**
@@ -211,7 +228,7 @@ function keepRows(rows: Map<string, KoiosUtxo>, page: unknown[]): void {
     const row = entry as Partial<KoiosUtxo> | null;
     if (row === null || typeof row !== 'object' || typeof row.tx_hash !== 'string' || !Number.isInteger(row.tx_index)) continue;
     const ref = `${row.tx_hash.toLowerCase()}#${row.tx_index}`;
-    if (!rows.has(ref)) rows.set(ref, row as KoiosUtxo);
+    if (!rows.has(ref)) rows.set(ref, withReadableDatum(row as KoiosUtxo));
   }
 }
 

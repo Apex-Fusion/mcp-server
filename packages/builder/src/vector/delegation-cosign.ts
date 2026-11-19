@@ -47,7 +47,7 @@ import { MAX_RANGE_MS, PURPOSE, activeKey, effectiveStatus, keyHashOf, keyHasPur
 import { delegationProblems } from './delegation-build.js';
 import { isoOrRaw } from './marketplace-shared.js';
 import { isTimeout, jsonObject } from './marketplace-supplier.js';
-import { addressDetails } from './guarded-decode.js';
+import { addressDetails, decodeTransaction } from './guarded-decode.js';
 import { safeFetch } from './safe-fetch.js';
 import type { SafeFetchOpts } from './safe-fetch.js';
 import { readTransactionBody } from './tx-body.js';
@@ -210,7 +210,7 @@ export function signatureVerifies(publicKey: Uint8Array, signature: Uint8Array, 
 /** The transaction that `hex` (lower case) writes, or null. CML reads a prefix of its input, so the transaction must write itself back as the same text. */
 function parseTransaction(hex: string): CML.Transaction | null {
   try {
-    const tx = CML.Transaction.from_cbor_hex(hex);
+    const tx = decodeTransaction(hex, 'txCbor');
     return tx.to_cbor_hex() === hex ? tx : null;
   } catch { return null; }
 }

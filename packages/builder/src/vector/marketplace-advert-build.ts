@@ -12,9 +12,9 @@
 // live, independent and Active, and lists the supplier key with the transaction purpose and the capability), so that the advert they
 // write is one the indexer lists. Every transaction lists the supplier key as a required signer: the listing rule's first condition.
 // Nothing is signed or submitted.
-import { Data, Constr, CML, calculateMinLovelaceFromUTxO, fromText, toText } from '@lucid-evolution/lucid';
+import { Data, Constr, calculateMinLovelaceFromUTxO, fromText, toText } from '@lucid-evolution/lucid';
 import type { LucidEvolution, Provider, UTxO } from '@lucid-evolution/lucid';
-import { addressDetails } from './guarded-decode.js';
+import { addressDetails, decodeTransaction } from './guarded-decode.js';
 import { isIP } from 'node:net';
 import {
   ADVERT_DEPOSIT_FLOOR_LOVELACE, ADVERT_SCRIPT_HASH, DATUM_BYTES_MAX, EMPTY_DETAIL_HASH, MAX_ESCROW_LOVELACE, MAX_PROCESSING_MS_CEILING,
@@ -245,7 +245,7 @@ function depositFor(lucid: LucidEvolution, deployment: IdentityDeployment, datum
 
 /** The index of the only output at `address` in the built transaction. */
 function outputIndexAt(txCbor: string, address: string): number {
-  const outputs = CML.Transaction.from_cbor_hex(txCbor).body().outputs();
+  const outputs = decodeTransaction(txCbor).body().outputs();
   for (let i = 0; i < outputs.len(); i++) if (outputs.get(i).address().to_bech32() === address) return i;
   throw new Error('The built transaction has no advert output; nothing is returned.');
 }

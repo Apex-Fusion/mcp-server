@@ -12,7 +12,7 @@ import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
 import type { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
 import type { VectorBuildAgentOpResult } from '@apexfusion/vector-mcp-shared/types';
 import { toBuildResult } from './build.js';
-import { addressDetails } from './guarded-decode.js';
+import { addressDetails, decodePlutusData } from './guarded-decode.js';
 import { LEGACY_REGISTRY_POLICY_ID, legacyRegistryScript, legacyRegistryAddress, legacyDid } from './legacy-registry.js';
 
 export interface RegistryAgentProfile {
@@ -44,7 +44,7 @@ export function parseAgentDatum(
   datumCbor: string, utxoRef: string, assets: Record<string, bigint>,
 ): RegistryAgentProfile | null {
   try {
-    const c = Data.from(datumCbor);
+    const c = decodePlutusData(datumCbor);
     if (!(c instanceof Constr) || c.index !== 0 || c.fields.length !== 7) return null;
     const ownerCred = c.fields[0];
     if (!(ownerCred instanceof Constr) || typeof ownerCred.fields[0] !== 'string') return null;

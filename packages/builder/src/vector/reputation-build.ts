@@ -34,6 +34,7 @@ import type { RecordUtxo, SignedByBuild, Window } from './identity-chain.js';
 import type { BuildCommon, IdentityContext } from './identity-build.js';
 import type { IdentityDatum } from './identity-codec.js';
 import { textOf, utf8Hex } from './identity-codec.js';
+import { decodeTransaction } from './guarded-decode.js';
 import type { IdentityDeployment } from './identity-deployment.js';
 import { PURPOSE, activeKey, effectiveStatus, hasCapability, keyHashOf } from './identity-rules.js';
 import { windowWithin } from './jury-chain.js';
@@ -293,7 +294,7 @@ export function minimumOf(lucid: LucidEvolution, address: string, assets: Record
 
 /** The index and the lovelace of the output of a built transaction at `address` that holds `unit` (when given) and the inline datum `datumHex` (when given). */
 export function findOutput(txCbor: string, want: { address: string; unit?: string; datumHex?: string }): { index: number; lovelace: bigint } {
-  const outputs = CML.Transaction.from_cbor_hex(txCbor).body().outputs();
+  const outputs = decodeTransaction(txCbor).body().outputs();
   for (let i = 0; i < outputs.len(); i++) {
     const output = outputs.get(i);
     if (output.address().to_bech32() !== want.address) continue;

@@ -11,7 +11,8 @@ import {
 } from '@lucid-evolution/lucid';
 import type { LucidEvolution, Provider, SpendingValidator, TxBuilder, TxSignBuilder } from '@lucid-evolution/lucid';
 import { lovelaceToAda, apexToLovelace } from '@apexfusion/vector-mcp-shared/tx';
-import { addressDetails } from './guarded-decode.js';
+import { CborGuardError, assertCborHexDepth } from '@apexfusion/vector-mcp-shared/cbor-depth';
+import { addressDetails, assertDatumInput, assertScriptInput } from './guarded-decode.js';
 import { readTransactionFee } from './tx-fee.js';
 import type {
   TxOutput, VectorUnsignedBuildResult, VectorBuildDeployResult, VectorBuildInteractResult,
@@ -51,12 +52,18 @@ export function toBuildResult(completed: TxSignBuilder): VectorUnsignedBuildResu
 
 /**
  * The fee that a transaction declares in its body, in lovelace: what vector_dry_run reports for a transaction it is given. The fee is
- * read from the bytes (tx-fee.ts) and no decoder library reads the transaction. A transaction whose fee can be read goes to the
- * evaluation of the node, and the node judges the rest of it. Throws a readable error when the bytes hold no fee.
+ * read from the bytes (tx-fee.ts) and no decoder library reads the transaction. The bytes are checked first: a transaction that is
+ * nested deeper than 64 levels, or is not well-formed CBOR, is refused. A transaction whose fee can be read goes to the evaluation of
+ * the node, and the node judges the rest of it. Throws a readable error when the bytes are refused or hold no fee.
  */
 export function declaredFee(txCbor: string): string {
-  const fee = readTransactionFee(Buffer.from(txCbor, 'hex'));
-  if (fee !== undefined) return fee.toString();
+  try {
+    assertCborHexDepth(txCbor, { what: 'txCbor', kind: 'transaction' });
+    const fee = readTransactionFee(Buffer.from(txCbor, 'hex'));
+    if (fee !== undefined) return fee.toString();
+  } catch (err) {
+    if (err instanceof CborGuardError && err.reason === 'depth') throw new Error(`${err.message} It cannot be evaluated.`);
+  }
   throw new Error('txCbor does not decode as a transaction (expected the hex CBOR of a built transaction), so it cannot be evaluated.');
 }
 
@@ -184,12 +191,14 @@ export async function buildDeployContract(
   lucid: LucidEvolution,
   p: { scriptCbor: string; scriptType: 'PlutusV1' | 'PlutusV2' | 'PlutusV3'; initialDatum?: string; lovelaceAmount?: number },
 ): Promise<VectorBuildDeployResult> {
+  assertScriptInput(p.scriptCbor);
   const validator: SpendingValidator = {
     type: p.scriptType,
     script: applyDoubleCborEncoding(p.scriptCbor),
   };
   const scriptAddress = validatorToAddress('Mainnet', validator);
   const scriptHash = validatorToScriptHash(validator);
+  if (p.initialDatum !== undefined) assertDatumInput(p.initialDatum, 'initialDatum');
   const datum = p.initialDatum ?? Data.void();
   const lovelace = BigInt(p.lovelaceAmount ?? 2_000_000);
   const tx = lucid.newTx()
@@ -205,6 +214,7 @@ export async function buildInteractContract(
     utxoRef?: { txHash: string; outputIndex: number }; assets?: Record<string, string>;
   },
 ): Promise<VectorBuildInteractResult> {
+  assertScriptInput(p.scriptCbor);
   const validator: SpendingValidator = {
     type: p.scriptType,
     script: applyDoubleCborEncoding(p.scriptCbor),
@@ -213,6 +223,7 @@ export async function buildInteractContract(
 
   if (p.action === 'lock') {
     // '' must NOT silently become void - ?? lets a caller bug fail loudly downstream
+    if (p.datum !== undefined) assertDatumInput(p.datum, 'datum');
     const datumData = p.datum ?? Data.void();
     const outputAssets: Record<string, bigint> = { lovelace: BigInt(p.lovelaceAmount ?? 2_000_000) };
     if (p.assets) {
@@ -235,6 +246,7 @@ export async function buildInteractContract(
     if (p.utxoRef && scriptUtxos.some((u) => u.address !== scriptAddress)) {
       throw new Error(`UTxO ${p.utxoRef.txHash}#${p.utxoRef.outputIndex} is not at script address ${scriptAddress}`);
     }
+    if (p.redeemer !== undefined) assertDatumInput(p.redeemer, 'redeemer');
     const redeemerData = p.redeemer ?? Data.void();
     let completed;
     try {

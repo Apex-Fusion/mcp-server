@@ -835,17 +835,41 @@ describe('the keys of the body are read from the bytes, and the decoder library 
     }
   });
 
-  test('a body that the reader reads and the library cannot decode is refused after the library was called once, with the same words', async () => {
+  test('a transaction that is nested deeper than 64 levels is refused as a transaction that does not decode, and the decoder library is not called', async () => {
     const b = await delegateBuild();
     const parts = rawParts(b.txCbor);
-    const readable: Record<string, string> = {
-      'the build with nothing after its body': b.txCbor.slice(0, (parts.body.length / 2 + 1) * 2),
-      'the build with a witness set that is not a map': `84${parts.body}01${parts.isValid}${parts.auxiliary}`,
+    const withAuxiliary = (auxiliary: string) => `84${parts.body}${parts.witnessSet}${parts.isValid}${auxiliary}`;
+    const shapes: Record<string, string> = {
+      'maps in maps, as many as the size limit holds': `${'a100'.repeat(7000)}00`,
+      'lists in lists, 64 levels (65 with the transaction)': `${'81'.repeat(64)}00`,
+      'tags in tags, 64 levels (65 with the transaction)': `${'c0'.repeat(64)}00`,
     };
-    for (const [what, tx] of Object.entries(readable)) {
+    for (const [what, auxiliary] of Object.entries(shapes)) {
+      const tx = withAuxiliary(auxiliary);
+      assert.ok(tx.length <= MAX_COSIGN_TX_HEX, `${what}: the text is inside the size limit`);
+      assert.ok(readTransactionBody(Buffer.from(tx, 'hex')), `${what}: the reader of the bytes reads it, so only the check stands before the library`);
+      const decoder = decoderCalls();
+      assert.throws(() => atOnce(() => read(tx)), message(NOT_DECODED), what);
+      assert.equal(decoder.mock.callCount(), 0, `${what}: the library is not called`);
+      decoder.mock.restore();
+    }
+    // 63 levels in the auxiliary data are 64 levels with the transaction: the text passes the check, and the library reads it.
+    const decoder = decoderCalls();
+    assert.throws(() => atOnce(() => read(withAuxiliary(`${'81'.repeat(63)}00`))), message(NOT_DECODED));
+    assert.equal(decoder.mock.callCount(), 1);
+  });
+
+  test('a body that the reader reads and the library cannot decode is refused with the same words: the check refuses what is not CBOR, and the library reads the rest once', async () => {
+    const b = await delegateBuild();
+    const parts = rawParts(b.txCbor);
+    const readable: Record<string, [text: string, libraryCalls: number]> = {
+      'the build with nothing after its body (not well-formed CBOR: the check refuses it)': [b.txCbor.slice(0, (parts.body.length / 2 + 1) * 2), 0],
+      'the build with a witness set that is not a map': [`84${parts.body}01${parts.isValid}${parts.auxiliary}`, 1],
+    };
+    for (const [what, [tx, libraryCalls]] of Object.entries(readable)) {
       const decoder = decoderCalls();
       assert.throws(() => read(tx), message(NOT_DECODED), what);
-      assert.equal(decoder.mock.callCount(), 1, `${what}: the library is called once`);
+      assert.equal(decoder.mock.callCount(), libraryCalls, `${what}: the library is called ${libraryCalls} times`);
       decoder.mock.restore();
     }
   });

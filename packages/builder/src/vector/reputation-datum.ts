@@ -8,6 +8,7 @@
 // stake address. Its values come from Module-3/deploy/identity/mainnet/deploy_state.json (read from Vector mainnet on 2026-11-18).
 import { Constr, Data } from '@lucid-evolution/lucid';
 import { blake2b } from '@noble/hashes/blake2b';
+import { decodePlutusData } from './guarded-decode.js';
 
 /** The reputation validator: the policy of the stake token and the script credential of the stake address. */
 export const REPUTATION_SCRIPT_HASH = 'fad945ab20f61a58fbdf6a33a8f491899b7dd4167fb64200bc060424';
@@ -63,7 +64,7 @@ export function encodeStakeDatum(d: StakeDatum): string {
 /** The 8 fields of a stake datum. Refuses what is not exactly that shape (a datum of the earlier 6-field layout included). */
 export function decodeStakeDatum(hex: string): StakeDatum {
   let c: Data;
-  try { c = Data.from(hex); } catch { throw new Error('not a stake datum (not Plutus data)'); }
+  try { c = decodePlutusData(hex, 'The stake datum'); } catch { throw new Error('not a stake datum (not Plutus data)'); }
   if (!(c instanceof Constr) || c.index !== 0 || c.fields.length !== 8) throw new Error('not a stake datum (expected constructor 0 with 8 fields)');
   const [did, owner, amount, caps, updated, history, locks, stakeId] = c.fields;
   if (!isHex(did, 32)) throw new Error('stake datum: agent_did is not 32 bytes');
@@ -99,7 +100,7 @@ export const PARAMS_FIELD_COUNT = 22;
 /** `min_self_stake` (field 0) and `stake_cooldown` (field 3) of the 22-field parameters record. */
 export function decodeStakeParams(hex: string): StakeParams {
   let c: Data;
-  try { c = Data.from(hex); } catch { throw new Error('not the module parameters datum (not Plutus data)'); }
+  try { c = decodePlutusData(hex, 'The parameters datum'); } catch { throw new Error('not the module parameters datum (not Plutus data)'); }
   if (!(c instanceof Constr) || c.index !== 0 || c.fields.length !== PARAMS_FIELD_COUNT) throw new Error(`not the module parameters datum (expected constructor 0 with ${PARAMS_FIELD_COUNT} fields)`);
   const [min, , , cooldown] = c.fields;
   if (typeof min !== 'bigint' || typeof cooldown !== 'bigint' || min <= 0n || cooldown < 0n) throw new Error('module parameters: min_self_stake must be a positive integer and stake_cooldown a whole number');
@@ -109,7 +110,7 @@ export function decodeStakeParams(hex: string): StakeParams {
 /** The cross-validator references datum (config.ak CrossValidatorRefs): the reputation and the endorsement script hashes. */
 export function decodeCrossRefs(hex: string): { reputation: string; endorsement: string } {
   let c: Data;
-  try { c = Data.from(hex); } catch { throw new Error('not the cross-validator references datum (not Plutus data)'); }
+  try { c = decodePlutusData(hex, 'The references datum'); } catch { throw new Error('not the cross-validator references datum (not Plutus data)'); }
   if (!(c instanceof Constr) || c.index !== 0 || c.fields.length !== 2 || !isHex(c.fields[0], 28) || !isHex(c.fields[1], 28)) throw new Error('not the cross-validator references datum');
   return { reputation: c.fields[0], endorsement: c.fields[1] };
 }

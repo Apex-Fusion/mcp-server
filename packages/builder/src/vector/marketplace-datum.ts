@@ -14,6 +14,7 @@ import { Data, Constr, fromText, toText } from '@lucid-evolution/lucid';
 import { createHash } from 'node:crypto';
 import { constrFields, bytesOf, optionOf, plutusAddressOf, plutusAddressToData } from './identity-codec.js';
 import type { PlutusAddress } from './identity-codec.js';
+import { decodePlutusData } from './guarded-decode.js';
 
 export type AdvertStatus = 'Active' | 'Retired';
 export type EscrowState = 'Open' | 'Claimed' | 'Submitted' | 'Accepted' | 'Reclaimed' | 'Released';
@@ -99,7 +100,7 @@ function advertFieldsOf(f: Data[]): AdvertDatum {
 }
 
 export function decodeAdvertDatum(hex: string): AdvertDatum {
-  const c = asConstr(Data.from(hex), 'advert');
+  const c = asConstr(decodePlutusData(hex), 'advert');
   if (c.index !== 0 || c.fields.length !== 13) throw new Error(`advert: expected Constr 0 with 13 fields, got ${c.index}/${c.fields.length}`);
   return advertFieldsOf(c.fields);
 }
@@ -109,14 +110,14 @@ export interface IdentityAdvertDatum extends AdvertDatum { agent_id: string }
 export type AnyAdvertDatum = { layout: 'legacy'; datum: AdvertDatum } | { layout: 'identity'; datum: IdentityAdvertDatum };
 
 export function decodeIdentityAdvertDatum(hex: string): IdentityAdvertDatum {
-  const c = asConstr(Data.from(hex), 'advert');
+  const c = asConstr(decodePlutusData(hex), 'advert');
   if (c.index !== 0 || c.fields.length !== 14) throw new Error(`advert: expected Constr 0 with 14 fields, got ${c.index}/${c.fields.length}`);
   return { ...advertFieldsOf(c.fields), agent_id: bytesOf(c.fields[13], 'advert.agent_id', 32) };
 }
 
 /** Either advert layout, by its field count: 13 legacy, 14 identity. */
 export function decodeAnyAdvertDatum(hex: string): AnyAdvertDatum {
-  const c = asConstr(Data.from(hex), 'advert');
+  const c = asConstr(decodePlutusData(hex), 'advert');
   if (c.index === 0 && c.fields.length === 13) return { layout: 'legacy', datum: advertFieldsOf(c.fields) };
   if (c.index === 0 && c.fields.length === 14) return { layout: 'identity', datum: decodeIdentityAdvertDatum(hex) };
   throw new Error(`advert: expected Constr 0 with 13 (legacy) or 14 (identity) fields, got ${c.index}/${c.fields.length}`);
@@ -142,7 +143,7 @@ const ADVERT_TEXT_FIELDS = [1, 2, 8, 9];
  */
 export function advertTextFieldsRoundTrip(datumHex: string): boolean {
   let parsed: Data;
-  try { parsed = Data.from(datumHex); } catch { return false; }
+  try { parsed = decodePlutusData(datumHex); } catch { return false; }
   if (!(parsed instanceof Constr) || (parsed.fields.length !== 13 && parsed.fields.length !== 14)) return false;
   const fields = parsed.fields;
   return ADVERT_TEXT_FIELDS.every((i) => {
@@ -177,7 +178,7 @@ function escrowFieldsOf(f: Data[]): EscrowDatum {
 }
 
 export function decodeEscrowDatum(hex: string): EscrowDatum {
-  const c = asConstr(Data.from(hex), 'escrow');
+  const c = asConstr(decodePlutusData(hex), 'escrow');
   if (c.index !== 0 || c.fields.length !== 14) throw new Error(`escrow: expected Constr 0 with 14 fields, got ${c.index}/${c.fields.length}`);
   return escrowFieldsOf(c.fields);
 }
@@ -192,7 +193,7 @@ export interface IdentityEscrowDatum extends EscrowDatum { agent_id: string; ref
 export type AnyEscrowDatum = { layout: 'legacy'; datum: EscrowDatum } | { layout: 'identity'; datum: IdentityEscrowDatum };
 
 export function decodeIdentityEscrowDatum(hex: string): IdentityEscrowDatum {
-  const c = asConstr(Data.from(hex), 'escrow');
+  const c = asConstr(decodePlutusData(hex), 'escrow');
   if (c.index !== 0 || c.fields.length !== 16) throw new Error(`escrow: expected Constr 0 with 16 fields, got ${c.index}/${c.fields.length}`);
   const refund = optionOf(c.fields[15], 'escrow.refund', (d, p): Refund => {
     const [address, datum] = constrFields(d, p, 0, 2);
@@ -203,7 +204,7 @@ export function decodeIdentityEscrowDatum(hex: string): IdentityEscrowDatum {
 
 /** Either escrow layout, by its field count: 14 legacy, 16 identity. */
 export function decodeAnyEscrowDatum(hex: string): AnyEscrowDatum {
-  const c = asConstr(Data.from(hex), 'escrow');
+  const c = asConstr(decodePlutusData(hex), 'escrow');
   if (c.index === 0 && c.fields.length === 14) return { layout: 'legacy', datum: escrowFieldsOf(c.fields) };
   if (c.index === 0 && c.fields.length === 16) return { layout: 'identity', datum: decodeIdentityEscrowDatum(hex) };
   throw new Error(`escrow: expected Constr 0 with 14 (legacy) or 16 (identity) fields, got ${c.index}/${c.fields.length}`);
@@ -221,7 +222,7 @@ export function identityEscrowDatumToData(d: IdentityEscrowDatum): Data {
     BigInt(d.deliver_by), BigInt(d.posted_at),
     option(d.submitted_at === null ? null : BigInt(d.submitted_at)), option(d.result_receipt_hash),
     new Constr(stateAlt, []), d.agent_id,
-    option(d.refund === null ? null : new Constr(0, [plutusAddressToData(d.refund.address), option(d.refund.datum === null ? null : Data.from(d.refund.datum))])),
+    option(d.refund === null ? null : new Constr(0, [plutusAddressToData(d.refund.address), option(d.refund.datum === null ? null : decodePlutusData(d.refund.datum))])),
   ]);
 }
 

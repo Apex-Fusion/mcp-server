@@ -1,10 +1,9 @@
 // packages/builder/test/address-check.test.ts
 // Every address is read through addressDetails (guarded-decode.ts): the empty string is refused with the message that Lucid gives for text
 // that is not an address, and the decoder does not see it. A text of more than 1,024 characters is refused too, in a short time, with a
-// message that does not hold the text. The tests: the
-// function itself, and the wallet tools, with an address in each place where a tool takes one (the answer is the one for any text that is
-// not an address, and the empty string and a long text do not reach the decoder). The sites test names each direct call of
-// getAddressDetails (decoder-sites.test.ts).
+// message that does not hold the text. The tests: the function itself, and the wallet tools, with an address in each place where a tool
+// takes one (the answer is the one for any text that is not an address, and the empty string and a long text do not reach the decoder).
+// The sites test names each direct call of getAddressDetails (cbor-guard-sites.test.ts).
 import { afterEach, describe, test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML, getAddressDetails } from '@lucid-evolution/lucid';

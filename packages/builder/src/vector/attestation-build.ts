@@ -10,6 +10,7 @@ import {
   MAX_TIME_MS, decodeAttestationDatum, encodeAttestationDatum, encodeAttestationMint, encodeAttestationSpend,
 } from './identity-codec.js';
 import type { Anchor, AttestationDatum, AttestationSpend, Link } from './identity-codec.js';
+import { decodeTransaction } from './guarded-decode.js';
 import { readRefScript } from './identity-deployment.js';
 import type { IdentityDeployment } from './identity-deployment.js';
 import {
@@ -366,7 +367,7 @@ export async function buildAttest(ctx: IdentityContext, p: AttestParams): Promis
   const outputIndex = outputIndexOf(result.txCbor, deployment.attestation.address, unit);
   return {
     ...result, id, seed: `${seed.txHash}#${seed.outputIndex}`, outputIndex,
-    depositLovelace: CML.Transaction.from_cbor_hex(result.txCbor).body().outputs().get(outputIndex).amount().coin(),
+    depositLovelace: decodeTransaction(result.txCbor).body().outputs().get(outputIndex).amount().coin(),
     issuedAt: window.hi, attestation, sigStructure: envelopeSigStructure(envelope),
   };
 }
@@ -450,7 +451,7 @@ async function buildKept(
   const outputIndex = outputIndexOf(result.txCbor, deployment.attestation.address, unit);
   return {
     ...result, id: current.id, action: decided.redeemer.type === 'RevokeAtt' ? 'RevokeAtt' : 'Contest', summary: decided.summary,
-    outputIndex, outputLovelace: CML.Transaction.from_cbor_hex(result.txCbor).body().outputs().get(outputIndex).amount().coin(), attestation: decided.next,
+    outputIndex, outputLovelace: decodeTransaction(result.txCbor).body().outputs().get(outputIndex).amount().coin(), attestation: decided.next,
   };
 }
 

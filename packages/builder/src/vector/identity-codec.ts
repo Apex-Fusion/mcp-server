@@ -14,7 +14,7 @@
 // of a valid record (Part 2 Section 3.3); identity-rules.ts does. Every error is `<what>: <field path>: <problem>`.
 import { Constr, Data, credentialToAddress } from '@lucid-evolution/lucid';
 import type { AddressDetails } from '@lucid-evolution/lucid';
-import { addressDetails } from './guarded-decode.js';
+import { addressDetails, decodePlutusData } from './guarded-decode.js';
 
 // ─── Shared readers and writers ─────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -37,7 +37,7 @@ function codec<T>(name: string, body: () => T): T {
 
 function parse(hex: string): Data {
   if (typeof hex !== 'string' || !HEX.test(hex.toLowerCase())) fail('cbor', 'expected hex');
-  try { return Data.from(hex.toLowerCase()); } catch { return fail('cbor', 'not Plutus Data'); }
+  try { return decodePlutusData(hex.toLowerCase()); } catch { return fail('cbor', 'not Plutus Data'); }
 }
 
 export function constrFields(x: Data, path: string, index: number, count: number): Data[] {

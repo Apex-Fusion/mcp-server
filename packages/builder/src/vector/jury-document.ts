@@ -8,6 +8,7 @@ import { CML } from '@lucid-evolution/lucid';
 import { koiosPostList } from './marketplace-indexer.js';
 import { safeFetch } from './safe-fetch.js';
 import type { SafeFetchOpts } from './safe-fetch.js';
+import { decodeMetadatum, decodeTransaction } from './guarded-decode.js';
 import { blake2b256Hex } from './jury-codec.js';
 
 /** The metadata label of a document (SPEC Section 10.1). */
@@ -189,7 +190,7 @@ function koiosJson(metadatum: CML.TransactionMetadatum, txHash: string): unknown
 /** The label 22084 value in the CBOR of a whole transaction (hex), as Koios shows it; undefined when the transaction has no such label. */
 function labelOfTransaction(cborHex: string, txHash: string): unknown {
   let metadatum: CML.TransactionMetadatum | undefined;
-  try { metadatum = CML.Transaction.from_cbor_hex(cborHex).auxiliary_data()?.metadata()?.get(BigInt(DOCUMENT_LABEL)); } catch (err) {
+  try { metadatum = decodeTransaction(cborHex).auxiliary_data()?.metadata()?.get(BigInt(DOCUMENT_LABEL)); } catch (err) {
     throw new Error(`The CBOR of the transaction ${txHash} does not decode (${errorText(err)}).`);
   }
   return metadatum === undefined ? undefined : koiosJson(metadatum, txHash);
@@ -203,7 +204,7 @@ function labelOfMetadata(cborHex: string, txHash: string): unknown {
   if (!/^(?:[0-9a-fA-F]{2})+$/.test(cborHex)) throw new Error(`The CBOR metadata of the transaction ${txHash} is not hex.`);
   let metadatum: CML.TransactionMetadatum;
   try {
-    const decoded = CML.TransactionMetadatum.from_cbor_bytes(Buffer.from(cborHex, 'hex'));
+    const decoded = decodeMetadatum(Buffer.from(cborHex, 'hex'));
     const labelled = decoded.kind() === CML.TransactionMetadatumKind.Map
       ? decoded.as_map()?.get(CML.TransactionMetadatum.new_int(CML.Int.new(BigInt(DOCUMENT_LABEL))))
       : undefined;

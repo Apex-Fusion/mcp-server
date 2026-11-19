@@ -65,12 +65,12 @@ const FORBIDDEN_IMPORTS = [
 ];
 
 const SHARED_PKG = '@apexfusion/vector-mcp-shared';
-// /tx and /types are pure. /provider is network-capable. /config is deliberately
+// /tx, /types and /cbor-depth are pure (cbor-depth.ts has no imports at all). /provider is network-capable. /config is deliberately
 // excluded too: it carries network endpoint URLs the signer has no use for and
 // should not be reaching into. A bare root import (no subpath at all) is excluded
 // as well. This is an allowlist, not a denylist — anything not named here fails,
 // including forms nobody has thought to forbid yet.
-const ALLOWED_SHARED_SUBPATHS = [`${SHARED_PKG}/tx`, `${SHARED_PKG}/types`];
+const ALLOWED_SHARED_SUBPATHS = [`${SHARED_PKG}/tx`, `${SHARED_PKG}/types`, `${SHARED_PKG}/cbor-depth`];
 
 // fetch, WebSocket, EventSource, XMLHttpRequest, and navigator.sendBeacon are
 // globals in Node 22 — no import statement exists for them, so the import-graph

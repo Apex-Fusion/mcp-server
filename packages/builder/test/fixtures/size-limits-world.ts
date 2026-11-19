@@ -70,6 +70,18 @@ export const LEVEL_SHAPES: typeof SHAPES = [
   { name: 'JSON list of numbers in 63 lists', make: (n) => `${'['.repeat(63)}${'1,'.repeat(Math.floor((n - 127) / 2))}1${']'.repeat(63)}`.padEnd(n, ' ') },
 ];
 
+/**
+ * CBOR in hex of at most `length` characters with as many levels as fit: lists in lists, maps in maps, tags in tags, and Plutus
+ * constructors in constructors. Each text is well-formed: its innermost item is a 0 (or an empty constructor). A decoder library must
+ * never read one: the text is for each input that a caller can give (a datum, a redeemer, a script, a transaction, or any other).
+ */
+export const CBOR_LEVEL_SHAPES: typeof SHAPES = [
+  { name: 'CBOR lists in lists in hex', make: (n) => `${'81'.repeat((n - 2) / 2)}00` },
+  { name: 'CBOR maps in maps in hex', make: (n) => `${'a100'.repeat(Math.floor((n - 2) / 4))}00` },
+  { name: 'CBOR tags in tags in hex', make: (n) => `${'c0'.repeat((n - 2) / 2)}00` },
+  { name: 'CBOR constructors in constructors in hex', make: (n) => { const levels = Math.floor((n - 6) / 8); return `${'d8799f'.repeat(levels)}d87980${'ff'.repeat(levels)}`; } },
+];
+
 // ─── The inputs of a tool ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** One string input: its place in the arguments, and what the schema says about it. A key of a map is an input too. */

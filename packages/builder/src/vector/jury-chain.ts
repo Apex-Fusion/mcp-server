@@ -3,10 +3,10 @@
 // names, the identity check that Module-1 (identity_ok) and the jury (SPEC Section 5.8) make, a validity window inside the time
 // bounds of an action, the ledger minimum of an output, the first input of a built transaction, the wallet inputs of a Module-1
 // build, and the lookup of a Module-1 claim or challenge by its token at any address of its script. Reads only; the builders assemble.
-import { CML, calculateMinLovelaceFromUTxO } from '@lucid-evolution/lucid';
+import { calculateMinLovelaceFromUTxO } from '@lucid-evolution/lucid';
 import type { Assets, LucidEvolution, Provider, UTxO } from '@lucid-evolution/lucid';
 import { decodeIdentityDatum } from './identity-codec.js';
-import { addressDetails } from './guarded-decode.js';
+import { addressDetails, decodeTransaction } from './guarded-decode.js';
 import { didOf, findTokenOutput, recordsById, windowAt, COLLATERAL_MIN_LOVELACE } from './identity-chain.js';
 import type { RecordUtxo, Window } from './identity-chain.js';
 import { MAX_DEPTH, PURPOSE, activeKey, effectiveStatus, keyHashOf } from './identity-rules.js';
@@ -98,7 +98,7 @@ export const ledgerOrder = (a: OutRef, b: OutRef): number => (a.txHash < b.txHas
 
 /** The first input of a built transaction in ledger order: the input that a Module-1 token name is derived from. */
 export function firstInput(txCbor: string): OutRef {
-  const inputs = CML.Transaction.from_cbor_hex(txCbor).body().inputs();
+  const inputs = decodeTransaction(txCbor).body().inputs();
   const refs: OutRef[] = [];
   for (let i = 0; i < inputs.len(); i++) refs.push({ txHash: inputs.get(i).transaction_id().to_hex(), outputIndex: Number(inputs.get(i).index()) });
   const [first] = refs.sort(ledgerOrder);

@@ -11,19 +11,27 @@
 // at 2,048 and 8,192 characters and at the largest size: the time for such a text can grow with its levels, and not only with its length.
 // A list of numbers in 63 lists comes only at the largest size, where the size rule refuses it: at a small size it is valid metadata,
 // and the time to build it is the time of the machine.
+// Each input also gets CBOR in hex with lists in lists, maps in maps, tags in tags and Plutus constructors in constructors, as many levels
+// as fit in 2,048 and in 32,768 characters (the longest text of a datum, a redeemer, a script or a transaction). No decoder library may
+// read any of them: decoder-watch.ts counts the reads of a text that nests deeper than the limit, and the count must stay 0.
 import { after, before, describe, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LEVEL_SHAPES, SNAPSHOT, baseArguments, openWorld, probeTool } from './fixtures/size-limits-world.ts';
+import { CBOR_LEVEL_SHAPES, LEVEL_SHAPES, SNAPSHOT, baseArguments, openWorld, probeTool } from './fixtures/size-limits-world.ts';
 import type { Probe, World } from './fixtures/size-limits-world.ts';
+import { watchAllDecoders } from './fixtures/decoder-watch.ts';
+import type { DecoderWatch } from './fixtures/decoder-watch.ts';
 
 const LIMIT_MS = 5000;
 const LENGTHS = [1_024, 65_536, 131_072];
 const LEVEL_LENGTHS = [2_048, 8_192, 131_072];
+const CBOR_LEVEL_LENGTHS = [2_048, 32_768];
 
 let world: World;
+let watch: DecoderWatch;
 before(async () => {
   mock.method(console, 'error', () => undefined); // the node client writes a line for each answer that is not a result
   world = await openWorld();
+  watch = watchAllDecoders();
 });
 after(async () => { await world.close(); mock.restoreAll(); });
 
@@ -56,15 +64,18 @@ describe('the tools of the snapshot', () => {
 
   for (const tool of Object.keys(SNAPSHOT)) {
     test(`${tool}: each string input, at the largest size, is answered within ${LIMIT_MS} ms`, async () => {
+      const reachedBefore = watch.reached();
       const probes = [
         ...await probeTool(world, tool, { lengths: LENGTHS, stopAboveMs: LIMIT_MS }),
         ...await probeTool(world, tool, { lengths: LEVEL_LENGTHS, stopAboveMs: LIMIT_MS, shapesOf: () => LEVEL_SHAPES.slice(0, 2) }),
         ...await probeTool(world, tool, { lengths: LEVEL_LENGTHS.slice(-1), stopAboveMs: LIMIT_MS, shapesOf: () => LEVEL_SHAPES.slice(2) }),
+        ...await probeTool(world, tool, { lengths: CBOR_LEVEL_LENGTHS, stopAboveMs: LIMIT_MS, shapesOf: () => CBOR_LEVEL_SHAPES }),
       ];
       assert.ok(probes.length > 0 || Object.keys(SNAPSHOT[tool].inputSchema.properties ?? {}).length === 0, 'the tool has string inputs, and the test sent a text to each');
       assert.deepEqual(probes.filter((p) => p.timing.ms > LIMIT_MS || p.timing.late > LIMIT_MS).map(describeProbe), []);
       // A call that the rate limit or the input schema answers does not show what the tool does with the text: the other values are valid.
       assert.deepEqual(probes.filter((p) => !p.checked && /Rate limit exceeded|Input validation error/.test(p.first)).map(describeProbe), []);
+      assert.equal(watch.reached() - reachedBefore, 0, 'a decoder library read CBOR that nests deeper than the limit: the check did not refuse it');
     });
   }
 });
