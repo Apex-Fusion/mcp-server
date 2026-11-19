@@ -72,8 +72,9 @@
   address, before Lucid reads it, with its length and its first 40 characters (no valid address is that long).
   The metadata of `vector_build_send_apex`, `vector_build_transaction` and `vector_dry_run` is read one time before
   Lucid gets it. Metadata that no transaction can hold gets a short refusal: a value that is not a text of at most
-  64 characters, a number, a list or a map, more than 63 levels of lists and maps, or more than 16,384 bytes (the
-  most that a transaction has). Before, Lucid or the library refused such metadata, and a refusal of Lucid repeated
+  64 characters, a number, a list or a map, a number that is not a whole number between -2^64 and 2^64, more than
+  63 levels of lists and maps, or more than 16,384 bytes (the most that a transaction has). Before, Lucid or the
+  library refused such metadata, and a refusal of Lucid repeated
   the metadata. Nothing else changes: no tool text, no schema, and no answer for an input
   inside the limits. A test gives each string input of each of the 74 tools a text of up to 131,072 characters in
   several shapes, also JSON with many levels, and checks that the tool answers within one second.

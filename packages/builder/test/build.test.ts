@@ -126,10 +126,11 @@ describe('buildSendApex', () => {
   const sendWith = (metadataJson: string) => buildSendApex(lucid, { recipientAddress: FOREIGN_ADDRESS, amountApex: 3, metadataJson });
   const payWith = (metadataJson: string) => buildMultiOutput(lucid, { outputs: [{ address: FOREIGN_ADDRESS, lovelace: 2_000_000 }], metadataJson });
 
-  test('builds with metadata at the limits: 63 levels of lists, a text of 64 characters, and a JSON text of 63,601 characters that fits in a transaction', async () => {
+  test('builds with metadata at the limits: 63 levels of lists, a text of 64 characters, whole numbers below 2^64, and a JSON text of 63,601 characters that fits in a transaction', async () => {
     const numbers = JSON.stringify(Array(15_900).fill(-24));
     assert.equal(numbers.length, 63_601);
-    for (const metadataJson of [listsIn(63), JSON.stringify({ ['k'.repeat(64)]: 'x'.repeat(64) }), numbers]) {
+    const wholeNumbers = '[-0,1E2,1.0,9007199254740993,18446744073709549568,-18446744073709549568]';
+    for (const metadataJson of [listsIn(63), JSON.stringify({ ['k'.repeat(64)]: 'x'.repeat(64) }), wholeNumbers, numbers]) {
       for (const build of [sendWith, payWith]) {
         const { txCbor } = await build(metadataJson);
         assert.deepEqual(decodeMetadataLabels(txCbor), ['674']);
@@ -150,6 +151,14 @@ describe('buildSendApex', () => {
       [JSON.stringify({ ['k'.repeat(65)]: 1 }), text],
       ['[1,[2,null]]', 'The metadata has the value null, and a value of metadata is a text, a number, a list or a map.'],
       ['{"a":true}', 'The metadata has the value true, and a value of metadata is a text, a number, a list or a map.'],
+      [JSON.stringify({ m: '😀'.repeat(33) }), 'The metadata has a text of 66 characters, and a text of metadata has at most 64.'],
+      [JSON.stringify(Array(256).fill('x'.repeat(64))), 'The metadata needs more than 16384 bytes, and a transaction has at most 16384.'],
+      ['[1.5]', 'The metadata has the number 1.5, and a number of metadata is a whole number between -2^64 and 2^64.'],
+      ['{"a":[1,-0.5]}', 'The metadata has the number -0.5, and a number of metadata is a whole number between -2^64 and 2^64.'],
+      ['[1e21]', 'The metadata has the number 1e+21, and a number of metadata is a whole number between -2^64 and 2^64.'],
+      ['[1e400]', 'The metadata has the number Infinity, and a number of metadata is a whole number between -2^64 and 2^64.'],
+      ['[18446744073709551616]', 'The metadata has the number 18446744073709552000, and a number of metadata is a whole number between -2^64 and 2^64.'],
+      ['[-18446744073709551616]', 'The metadata has the number -18446744073709552000, and a number of metadata is a whole number between -2^64 and 2^64.'],
     ];
     for (const [metadataJson, message] of refused) {
       await assert.rejects(() => sendWith(metadataJson), { message });

@@ -77,12 +77,16 @@ const MAX_METADATA_TEXT_CHARS = 64;
 /** The most bytes of a transaction on Vector (the protocol parameter `max_tx_size`). */
 const MAX_TRANSACTION_BYTES = 16_384;
 
+/** A number of metadata is a whole number between minus this value and this value. The library that writes the metadata takes no other. */
+const METADATA_NUMBER_BOUND = 2 ** 64;
+
 /**
  * The metadata that the JSON text `json` gives. This function reads each value one time before Lucid gets the metadata: Lucid reads the
  * values below each list and each map again, and it repeats the metadata in a refusal. The function refuses metadata that no
  * transaction can hold: a value that is not a text of at most MAX_METADATA_TEXT_CHARS characters, a number, a list or a map (the rule of
- * Lucid), more than MAX_METADATA_LEVELS levels of lists and maps, and metadata of more than MAX_TRANSACTION_BYTES bytes (a value needs
- * one byte or more, and a text needs one more for each character).
+ * Lucid), a number that is not whole or not between -METADATA_NUMBER_BOUND and METADATA_NUMBER_BOUND, more than MAX_METADATA_LEVELS
+ * levels of lists and maps, and metadata of more than MAX_TRANSACTION_BYTES bytes (a value needs one byte or more, and a text needs one
+ * more for each character).
  */
 function metadataOf(json: string): Parameters<TxBuilder['attachMetadata']>[1] {
   const metadata: unknown = JSON.parse(json);
@@ -99,6 +103,8 @@ function metadataOf(json: string): Parameters<TxBuilder['attachMetadata']>[1] {
       open.push({ items: Array.isArray(value) ? value : Object.entries(value).flat(), level: level + 1 });
     } else if (typeof value !== 'number') {
       throw new Error(`The metadata has the value ${String(value)}, and a value of metadata is a text, a number, a list or a map.`);
+    } else if (!Number.isInteger(value) || Math.abs(value) >= METADATA_NUMBER_BOUND) {
+      throw new Error(`The metadata has the number ${value}, and a number of metadata is a whole number between -2^64 and 2^64.`);
     }
     bytes += 1;
     if (bytes > MAX_TRANSACTION_BYTES) {
