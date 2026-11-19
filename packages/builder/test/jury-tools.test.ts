@@ -267,3 +267,26 @@ describe('reads', () => {
     assert.match(await tools({ koios: chain })('vector_get_jury_cases', {}), /No live case/);
   });
 });
+
+describe('a change address of 131,072 characters', () => {
+  // The longest text that a request can hold, made of base58 characters. Each tool must refuse it at once.
+  const long = `${'a'.repeat(40)}B${'123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'.repeat(2260).slice(0, 131_072 - 41)}`;
+  const calls: Array<[string, Record<string, unknown>]> = [
+    ['vector_build_jury_register', { agent: JUROR_ID, prompt_text: '{}' }],
+    ['vector_build_jury_exit', { juror: JUROR_TOKEN, step: 'request' }],
+    ['vector_build_jury_topup', { juror: JUROR_TOKEN, amount: 10 }],
+    ['vector_build_jury_commit', { juror: JUROR_TOKEN, case: CASE_TOKEN, vote: 'ClaimerWins', record_hash: 'ab'.repeat(32) }],
+    ['vector_build_jury_reveal', { juror: JUROR_TOKEN, case: CASE_TOKEN, vote: 'ClaimerWins', salt: '42'.repeat(32), record_text: '{}' }],
+    ['vector_build_module1_claim', { agent: CLAIMER_ID, claim_uri: documentUri('cd'.repeat(32)), claim_hash: 'ab'.repeat(32), claim_type: 'x', stake: 50 }],
+    ['vector_build_module1_challenge', { agent: AUDITOR_ID, claim: CLAIM_TOKEN, evidence_uri: 'https://example.org/e.json', evidence_hash: 'ed'.repeat(32), stake: 50 }],
+  ];
+  for (const [name, args] of calls) {
+    test(`${name} refuses it at once, and the answer holds its length and its start, not the text`, async () => {
+      const started = performance.now();
+      const answer = await tools({ extra: [claimUtxo(CLAIM_TOKEN)] })(name, { changeAddress: long, ...args });
+      assert.ok(performance.now() - started < 500, `the call took ${performance.now() - started} ms`);
+      assert.ok(answer.includes(`The text has 131072 characters, and an address has at most 1024. It starts with: ${'a'.repeat(40)}`), answer.slice(0, 300));
+      assert.ok(answer.length < 1500 && !answer.includes('aB'), `the answer has ${answer.length} characters`);
+    });
+  }
+});

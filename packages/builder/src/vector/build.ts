@@ -9,7 +9,7 @@ import {
   Lucid, fromText, Data, applyDoubleCborEncoding, validatorToAddress,
   validatorToScriptHash,
 } from '@lucid-evolution/lucid';
-import type { LucidEvolution, Provider, SpendingValidator, TxSignBuilder } from '@lucid-evolution/lucid';
+import type { LucidEvolution, Provider, SpendingValidator, TxBuilder, TxSignBuilder } from '@lucid-evolution/lucid';
 import { lovelaceToAda, apexToLovelace } from '@apexfusion/vector-mcp-shared/tx';
 import { addressDetails } from './guarded-decode.js';
 import { readTransactionFee } from './tx-fee.js';
@@ -68,6 +68,50 @@ function requireValidRecipient(address: string): void {
   }
 }
 
+/** The most levels of lists and maps in transaction metadata. The library that writes the metadata refuses a list in 63 lists. */
+const MAX_METADATA_LEVELS = 63;
+
+/** The most characters of one text of metadata. Lucid refuses a longer text. */
+const MAX_METADATA_TEXT_CHARS = 64;
+
+/** The most bytes of a transaction on Vector (the protocol parameter `max_tx_size`). */
+const MAX_TRANSACTION_BYTES = 16_384;
+
+/**
+ * The metadata that the JSON text `json` gives. This function reads each value one time before Lucid gets the metadata: Lucid reads the
+ * values below each list and each map again, and it repeats the metadata in a refusal. The function refuses metadata that no
+ * transaction can hold: a value that is not a text of at most MAX_METADATA_TEXT_CHARS characters, a number, a list or a map (the rule of
+ * Lucid), more than MAX_METADATA_LEVELS levels of lists and maps, and metadata of more than MAX_TRANSACTION_BYTES bytes (a value needs
+ * one byte or more, and a text needs one more for each character).
+ */
+function metadataOf(json: string): Parameters<TxBuilder['attachMetadata']>[1] {
+  const metadata: unknown = JSON.parse(json);
+  let bytes = 0;
+  const open: Array<{ items: unknown[]; level: number }> = [];
+  const read = (value: unknown, level: number): void => {
+    if (typeof value === 'string') {
+      if (value.length > MAX_METADATA_TEXT_CHARS) {
+        throw new Error(`The metadata has a text of ${value.length} characters, and a text of metadata has at most ${MAX_METADATA_TEXT_CHARS}.`);
+      }
+      bytes += value.length;
+    } else if (typeof value === 'object' && value !== null) {
+      if (level >= MAX_METADATA_LEVELS) throw new Error(`The metadata has more than ${MAX_METADATA_LEVELS} levels of lists and maps.`);
+      open.push({ items: Array.isArray(value) ? value : Object.entries(value).flat(), level: level + 1 });
+    } else if (typeof value !== 'number') {
+      throw new Error(`The metadata has the value ${String(value)}, and a value of metadata is a text, a number, a list or a map.`);
+    }
+    bytes += 1;
+    if (bytes > MAX_TRANSACTION_BYTES) {
+      throw new Error(`The metadata needs more than ${MAX_TRANSACTION_BYTES} bytes, and a transaction has at most ${MAX_TRANSACTION_BYTES}.`);
+    }
+  };
+  read(metadata, 0);
+  for (let next = open.pop(); next !== undefined; next = open.pop()) {
+    for (const item of next.items) read(item, next.level);
+  }
+  return metadata as Parameters<TxBuilder['attachMetadata']>[1];
+}
+
 export async function buildSendApex(
   lucid: LucidEvolution,
   p: { recipientAddress: string; amountApex: number; metadataJson?: string },
@@ -79,7 +123,7 @@ export async function buildSendApex(
   const lovelace = apexToLovelace(p.amountApex);
   let tx = lucid.newTx().pay.ToAddress(p.recipientAddress, { lovelace });
   if (p.metadataJson) {
-    tx = tx.attachMetadata(674, JSON.parse(p.metadataJson));
+    tx = tx.attachMetadata(674, metadataOf(p.metadataJson));
   }
   return toBuildResult(await tx.complete());
 }
@@ -125,7 +169,7 @@ export async function buildMultiOutput(
     tx = tx.pay.ToAddress(output.address, assets);
   }
   if (p.metadataJson) {
-    tx = tx.attachMetadata(674, JSON.parse(p.metadataJson));
+    tx = tx.attachMetadata(674, metadataOf(p.metadataJson));
   }
   return toBuildResult(await tx.complete());
 }

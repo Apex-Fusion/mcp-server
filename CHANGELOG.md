@@ -63,6 +63,20 @@
   works. The check covers the decoder library only, not the script evaluator of Lucid (a separate WebAssembly
   instance). The entry point (`packages/builder/src/index.ts`) sets the stop and starts the check of the stack
   pointer: a program that imports the builder as a library gets neither.
+- The server limits the size of what a caller sends. A POST to `/mcp` with a body of more than 131,072 bytes gets
+  HTTP 413 and a short JSON answer. The server counts the bytes as they arrive, so a body with no `content-length`, or
+  with one that is not true, gets no more room, and the server takes no more bytes from the connection after the
+  limit. A body inside the limit gets the answer that it got before, also a body that is not JSON. The limit is far
+  above every valid request: the largest input of a tool is a transaction of 32,768 hex characters. The body is
+  parsed one time, and the transport gets the parsed body. A text of more than 1,024 characters is refused as an
+  address, before Lucid reads it, with its length and its first 40 characters (no valid address is that long).
+  The metadata of `vector_build_send_apex`, `vector_build_transaction` and `vector_dry_run` is read one time before
+  Lucid gets it. Metadata that no transaction can hold gets a short refusal: a value that is not a text of at most
+  64 characters, a number, a list or a map, more than 63 levels of lists and maps, or more than 16,384 bytes (the
+  most that a transaction has). Before, Lucid or the library refused such metadata, and a refusal of Lucid repeated
+  the metadata. Nothing else changes: no tool text, no schema, and no answer for an input
+  inside the limits. A test gives each string input of each of the 74 tools a text of up to 131,072 characters in
+  several shapes, also JSON with many levels, and checks that the tool answers within one second.
 
 ### Fixed
 
