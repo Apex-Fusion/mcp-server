@@ -17,6 +17,7 @@ concurrency:
 jobs:
   deploy-mainnet:
     runs-on: nixos
+    timeout-minutes: 10
     environment: mainnet
     permissions:
       contents: read
