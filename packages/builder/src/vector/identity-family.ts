@@ -14,24 +14,31 @@ import type { IdentityDeployment } from './identity-deployment.js';
 import { registerIdentityRegistryTools } from './identity-tools.js';
 import { registerAttestationTools } from './attestation-tools.js';
 import { registerDelegationTools } from './delegation-tools.js';
+import { registerDelegationCosignTool } from './delegation-cosign-tools.js';
+import type { CosignAccess } from './delegation-cosign.js';
 import { registerVaultTools } from './vault-tools.js';
 import { registerLedgerReadTools } from './ledger-read-tools.js';
 import type { LedgerReadAccess } from './ledger-read-tools.js';
 
 function newProvider(): Provider { return new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL }); }
 
-/** Registers every identity family tool. `provider`, `limiter`, `deployment` and `options` (`access`: Koios and fetch for the reads) are for tests. */
+/**
+ * Registers every identity family tool. `provider`, `limiter`, `deployment` and `options` are for tests. `options` holds the values that a tool of
+ * the family takes for a test, one key for each tool that has one: `access` is the Koios URL and the fetch of the read tools, and `cosign` is the
+ * fetch, the lookup, the clock and the limits of the co-signature call.
+ */
 export function registerIdentityFamily(
   server: McpServer, identity: string,
   provider: () => Provider = newProvider, limiter: Pick<RateLimiter, 'check'> = limiterFor(identity),
   deployment: () => IdentityDeployment = requireIdentityDeployment,
-  options: { access?: LedgerReadAccess } = {},
+  options: { access?: LedgerReadAccess; cosign?: CosignAccess } = {},
 ) {
   const { access = { koiosUrl: VECTOR_KOIOS_URL, fetchImpl: fetch } } = options;
   const gate = rateGate(limiter);
   registerIdentityRegistryTools(server, gate, provider, deployment);
   registerAttestationTools(server, gate, provider, deployment);
   registerDelegationTools(server, gate, provider, deployment);
+  registerDelegationCosignTool(server, identity, gate, provider, deployment, options.cosign);
   registerVaultTools(server, gate, provider, deployment);
   registerLedgerReadTools(server, gate, provider, deployment, access);
 }

@@ -34,6 +34,7 @@ import { startServer, stopServer, ServerContext } from '../setup.ts';
 // the read of stakes (the two steps that make a stake were already tools). The Module-1 claim withdrawal took it to 79.
 // The reads and checks of attestations, delegations and vaults took it to 85: 3 attestation reads (get, list, check), 2 delegation reads
 // (get, check use) and 1 vault read.
+// The delegation co-signature tool (vector_delegation_request_cosign) took it to 86.
 const EXPECTED_TOOLS = [
   'vector_await_transaction',
   'vector_build_attestation_attest',
@@ -96,6 +97,7 @@ const EXPECTED_TOOLS = [
   'vector_build_vault_pay',
   'vector_check_attestation',
   'vector_check_delegation_use',
+  'vector_delegation_request_cosign',
   'vector_discover_agents',
   'vector_dry_run',
   'vector_get_agent_profile',

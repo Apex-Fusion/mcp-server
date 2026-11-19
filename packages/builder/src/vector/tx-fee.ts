@@ -1,27 +1,39 @@
 // packages/builder/src/vector/tx-fee.ts
 // The fee of a transaction, read from its bytes without a decoder library: key 2 of the body, the first item of the transaction.
 // The reader goes over the keys of the body one after the other, and skips the items that it does not need with a loop and a list of
-// its own. The time is linear in the size of the input.
+// its own (cborReader, which tx-body.ts uses too). The time is linear in the size of the input.
 
 /** The count of an array or a map that has none: it ends at a break code. */
-const INDEFINITE = -1;
-const BREAK = 0xff;
+export const INDEFINITE = -1;
+export const BREAK = 0xff;
 /** The key of the fee in the body of a transaction. */
 const FEE_KEY = 2;
-/** The major types of CBOR that the reader tells apart. */
-const UNSIGNED = 0;
+/** The major types of CBOR that the readers tell apart. */
+export const UNSIGNED = 0;
 const BYTES = 2;
 const TEXT = 3;
-const ARRAY = 4;
-const MAP = 5;
+export const ARRAY = 4;
+export const MAP = 5;
 const TAG = 6;
 
+/** What a reader of the bytes gives: the position, the header that it read last, and the two moves that the readers of a transaction share. */
+export interface CborReader {
+  /** The next byte to read. A reader moves it back to the start of an item when it has read only the header of the item. */
+  pos: number;
+  /** The additional information of the header that `header` read last, and its argument (INDEFINITE for a string, an array or a map that has no length). */
+  readonly info: number;
+  readonly argument: number;
+  /** Reads the header at `pos` and moves `pos` past it. Returns its major type, or -1 when the header is cut or is not one that CBOR has. */
+  header(): number;
+  /** Moves `pos` past the item that starts there. False when the bytes end inside the item. */
+  skip(): boolean;
+}
+
 /**
- * The unsigned integer under key 2 of the body of the transaction `bytes`, or undefined when the bytes hold none: the first item is not
- * an array, the first item of the array is not a map, the map has no key 2, or the value of key 2 is not an unsigned integer. The reader
- * takes the first key 2 that it finds, reads no more of the bytes than it needs, and does not read the rest of the transaction.
+ * A reader over `bytes`, at the start of the bytes. Its `header` and `skip` use a loop and a list of their own, no recursion and no decoder
+ * library, so the time is linear in the size of the input, and nothing is allocated for a length or a count that the bytes declare.
  */
-export function readTransactionFee(bytes: Uint8Array): bigint | undefined {
+export function cborReader(bytes: Uint8Array): CborReader {
   let pos = 0;
   let info = 0;
   let argument = 0;
@@ -82,8 +94,7 @@ export function readTransactionFee(bytes: Uint8Array): bigint | undefined {
               break;
             }
             if (header() < 0 || argument === INDEFINITE) return false;
-            pos += argument;
-            if (pos > bytes.length) return false;
+            pos += argument; // the check at the top of the loop stops a chunk that goes past the bytes
           }
         } else {
           pos += argument;
@@ -101,27 +112,44 @@ export function readTransactionFee(bytes: Uint8Array): bigint | undefined {
     }
   };
 
+  return {
+    get pos() { return pos; },
+    set pos(value: number) { pos = value; },
+    get info() { return info; },
+    get argument() { return argument; },
+    header,
+    skip,
+  };
+}
+
+/**
+ * The unsigned integer under key 2 of the body of the transaction `bytes`, or undefined when the bytes hold none: the first item is not
+ * an array, the first item of the array is not a map, the map has no key 2, or the value of key 2 is not an unsigned integer. The reader
+ * takes the first key 2 that it finds, reads no more of the bytes than it needs, and does not read the rest of the transaction.
+ */
+export function readTransactionFee(bytes: Uint8Array): bigint | undefined {
+  const reader = cborReader(bytes);
   // The transaction is an array, and its first item is the body, a map.
-  if (header() !== ARRAY || argument === 0) return undefined;
-  if (argument === INDEFINITE && bytes[pos] === BREAK) return undefined;
-  if (header() !== MAP) return undefined;
-  let entries = argument;
+  if (reader.header() !== ARRAY || reader.argument === 0) return undefined;
+  if (reader.argument === INDEFINITE && bytes[reader.pos] === BREAK) return undefined;
+  if (reader.header() !== MAP) return undefined;
+  let entries = reader.argument;
   while (entries !== 0) {
     if (entries === INDEFINITE) {
-      if (pos >= bytes.length || bytes[pos] === BREAK) return undefined;
+      if (reader.pos >= bytes.length || bytes[reader.pos] === BREAK) return undefined;
     } else {
       entries -= 1;
     }
-    const keyStart = pos;
-    const keyType = header();
+    const keyStart = reader.pos;
+    const keyType = reader.header();
     if (keyType < 0) return undefined;
-    if (keyType === UNSIGNED && argument === FEE_KEY) {
-      if (header() !== UNSIGNED) return undefined;
-      const size = info < 24 ? 0 : 2 ** (info - 24);
-      return size === 0 ? BigInt(info) : BigInt(`0x${Buffer.from(bytes.subarray(pos - size, pos)).toString('hex')}`);
+    if (keyType === UNSIGNED && reader.argument === FEE_KEY) {
+      if (reader.header() !== UNSIGNED) return undefined;
+      const size = reader.info < 24 ? 0 : 2 ** (reader.info - 24);
+      return size === 0 ? BigInt(reader.info) : BigInt(`0x${Buffer.from(bytes.subarray(reader.pos - size, reader.pos)).toString('hex')}`);
     }
-    pos = keyStart;
-    if (!skip() || !skip()) return undefined;
+    reader.pos = keyStart;
+    if (!reader.skip() || !reader.skip()) return undefined;
   }
   return undefined;
 }

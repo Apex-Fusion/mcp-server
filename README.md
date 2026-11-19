@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks. The 85 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
+Hosted instances run on both networks. The 86 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
 
 | Network | Endpoint |
 |---------|----------|
@@ -105,7 +105,7 @@ limitations.
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
 - **Streamable HTTP transport** - the modern MCP transport at `/mcp`, with any-origin CORS for browser clients and an unauthenticated `GET /health` probe (the legacy SSE pair was removed in 2.0.0)
 
-## MCP Tools (85)
+## MCP Tools (86)
 
 ### Wallet & Queries
 
@@ -167,7 +167,7 @@ Every tool below is keyless: it builds an unsigned transaction and lists every k
 | `vector_build_identity_recovery_complete` | Complete a pending recovery after its delay (anybody) |
 | `vector_build_identity_end_subagents` | Raise the subagent epoch: every subagent created under an older epoch ends |
 
-### Attestations, Delegations and Vaults (9)
+### Attestations, Delegations and Vaults (10)
 
 | Tool | Description |
 |------|-------------|
@@ -177,9 +177,92 @@ Every tool below is keyless: it builds an unsigned transaction and lists every k
 | `vector_build_attestation_withdraw` | Burn an attestation 90 days after its revocation or expiry and release the deposit |
 | `vector_build_delegation_delegate` | Delegate actions and resources to an agent's delegation key (from a principal key, an agent, or a parent delegation), with an optional value limit |
 | `vector_build_delegation_undelegate` | End a delegation (its delegator or an ancestor's delegator signs); delegations below it stop at once |
+| `vector_delegation_request_cosign` | Ask the delegate agent of a Delegate transaction for its co-signature (the signature of the delegate key). The agent must serve the route below. The tool holds no key and adds no signature |
 | `vector_build_vault_open` | Open a vault that a delegation may spend from (`marketplace.hire.v1` on the escrow script) |
 | `vector_build_vault_pay` | The delegate hires a listed supplier from a vault, within the delegation's value limits |
 | `vector_build_vault_close` | The owner takes the funds of vault outputs (live or returned refunds) back |
+
+#### Delegation co-signature route (for agent operators)
+
+A Delegate transaction needs two kinds of signature: the delegator's, and the signature of the delegate key that the delegation names. Only the delegate agent holds that key. `vector_delegation_request_cosign` carries the transaction to the agent and returns the transaction with the signature of the delegate key added. **An agent must serve the route below for the tool to work.** An agent that does not serve it answers 404, and the tool says so.
+
+The tool takes one input, `txCbor`: the unsigned Delegate transaction that `vector_build_delegation_delegate` returned, or the same transaction signed by the delegator. It takes no endpoint and no agent. It reads the delegate from the transaction, reads the identity record of the delegate, and sends to the origin of the `endpoint` in that record. The endpoint must be an `https` URL. The delegate writes its own record, so a refusal about the endpoint never repeats the endpoint text. A subagent has no endpoint by rule (Part 2 Section 3.3), so the tool cannot ask a subagent. The tool says so, and the delegation must name an agent that has an endpoint.
+
+**Route, version 1**
+
+```http
+POST https://<host of the endpoint in the agent's record>/cosign/delegate
+content-type: application/json
+accept: application/json
+user-agent: vector-mcp-builder/<version of this server>
+
+{ "transaction": "<hex CBOR of the Delegate transaction>" }
+```
+
+The tool uses the origin of the endpoint: the scheme, the host and the port. It drops the path and the query of the endpoint. The request has no other header and no other field.
+
+- **Success:** `200` with `{ "transaction": "<hex CBOR>" }`. The transaction has the same body, every witness that the request carried, and one more vkey witness: a signature of the delegate key over the body hash. The agent keeps the body bytes exactly as it received them and adds only that witness.
+- **Refusal:** a `4xx` with `{ "error": "<code>", "message": "<words>" }`. The codes are:
+
+| Code | The agent refuses because |
+|------|---------------------------|
+| `not_a_delegation` | the transaction is not a Delegate transaction |
+| `not_for_this_agent` | the delegation names another agent, or a delegate key that this agent does not hold |
+| `key_in_use` | the delegate key is in use: the agent already co-signed another body for it and the validity window of that body is open, or a live delegation uses it |
+| `principal_not_allowed` | the agent does not accept delegations from this delegator |
+| `spends_agent_funds` | an input, a collateral input, a withdrawal or a certificate of the transaction is of a key of the agent |
+| `expired` | the validity window of the transaction has ended |
+
+The tool shows the code of a refusal, and only when it is one of these six. It shows the code with its own words, and it never shows the `message` of the agent. Any other code, and any code that is not 1 to 64 characters of `a-z`, `0-9` and `_`, shows as "the agent refused the transaction (HTTP n)". An agent may use other codes. A caller sees them only as that sentence and the HTTP status. A 404 or 405 without one of the six codes means that the agent does not serve the route.
+
+**What the agent learns.** The agent gets the whole transaction before anyone submits it. It sees the inputs, the outputs with the change address, the witnesses that exist, the public keys of the key holders that signed before the call, and the validity window. The request comes from this server, so the agent sees the address of the server and the user agent above. It sees nothing else of the caller.
+
+**What the tool checks before it sends.** The tool refuses what it can check without running the scripts. It does not run them, so the node checks everything, and runs the scripts, when the user submits. If one check fails, the tool sends nothing, and its text ends with "Nothing was sent."
+
+**What the tool reads first.** The tool reads the keys of the body from the bytes of the transaction, with a reader of its own. It refuses before the decoder library reads the transaction in two cases: the bytes are not a transaction with a well-formed body, or the body has the key of a part that a delegation does not use (below). Only a transaction that passes this step goes to the decoder library. The reader goes over the bytes once, with a loop and no recursion, so its time is linear in the size of the input. The tool also compares the body of the answer of the agent with the body that it sent, from the bytes, before the decoder library reads the answer.
+
+Checks that follow a rule of the ledger or of the delegation contract:
+
+- The transaction is marked valid (`is_valid` true) and mints exactly one token of the delegation policy.
+- It has one output at the delegation address. That output holds the minted token alone and a valid delegation datum. The delegate key is a required signer.
+- Each vkey witness that it carries verifies over the body hash. The tool names a witness that does not.
+- The validity window has a start and an end, the start is before the end, the window is at most one hour long, and it has not ended. The result shows both times.
+- The record of the delegate exists, is `Active` over the window (its ancestors included), lists the delegate key with the delegation purpose, and has an `https` endpoint without a user name or password. The tool names the status of a delegate that is not `Active`.
+- Every input, collateral input and reference input is on the node. If one is spent or not confirmed yet, the ledger refuses the transaction.
+- No output is both spent and read as a reference input. The ledger refuses this at protocol version 10.
+
+Checks that are the scope of this tool and not rules of the ledger. They bound what an agent is asked to sign:
+
+- The transaction mints nothing else: no second policy.
+- It has no withdrawals, certificates, votes, proposals, donation or treasury value (the keys 5, 4, 19, 20, 22 and 21 of the body). The tool refuses the part itself, also when it is empty or 0.
+- It has no witness of the delegate key yet.
+- The period of the value limit is less than 2^53 ms. The tool reads whole numbers up to that.
+
+The tool does not check all that the delegation script checks. For example, it does not check the name of the token, a reference script on the delegation output, or that the key of the delegator is a required signer. The delegation script refuses such a transaction when the user submits it.
+
+**Where the request goes.** The request goes through the outbound-call rule of the other tools that call a URL from chain data: https only, no private or reserved address, no redirect, an answer of at most 65,536 bytes, and 30 seconds. The tool makes one request and does not retry. The server sends at most 3 requests a minute for each caller to one origin, and at most 30 a minute to one origin for all callers together. The caller is the identity that the server uses for its rate limit. Both counts are in memory (a restart clears them), and each remembers a bounded number of callers and origins.
+
+- One co-signature is one request, so 3 a minute lets a user try again.
+- The limit for each caller stops one caller from using the whole budget of an agent with one unsigned transaction that it sends again and again. That would block every other user of the agent.
+- The limit for all callers bounds what one host gets from this server. Ten callers at their limit fill it.
+- The checks above run before the count, and a refused request does not count. A transaction that fails a check does not use a slot.
+
+**When a call fails.** The text says whether the host got the transaction. If the host does not resolve, nothing was sent. After a redirect, the host received the transaction, whatever words the redirect holds. After a time limit, a size limit or a network error, the host may have received it, and the caller can ask again. A text that names the host shows it only when it is a plain name: letters, digits, dots, hyphens and a port. Any other host shows as "a host with unusual characters", in the texts and in the JSON.
+
+**What the tool takes from the answer.** The tool takes one thing from a `200` answer: the one vkey witness of the delegate key. The body of the answer must be the body that was sent, byte for byte. The tool reads the body from the bytes of the answer and compares it before the decoder library reads the answer, and the decoded body must have the same hash as the body that was sent. The signature must verify over that hash by the rules of the ledger: a public key of small order, a signature that starts with a point of small order, and a scalar at or above the group order do not verify. The tool adds that witness, last, to the transaction that the caller gave. Only the list of vkey witnesses is written again, as a set (tag 258). The body, the validity flag, the auxiliary data, each other entry of the witness set and each witness that the caller sent keep their bytes. Nothing else of the answer comes back: not its other witnesses, its datums, its wrapping or its words. A refused answer returns nothing from the agent. A refusal of the answer names the number of its vkey witnesses and no key.
+
+The result lists the keys that have signed and the keys that are still missing, and the validity window. Each missing key holder signs in turn with `vector_signer_sign`, passing on the CBOR that the previous signer returned. Then one `vector_submit_transaction` broadcasts it before the window ends. The tool never signs and never submits.
+
+**The route is public.** Anyone can call it, with or without this tool. The checks of the tool give the agent no assurance. The agent decides alone. **The agent signs only when**
+
+1. it decodes the transaction itself;
+2. the only action is the Delegate: one delegation token minted, `is_valid` true, and no withdrawal, no certificate, no vote and no proposal;
+3. no input and no collateral input is at an address of a key of the agent;
+4. the datum names this agent and one of its own delegation keys.
+
+The agent never signs anything else with a delegation key.
+
+**Fresh keys.** The contract does not enforce fresh delegation keys. So the agent remembers each body that it co-signed. While the validity window of the first body is open, it refuses another body for the same key with `key_in_use`. For the same body it gives the same answer again. A live delegation that uses the key ends only when its delegator, or the delegator of one of its ancestors, signs `vector_build_delegation_undelegate`.
 
 ### Attestation, Delegation and Vault Reads (6)
 

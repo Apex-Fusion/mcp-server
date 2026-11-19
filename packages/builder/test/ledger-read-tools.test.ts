@@ -66,7 +66,8 @@ describe('registration', () => {
     for (const name of TOOLS) {
       assert.ok(registered.has(name), name);
     }
-    assert.equal([...registered.keys()].filter((n) => !n.startsWith('vector_build_')).length, TOOLS.length);
+    // The co-signature tool is the one other tool of the family that is not a build tool.
+    assert.equal([...registered.keys()].filter((n) => !n.startsWith('vector_build_') && n !== 'vector_delegation_request_cosign').length, TOOLS.length);
   });
 });
 

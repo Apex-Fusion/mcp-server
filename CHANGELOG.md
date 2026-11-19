@@ -181,6 +181,50 @@
     the Vector Koios has none. A Pay run of the vault script counts only when its own `valid_contract` is true: false is
     `contract_failed`, and no value, or one that is not true or false, is an error, never `paid` and never `not_a_payment`. A caller
     waits for confirmations before it trusts the answer. Koios answers are read to 16 MiB at most. `readVault` is exported.
+- **Delegation co-signature** (`vector_delegation_request_cosign`): 1 tool, 86 in all. A Delegate transaction needs a
+  signature of the delegate key, and only the delegate agent holds that key. The tool takes the transaction
+  (`txCbor`, unsigned or signed by the delegator) and nothing else. It reads the delegate from the transaction, finds
+  the `endpoint` in the identity record of the delegate, and sends the transaction to
+  `POST <origin of the endpoint>/cosign/delegate` through `safeFetch` (route contract, version 1: the body is
+  `{ "transaction": hex }`, the answer is `200 { "transaction": hex }` or a 4xx `{ "error": code, "message": words }`
+  with the code `not_a_delegation`, `not_for_this_agent`, `key_in_use`, `principal_not_allowed`,
+  `spends_agent_funds` or `expired`). **An agent must serve this route for the tool to work.** The README gives the
+  route contract for operators: what the agent learns, the route is public, and the rules for when the agent signs.
+  - Before it sends, the tool refuses what it can check without running the scripts. The node checks everything, and
+    runs the scripts, when the user submits. Some refusals follow a rule of the ledger or of the delegation contract:
+    the transaction is marked valid and mints exactly one token of the delegation policy, has one output at the
+    delegation address with that token alone and a valid delegation datum, lists the delegate key as a required
+    signer, carries only witnesses whose signature verifies over the body hash, and reads no output that it spends.
+    Its validity window has a start and an end, is at most one hour long, and has not ended. The delegate is `Active`
+    over the window (ancestors included), and its record lists the delegate key with the delegation purpose and has
+    an `https` endpoint. Every input, collateral input and reference input is on the node.
+  - Other refusals are the scope of this tool and not rules of the ledger. They bound what an agent is asked to
+    sign: a second minted policy, a withdrawal, certificate, vote, proposal, donation or treasury value (also when it
+    is empty or 0), a witness of the delegate key that the transaction already has, and a period of 2^53 ms or more.
+  - The tool reads the keys of the body from the bytes (`readTransactionBody` in `tx-body.ts`) and refuses before the
+    decoder library reads the transaction. It refuses when the bytes are not a transaction with a well-formed body, and
+    when the body has one of the keys 4, 5, 19, 20, 21 or 22. The same reader takes the bytes of the body of the
+    answer, and the tool compares them with the body that it sent before the decoder library reads the answer. The
+    reader and `readTransactionFee` share one CBOR reader (`cborReader` in `tx-fee.ts`): a loop and a list, no
+    recursion, and a time linear in the size of the input. `readTransactionFee` keeps its behaviour.
+  - If one check fails, the tool sends nothing, and its text says so. It sends only to the origin of the endpoint
+    in the record, never to an address that the caller gives. The request has the user agent
+    `vector-mcp-builder/<version>` and nothing else besides the content type and the accept header.
+  - The server sends at most 3 requests a minute for each caller to one origin, and at most 30 a minute to one origin
+    for all callers together. The limit for each caller stops one caller from using the whole budget of an agent.
+    Both counts are in memory and bounded, and a refused request does not count.
+  - From the answer, the tool takes one thing: the vkey witness of the delegate key, with the same body hash and a
+    signature that verifies over it by the rules of the ledger (a public key or a signature point of small order, and an
+    unreduced scalar, do not verify). It adds that witness to the transaction that the caller gave. Only the list of
+    vkey witnesses is written again. The body, the validity flag, the auxiliary data, each other entry of the witness
+    set and each witness that the caller sent keep their bytes, so the agent cannot change them. If the answer is
+    refused, nothing from the agent comes back.
+  - The tool never shows a word of the agent. A refusal shows its code, in the words of the tool, when it is one of the
+    six codes. Any other code shows as "the agent refused". The text of an endpoint is never repeated. A failure says
+    whether the host received the transaction (a redirect always says that it did), and a failure after a send names
+    the host when it is a plain name. Any other host shows as "a host with unusual characters".
+  - The result gives the co-signed CBOR, the validity window, the keys that have signed, the keys that are still missing
+    and the next step. The tool holds no key, adds no signature of its own and submits nothing.
 
 ### Changed
 
@@ -221,7 +265,7 @@
   63 levels of lists and maps, or more than 16,384 bytes (the most that a transaction has). Before, Lucid or the
   library refused such metadata, and a refusal of Lucid repeated
   the metadata. Nothing else changes: no tool text, no schema, and no answer for an input
-  inside the limits. A test gives each string input of each of the 85 tools a text of up to 131,072 characters in
+  inside the limits. A test gives each string input of each of the 86 tools a text of up to 131,072 characters in
   several shapes, also JSON with many levels, and checks that the tool answers within one second.
 
 ### Fixed
