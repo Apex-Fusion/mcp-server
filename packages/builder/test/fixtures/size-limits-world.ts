@@ -1,6 +1,6 @@
 // packages/builder/test/fixtures/size-limits-world.ts
 //
-// The world of input-size-limits.test.ts: the 85 tools of registerVectorTools behind an MCP client in the same process, a node that
+// The world of input-size-limits.test.ts: the 86 tools of registerVectorTools behind an MCP client in the same process, a node that
 // answers at once (no network, no wait), the texts that a caller can send, and the walk over the input schema of each tool that finds
 // every string input. The schema snapshot (test/smoke/tool-schemas.snapshot.json) is the list of tools and inputs.
 import './size-limits-env.ts'; // first: it sets the environment before the modules of the builder are loaded
@@ -119,7 +119,9 @@ const DID = `did:vector:${'c1'.repeat(32)}`;
 function sampleString(name: string, schema: Schema, world: { txCbor: string }): string {
   if (schema.pattern !== undefined) {
     const pattern = new RegExp(schema.pattern);
-    const found = [HEX64, HEX56, 'ab'.repeat(64), 'ab'.repeat(33)].find((candidate) => pattern.test(candidate));
+    // The transaction of the world first, for an input that takes a transaction and is bound by a pattern.
+    const candidates = /^(?:txCbor|signedTxCbor)$/.test(name) ? [world.txCbor] : [];
+    const found = [...candidates, HEX64, HEX56, 'ab'.repeat(64), 'ab'.repeat(33)].find((candidate) => pattern.test(candidate));
     if (found !== undefined) return found;
   }
   let text: string;

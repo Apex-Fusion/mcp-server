@@ -6,27 +6,17 @@
 // hang the run.
 import { afterEach, describe, test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { Script, createContext } from 'node:vm';
 import { CML } from '@lucid-evolution/lucid';
 import { readTransactionFee } from '../src/vector/tx-fee.ts';
 import {
   buildDeployContract, buildInteractContract, buildMultiOutput, buildSendApex, buildSendTokens, declaredFee, lucidForAddress,
 } from '../src/vector/build.ts';
 import { buildDocumentPublish } from '../src/vector/jury-build.ts';
+import { atOnce } from './fixtures/at-once.ts';
 import { FIXTURE_TOKEN_UNIT, FIXTURE_UTXOS, FIXTURE_TXHASH, FOREIGN_ADDRESS, FixtureProvider, OWN_ADDRESS } from './fixtures/fixture-provider.ts';
 import { NOW, WALLET_ADDRESS, juryWorld } from './fixtures/jury-world.ts';
 
 afterEach(() => { mock.restoreAll(); });
-
-/** The time that a call may take, in milliseconds: the reader takes microseconds. */
-const LIMIT_MS = 2000;
-const callScript = new Script('call()');
-const callContext = createContext({ call: (): unknown => undefined });
-/** Runs `call` with a time limit. A call that does not return in `limitMs` ends with an error: vm stops a loop that never ends. */
-function atOnce<T>(call: () => T, limitMs = LIMIT_MS): T {
-  callContext.call = call;
-  return callScript.runInContext(callContext, { timeout: limitMs }) as T;
-}
 
 const INPUT = `825820${'22'.repeat(32)}00`;
 const OUTPUT = `a200581d61${'11'.repeat(28)}011a001e8480`;
@@ -123,6 +113,9 @@ describe('readTransactionFee', () => {
       'an array with no item': '80', 'an empty array, and a body after it': '80a10205', 'an indefinite array with no item': '9fff', 'an indefinite array that is cut': '9f', 'no bytes': '',
       'a break code where a value is': withBody('a200ff0205'), 'a reserved header where key 2 would be': withBody('a11c0000000000000000000000000000000205'),
       'an integer': '02', 'a map': 'a10205', 'a byte string': '4102', 'null': 'f6', 'a break code': 'ff', 'a reserved header': 'fc', 'a reserved array header': '9c',
+      'a map whose first item is a map that holds a fee': 'a1a10205', 'a map of indefinite length whose first item is a map that holds a fee': 'bfa10205ff',
+      'a body with a key above 2 and no key 2': withBody('a2 00 80 03 05'.replace(/ /g, '')), 'a body with a key of two bytes above 2 and no key 2': withBody('a1181800'),
+      'a body of indefinite length with a key above 2 and no key 2': withBody('bf0305ff'),
     };
     for (const [name, hex] of Object.entries(none)) {
       assert.equal(feeOf(hex), undefined, name);
@@ -132,6 +125,13 @@ describe('readTransactionFee', () => {
 
   test('the first key 2 is the fee', () => {
     assert.equal(feeOf(withBody('a3 02 07 00 80 02 08'.replace(/ /g, ''))), 7n);
+  });
+
+  test('a key other than 2 does not give the fee, whatever its value: a key above 2, and a key below 2 with an unsigned integer, come before key 2', () => {
+    assert.equal(feeOf(withBody('a2 03 05 02 07'.replace(/ /g, ''))), 7n, 'a key above 2');
+    assert.equal(feeOf(withBody('a2 1818 05 02 07'.replace(/ /g, ''))), 7n, 'a key of two bytes above 2');
+    assert.equal(feeOf(withBody('a3 00 01 01 02 02 07'.replace(/ /g, ''))), 7n, 'keys below 2 with an unsigned integer');
+    assert.equal(feeOf(withBody('bf 03 05 02 07 ff'.replace(/ /g, ''))), 7n, 'in a body of indefinite length');
   });
 
   test('a key 2 after the end of the body is not the fee', () => {
