@@ -35,6 +35,7 @@ import { describeGovDeployment, serverGovDeployment } from "./vector/gov-deploym
 import { describeJurySources, serverJurySources } from "./vector/jury-deployment.js";
 import { setDecoderStop, watchStackPointer } from "./vector/decoder-health.js";
 import { stopServer } from "./stop-server.js";
+import { takeBody } from "./read-body.js";
 // Single source of truth for the advertised server version. tsup/esbuild
 // resolves this named JSON import at build time and inlines only the field,
 // so the built artifact has no runtime dependency on package.json's location.
@@ -227,7 +228,9 @@ const httpServer = createServer(async (req, res) => {
         return;
       }
       streamableLastSeen.set(sessionId, Date.now());
-      await transport.handleRequest(req, res);
+      const body = await takeBody(req, res);
+      if (body === undefined) return;
+      await transport.handleRequest(req, res, body.json);
       return;
     }
     if (req.method !== 'POST') {
@@ -235,6 +238,10 @@ const httpServer = createServer(async (req, res) => {
       res.end('Missing mcp-session-id header');
       return;
     }
+    // The body of the POST is read, up to its limit, before anything is made for this request: a body above the limit gets 413 and no
+    // session is evicted or created (read-body.ts).
+    const body = await takeBody(req, res);
+    if (body === undefined) return;
     // Per-identity session cap: evict the identity's oldest session before
     // creating one more, so a caller that keeps calling initialize without
     // ever sending DELETE cannot grow this identity's session count past
@@ -292,7 +299,7 @@ const httpServer = createServer(async (req, res) => {
     };
     const session = createMcpServer(auth.identity);
     await session.connect(transport);
-    await transport.handleRequest(req, res);
+    await transport.handleRequest(req, res, body.json);
   } else {
     res.writeHead(404);
     res.end('Not found');

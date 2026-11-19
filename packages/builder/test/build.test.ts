@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { CML } from '@lucid-evolution/lucid';
 import type { LucidEvolution } from '@lucid-evolution/lucid';
 import { FixtureProvider, FIXTURE_UTXOS, OWN_ADDRESS, FOREIGN_ADDRESS, FIXTURE_TOKEN_UNIT } from './fixtures/fixture-provider.ts';
-import { lucidForAddress, buildSendApex, buildSendTokens } from '../src/vector/build.ts';
+import { lucidForAddress, buildMultiOutput, buildSendApex, buildSendTokens } from '../src/vector/build.ts';
 
 // Decode helpers — CML is re-exported by @lucid-evolution/lucid, no extra dep.
 // If a CML method name below is off (from_cbor_hex / body / outputs / amount /
@@ -120,6 +120,46 @@ describe('buildSendApex', () => {
       recipientAddress: FOREIGN_ADDRESS, amountApex: 3, metadataJson: '{"msg":"hi"}',
     });
     assert.deepEqual(decodeMetadataLabels(r.txCbor), ['674']);
+  });
+
+  const listsIn = (levels: number): string => `${'['.repeat(levels)}1${']'.repeat(levels)}`;
+  const sendWith = (metadataJson: string) => buildSendApex(lucid, { recipientAddress: FOREIGN_ADDRESS, amountApex: 3, metadataJson });
+  const payWith = (metadataJson: string) => buildMultiOutput(lucid, { outputs: [{ address: FOREIGN_ADDRESS, lovelace: 2_000_000 }], metadataJson });
+
+  test('builds with metadata at the limits: 63 levels of lists, a text of 64 characters, and a JSON text of 63,601 characters that fits in a transaction', async () => {
+    const numbers = JSON.stringify(Array(15_900).fill(-24));
+    assert.equal(numbers.length, 63_601);
+    for (const metadataJson of [listsIn(63), JSON.stringify({ ['k'.repeat(64)]: 'x'.repeat(64) }), numbers]) {
+      for (const build of [sendWith, payWith]) {
+        const { txCbor } = await build(metadataJson);
+        assert.deepEqual(decodeMetadataLabels(txCbor), ['674']);
+        assert.ok(txCbor.length / 2 <= 16_384, 'the transaction is inside the limit of the ledger');
+      }
+    }
+  });
+
+  test('refuses metadata that no transaction can hold, with a short message, before Lucid reads it', async () => {
+    const levels = 'The metadata has more than 63 levels of lists and maps.';
+    const text = 'The metadata has a text of 65 characters, and a text of metadata has at most 64.';
+    const refused: Array<[string, string]> = [
+      [listsIn(64), levels],
+      [listsIn(2_000), levels],
+      [`${'{"a":'.repeat(64)}1${'}'.repeat(64)}`, levels],
+      [JSON.stringify(Array(16_384).fill(1)), 'The metadata needs more than 16384 bytes, and a transaction has at most 16384.'],
+      [JSON.stringify({ msg: 'x'.repeat(65) }), text],
+      [JSON.stringify({ ['k'.repeat(65)]: 1 }), text],
+      ['[1,[2,null]]', 'The metadata has the value null, and a value of metadata is a text, a number, a list or a map.'],
+      ['{"a":true}', 'The metadata has the value true, and a value of metadata is a text, a number, a list or a map.'],
+    ];
+    for (const [metadataJson, message] of refused) {
+      await assert.rejects(() => sendWith(metadataJson), { message });
+      await assert.rejects(() => payWith(metadataJson), { message });
+    }
+  });
+
+  test('does not refuse a list of 16,383 numbers for its size: one value fewer than the list that it refuses', async () => {
+    const outcome = await sendWith(JSON.stringify(Array(16_383).fill(1))).then(() => 'built', (error: Error) => error.message);
+    assert.doesNotMatch(outcome, /^The metadata needs more than/);
   });
 
   test('rejects a malformed recipient before building', async () => {
