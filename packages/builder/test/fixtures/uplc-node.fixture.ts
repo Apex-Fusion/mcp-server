@@ -1,9 +1,9 @@
 // packages/builder/test/fixtures/uplc-node.fixture.ts
-// A node that evaluates scripts for real, offline. The builders complete with `localUPLCEval: false`, so Lucid asks the provider to
+// A node that evaluates scripts for real, offline. The advert builders complete with `localUPLCEval: false`, so Lucid asks the provider to
 // evaluate the transaction's scripts, as the node (Ogmios) does in production. This provider answers with the evaluator Lucid itself
 // ships (@lucid-evolution/uplc, the one `localUPLCEval: true` runs), over the UTxOs Lucid hands it, so a script that rejects the
-// transaction fails the build exactly as the node's evaluation would. With the deployed validators attached to the reference-script UTxOs
-// (advert-stake-golden.fixture.ts), a build that completes is one the deployed validator accepts under this ledger state; the cost models
+// transaction fails the build exactly as the node's evaluation would. With the deployed advert validator attached to its reference-script
+// UTxO (advert-stake-golden.fixture.ts), a build that completes is one the deployed validator accepts under this ledger state; the cost models
 // are the protocol-params fixture's. Unlike escrow-node.fixture.ts's evaluatingProvider, which answers a fixed budget and says nothing
 // about acceptance, this one is a verdict.
 //

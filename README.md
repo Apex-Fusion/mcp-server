@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks. The 74 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
+Hosted instances run on both networks. The 78 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
 
 | Network | Endpoint |
 |---------|----------|
@@ -100,12 +100,12 @@ limitations.
 - **Identity registry** (`did:vector`) - keyless builders for every record action (register, also subagents; adopt a legacy record; update; change controller; suspend and unsuspend; revoke; retire; reclaim; successor; recovery; end subagents), attestations, delegations and vaults; every build returns the unsigned transaction and the key hashes that must sign it, and each key holder signs in turn. The legacy registry writes (register, update, transfer) are retired; a legacy record that does not adopt can still deregister
 - **Self-Improvement Module** - browse, submit, critique, and endorse improvement proposals on the Module-6 deployment of the identity registry (the agent is a `did:vector` agent whose record is Active); every write tool is keyless
 - **Agents marketplace, both sides** - hire a supplier (escrow post, accept, reclaim, send a job, check its receipt) and list one (advert post, update and retire in the identity layout; one retire for both layouts; the legacy-layout Post is refused from the escrow switch on), keyless
-- **Reputation self-stake** - the current Module-3 deployment takes no new stakes, so the two stake tools refuse (see [Reputation](#reputation-2))
+- **Reputation self-stake** - keyless builders for an agent's Module-3 stake on the deployment for the identity registry (open, create, increase, capability update, decrease), and a read of the stakes of up to 50 agents (see [Reputation](#reputation-6)); the owner cannot withdraw the module minimum
 - **Module-1 disputes and the jury** - publish and read documents on chain (metadata label 22084, `vector-tx:` URIs), build a Module-1 claim or challenge (oracle mode), and act as a juror of the Module-1 jury (register, exit, top-up, commit, reveal); read the jurors and the cases with the canonical case of each dispute, keyless
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
 - **Streamable HTTP transport** - the modern MCP transport at `/mcp`, with any-origin CORS for browser clients and an unauthenticated `GET /health` probe (the legacy SSE pair was removed in 2.0.0)
 
-## MCP Tools (74)
+## MCP Tools (78)
 
 ### Wallet & Queries
 
@@ -224,18 +224,34 @@ Agent DIDs have two forms: the canonical `did:vector:<64 hex>` and the legacy `d
 Example non-custodial flow for an identity action with two keys: `vector_build_identity_register` → `vector_signer_sign` (controller key) →
 `vector_signer_sign` (listed key, on the CBOR the first signer returned) → `vector_submit_transaction` → `vector_await_transaction`.
 
-### Reputation (2)
+### Reputation (6)
 
-> **The current Module-3 deployment takes no new stakes. New stakes use the new Module-3 deployment,
-> which is published after the identity release.** Until then both tools refuse and build nothing.
+The Module-3 reputation stake of an agent, on the deployment for the identity registry (reputation validator
+`fad945ab20f61a58fbdf6a33a8f491899b7dd4167fb64200bc060424`, on Vector mainnet since 2026-11-03). The agent is an identity DID
+(`did:vector:<64 hex>`) whose record is Active; a DID of the legacy registry is refused, and the refusal names the identity form. A stake
+takes two builds. The owner then adds AP3X, replaces the staked capabilities, or takes AP3X out down to the module minimum. Each build tool
+is keyless: it checks the rules of the validator, lets Lucid run the deployed validator on the transaction, and returns the unsigned
+transaction with every key hash that must sign it: the controller key of the agent, the owner key of the stake, and the wallet (an exit
+needs the controller key only, besides the wallet). Step 1 is the exception: it only locks an opening output, no script runs, and only the
+wallet signs. The owner of the stake is `owner_key_hash` when it is passed; when it is not, step 1 takes the key of `changeAddress` and
+step 2 takes the owner that the opening output names, if the record declares that key now (else it refuses and says what to pass). The
+validator reads the owner of the stake, not the owner in the opening output, so the answer of step 2 says when the stake gets another owner
+than the opening output names. The build tools find the agent's record through the identity
+registry of the server (see [Configuration](#configuration)) and refuse on a server that has none; `vector_get_reputation_stake` needs no
+identity registry and works there. All six need a node on Vector mainnet, and no other setting. **The owner cannot withdraw the module
+minimum.** Each agent has one stake through these tools.
 
 | Tool | Description |
 |------|-------------|
-| `vector_build_reputation_stake_open` | Step 1 of 2 of an agent's Module-3 reputation self-stake: an opening output at the reputation validator, naming the agent and the capabilities. Refuses while the deployment takes no new stakes (keyless) |
-| `vector_build_reputation_stake` | Step 2 of 2: consumes the opening output, mints the agent's stake token and locks the module's minimum self-stake behind capabilities the agent's registry record lists. Refuses while the deployment takes no new stakes (keyless) |
+| `vector_build_reputation_stake_open` | Step 1 of 2 of an agent's Module-3 reputation self-stake: an opening output at the reputation validator, naming the agent and the capabilities. It checks the record (Active over the window, lists each capability), the owner key (the controller key, or a listed key with the transaction purpose; default your wallet key), that the agent has no stake yet, and that the wallet can pay step 2. It refuses when an opening output that names the agent is already at the reputation address: step 2 can spend any of them with any owner key that the record declares, and the refusal lists them with their AP3X and owner (at most 5, those whose owner the record declares first, then the number of the rest); `allow_second_opening` builds a new opening output all the same, and the answer lists the opening outputs that existed in the same way. Only the wallet signs, and no script runs. Only step 2 can spend the opening output, so it stays locked when step 2 never runs. The answer names the `owner_key_hash` and the `amount` to pass to step 2 (keyless) |
+| `vector_build_reputation_stake` | Step 2 of 2 (CreateStake): consumes the opening output, mints the agent's stake token and locks the stake: at least the module minimum, 10 AP3X, read from the module's parameters (`amount` locks more). The owner of the stake is `owner_key_hash` when you pass it, else the owner key that step 1 named in the opening output, which the record must declare now. The stake time `last_updated` is the end of the validity window (`valid_minutes`, 1 to 59). The controller key and the owner key sign (keyless) |
+| `vector_build_reputation_stake_increase` | Add AP3X to a stake (IncreaseStake). No cooldown. The record must list each capability that the stake backs. Name the stake with `stake_ref` when the agent has more than one (keyless) |
+| `vector_build_reputation_stake_update_capabilities` | Replace the staked capabilities (UpdateCapabilities): each must be one that the record lists. The cooldown of the stake (24 h after `last_updated`) must be over, and no open challenge may lock the stake. The same list again only records a new `last_updated` (keyless) |
+| `vector_build_reputation_stake_decrease` | Take AP3X out of a stake (DecreaseStake), down to the module minimum. The cooldown must be over and no challenge may lock the stake. Only the controller key signs, besides the wallet. The AP3X go to the owner key of the stake while the record declares it, else to the controller key; the answer names the payee. A revoked or retired agent can exit (keyless) |
+| `vector_get_reputation_stake` | Read the stakes of 1 to 50 agents with one Koios call: each stake (reference, `stake_amount`, capabilities, `last_updated`, number of challenge locks, `stake_id`, AP3X in the output, owner key) and the sum of `stake_amount`; the sum is 0 for an agent with no stake (read-only, no wallet needed) |
 
-The stake datum, stake token and transaction shape are ported from the reference Python SDK
-(`Apex-Fusion/vector-agent-modules`, `Module-3/python/reputation_staking`); the builders stay for the new deployment.
+The stake datum (8 fields), the stake token and the transaction shape follow the deployed validator
+(`Apex-Fusion/vector-agent-modules`, `Module-3/reputation-staking`) and its reference Python SDK (`Module-3/python/reputation_staking`).
 
 Launching a supplier agent from a chat client, with the hosted server and the local signer (each build is signed
 with `vector_signer_sign`, broadcast with `vector_submit_transaction` and confirmed with `vector_await_transaction`

@@ -4,6 +4,55 @@
 
 ### Added
 
+- **Reputation stake tools on the deployment for the identity registry** (`Module-3/reputation-staking` of
+  vector-agent-modules; reputation validator `fad945ab20f61a58fbdf6a33a8f491899b7dd4167fb64200bc060424`, on Vector
+  mainnet since 2026-11-03): 4 new tools, 78 in all.
+  - Builds: `vector_build_reputation_stake_open` (step 1: the opening output) and `vector_build_reputation_stake` (step
+    2: CreateStake) make a stake. `vector_build_reputation_stake_increase` (IncreaseStake),
+    `vector_build_reputation_stake_update_capabilities` (UpdateCapabilities) and
+    `vector_build_reputation_stake_decrease` (DecreaseStake) act on it. Each build returns the unsigned transaction and
+    every key hash that must sign it, with its role: the controller key of the agent, the owner key of the stake, and
+    the wallet (an exit needs the controller key only, besides the wallet). Step 1 is the exception: no script runs, and
+    only the wallet signs. Each other build checks the rules of the validator before it builds, and Lucid runs the
+    deployed validator on the transaction; the fee pays for the
+    reference script. The window comes from `valid_minutes` (1 to 59); `last_updated` of the stake is its upper bound.
+  - The agent is an identity DID (`did:vector:<64 hex>`), in the parameter `did` as in the identity tools. The create
+    tool checks that the record is Active over the window (ancestors included) and lists each capability byte for byte,
+    and that the owner key is the controller key or a key that the record lists with the transaction purpose. The owner
+    of the stake is `owner_key_hash` when it is passed. When it is not, step 1 takes the key of `changeAddress`, and
+    step 2 takes the owner that the opening output names, if the record declares that key now; if it does not, step 2
+    refuses, names that key, and says to pass `owner_key_hash` with the controller key or a listed key with the
+    transaction purpose. The validator reads the owner of the stake, not the owner in the opening output: when the
+    stake gets another owner than the opening output names, the answer of step 2 says so (and the JSON has
+    `opening_owner_key_hash`). `amount` locks more than the module minimum. The datum has 8 fields: `challenge_locks`
+    and `stake_id` (the output reference of the opening output) are new. The parameters output and the cross references
+    are found by their tokens at the params holder, as the validator does; only the reference script is pinned by its
+    output reference. The answer of step 1 names the `owner_key_hash` and the `amount` to pass to step 2, as a number
+    in the block `step_2` that step 2 takes as it is.
+  - One stake for each agent: the create tool and the opening tool refuse an agent that has a stake, and name the stake
+    and the increase tool. When an opening output that names the agent is also at the address, the refusal says that only
+    a CreateStake can spend an opening output, and that these tools make no second stake. It then lists the opening
+    outputs with their AP3X and owner (see the next point for the bound). The owner cannot withdraw the module minimum
+    (10 AP3X), so a second create after a retry would lock it twice. The increase, update and decrease tools take
+    `stake_ref` when an agent has more than one stake.
+  - Opening outputs: the opening tool refuses while an opening output that names the agent is at the address. The
+    refusal first says that step 2 can spend any of them with any owner key that the record declares, and names the new
+    input `allow_second_opening` (boolean, default false), which builds a new opening output all the same for the case
+    that step 2 cannot use the one that exists; each opening output locks its AP3X until a CreateStake spends it. It
+    then lists the opening outputs with their AP3X and owner: at most 5, those whose owner the record declares first
+    (each group in the order of the node), and the number of the rest ("and N more"). An error keeps 800 characters, so
+    the way out comes before the list. The answer of a second opening lists the opening outputs that existed in the same
+    way: `other_openings` (at most 5) and `other_openings_more` in the JSON.
+  - `vector_get_reputation_stake` reads the stakes of 1 to 50 agents with one Koios `asset_utxos` call (the stake token
+    name is `rstk_` and 27 bytes of the blake2b-256 of the identifier): each stake with its `stake_amount`, capabilities,
+    `last_updated`, number of challenge locks, `stake_id` and the AP3X in the output, and the sum of `stake_amount`, which
+    is 0 for an agent with no stake. The read is in `reputation-read.ts`, which imports only `reputation-datum.ts`.
+  - The tools need no new setting. The build tools use the identity registry of the server, and refuse when it is not
+    configured and when its policy is not the one that the reputation validator reads (`d958b823…`).
+    `vector_get_reputation_stake` needs no identity registry. All six refuse when the node is not on Vector mainnet.
+  - Removed: `REPUTATION_TAKES_NEW_STAKES`, the refusal text, the values of the earlier Module-3 deployment (reputation
+    `5168e187…`, which keeps its positions) and the read of the legacy registry. The parameter `agent_id` of the two
+    tools is now `did`, and a DID of the legacy registry is refused with the identity form named.
 - **Module-1 disputes and the Module-1 jury** (`Module-1/jury/SPEC.md` of vector-agent-modules): 11 tools, 74 in all.
   - Documents on chain: `vector_build_document_publish` builds a transaction that carries a UTF-8 document as
     metadata under label 22084 (text chunks of at most 64 bytes, split at character boundaries, no chunk starts with
@@ -76,7 +125,7 @@
   63 levels of lists and maps, or more than 16,384 bytes (the most that a transaction has). Before, Lucid or the
   library refused such metadata, and a refusal of Lucid repeated
   the metadata. Nothing else changes: no tool text, no schema, and no answer for an input
-  inside the limits. A test gives each string input of each of the 74 tools a text of up to 131,072 characters in
+  inside the limits. A test gives each string input of each of the 78 tools a text of up to 131,072 characters in
   several shapes, also JSON with many levels, and checks that the tool answers within one second.
 
 ### Fixed
@@ -175,9 +224,10 @@ includes them.
   agents' live adverts), with the same terms rules.
 - `vector_build_reputation_stake_open` and `vector_build_reputation_stake`: an agent's Module-3 reputation
   self-stake in two keyless steps, ported from the reference Python SDK (`Apex-Fusion/vector-agent-modules`,
-  `Module-3/python/reputation_staking`). The current Module-3 deployment takes no new stakes. New stakes use the new
-  Module-3 deployment, which is published after the identity release. Until then both tools refuse before they read
-  anything; the builders stay, and the unit tests run them against the deployed reputation validator offline.
+  `Module-3/python/reputation_staking`). In 3.0.0 both tools refused before they read anything, because the Module-3
+  deployment of that time took no new stakes. The deployment for the identity registry went on chain at
+  2026-11-03T15:09Z, one hour after the release. Both tools build on it since the entry "Reputation stake tools on
+  the deployment for the identity registry" of the Unreleased section.
 - Module-1's consent withdrawal reads the reward balance with no default: Ogmios's reward account summary, else
   Koios `account_info` (Vector's Ogmios has no summary for a registered stake credential that is not delegated). A
   stake credential that is not registered, or a read that fails, is refused; the balance is never taken as 0.

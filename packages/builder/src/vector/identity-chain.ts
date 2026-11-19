@@ -99,12 +99,17 @@ export const isRecordOutput = (utxo: UTxO, deployment: IdentityDeployment, id: s
   holdsSoleToken(utxo, deployment.identity.address, deployment.identity.hash, id);
 
 /**
- * The authentic output of the token `name` of `policy` at `address` (holdsSoleToken), or null. Koios names the UTxO that holds the
- * token (fast), and the node must list that UTxO; when Koios has no answer, or one the node does not confirm (it lags), the node's
- * list of the address decides.
+ * The authentic output of the token `name` of `policy` at `address` (holdsSoleToken), or null. `name` is an identifier of the identity
+ * registry. Koios names the UTxO that holds the token (fast), and the node must list that UTxO; when Koios has no answer, or one the node
+ * does not confirm (it lags), the node's list of the address decides.
  */
 export async function findTokenOutput(provider: Provider, address: string, policy: string, name: string): Promise<UTxO | null> {
   if (!VECTOR_ID.test(name)) throw new Error(`${JSON.stringify(name)} is not an identifier (64 lowercase hex characters).`);
+  return findSoleTokenOutput(provider, address, policy, name);
+}
+
+/** The lookup of `findTokenOutput` for a token with any asset name, such as the record token `params` of a module: no identifier check. */
+export async function findSoleTokenOutput(provider: Provider, address: string, policy: string, name: string): Promise<UTxO | null> {
   let hint: UTxO | undefined;
   try { hint = await provider.getUtxoByUnit(`${policy}${name}`); } catch { /* no Koios answer: the address scan below decides */ }
   if (hint) {

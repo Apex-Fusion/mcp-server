@@ -1,28 +1,22 @@
 // packages/builder/test/advert-stake-tools.test.ts
-// Handler-level tests for the supplier-side tools of PR #25: the legacy advert Post, the Retire of a legacy advert (both registered with
-// the marketplace family; vector_build_marketplace_advert_retire takes both layouts) and the two reputation stake steps, which refuse
-// while the deployment takes no new stakes and whose build path runs with the setting on. A minimal fake server captures the handlers,
-// Koios is a stubbed global fetch, and the node is a fixture handed in as the provider argument, as in marketplace-tools.test.ts; the
-// stake and Retire nodes evaluate the deployed validators (uplc-node.fixture.ts). No network is touched. (Schemas and descriptions are
-// covered by the smoke suite.)
+// Handler-level tests for the supplier-side tools of PR #25: the legacy advert Post and the Retire of a legacy advert (both registered with
+// the marketplace family; vector_build_marketplace_advert_retire takes both layouts). A minimal fake server captures the handlers, Koios is
+// a stubbed global fetch, and the node is a fixture handed in as the provider argument, as in marketplace-tools.test.ts; the Retire node
+// evaluates the deployed advert validator (uplc-node.fixture.ts). No network is touched. (Schemas and descriptions are covered by the
+// smoke suite. The reputation stake tools have their own tests: reputation-tools.test.ts.)
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Provider, UTxO } from '@lucid-evolution/lucid';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerMarketplaceTools } from '../src/vector/marketplace.ts';
-import { registerReputationTools } from '../src/vector/reputation-tools.ts';
 import { RateLimiter } from '../src/vector/rate-limiter.ts';
 import { ADVERT_ADDRESS, ESCROW_SWITCH_SLOT } from '../src/vector/marketplace-constants.ts';
 import { LEGACY_ADVERT_REFUSAL } from '../src/vector/marketplace-build.ts';
 import { decodeAdvertDatum } from '../src/vector/marketplace-datum.ts';
-import { stakeTokenUnit, NO_NEW_STAKES, VECTOR_MAINNET_ZERO_TIME_MS } from '../src/vector/reputation-build.ts';
 import { SIGN_COPY } from '../src/vector/marketplace-shared.ts';
 import { FixtureProvider } from './fixtures/fixture-provider.ts';
 import { uplcEvaluatingProvider } from './fixtures/uplc-node.fixture.ts';
-import {
-  ADVERT_POSTS, ADVERT_RETIRE, ADVERT_REF_UTXO_BARE, ADVERT_SCRIPT_CBOR, STAKE_A, PARAMS_UTXO, CROSS_REFS_UTXO, REPUTATION_REF_UTXO_BARE,
-  REPUTATION_SCRIPT_CBOR,
-} from './fixtures/advert-stake-golden.fixture.ts';
+import { ADVERT_POSTS, ADVERT_RETIRE, ADVERT_REF_UTXO_BARE, ADVERT_SCRIPT_CBOR, STAKE_A } from './fixtures/advert-stake-golden.fixture.ts';
 
 type Handler = (args: Record<string, unknown>) => Promise<{ content: { type: string; text: string }[] }>;
 const serverOf = (into: Map<string, Handler>) => ({ tool: (name: string, _description: string, _shape: unknown, handler: Handler) => { into.set(name, handler); } }) as unknown as McpServer;
@@ -30,10 +24,6 @@ let node: Provider | undefined;
 const nodeOfTheTest = (): Provider => { if (!node) throw new Error('this test set no node'); return node; };
 const handlers = new Map<string, Handler>();
 registerMarketplaceTools(serverOf(handlers), 'advert-stake-tools-test', nodeOfTheTest, new RateLimiter(100_000));
-registerReputationTools(serverOf(handlers), 'advert-stake-tools-test', nodeOfTheTest, new RateLimiter(100_000));
-/** The stake tools with the build path on, as for a deployment that takes new stakes. */
-const building = new Map<string, Handler>();
-registerReputationTools(serverOf(building), 'advert-stake-tools-test', nodeOfTheTest, new RateLimiter(100_000), true);
 const callOn = (registered: Map<string, Handler>) => async (name: string, args: Record<string, unknown> = {}): Promise<string> => {
   const h = registered.get(name);
   assert.ok(h, `${name} is registered`);
@@ -154,7 +144,7 @@ describe('vector_build_marketplace_post_advert', () => {
   });
 });
 
-const ZERO = VECTOR_MAINNET_ZERO_TIME_MS;
+const ZERO = 1_756_485_600_000; // Vector mainnet's chain start (FixtureProvider.getSystemStartMs)
 const RETIRE_REF = `${ADVERT_RETIRE.advert.txHash}#0`;
 const advertRow = () => ({ tx_hash: ADVERT_RETIRE.advert.txHash, tx_index: 0, address: ADVERT_ADDRESS, value: '2017080', is_spent: false, inline_datum: { bytes: ADVERT_RETIRE.advert.datum } });
 const advertScript: UTxO = { ...ADVERT_REF_UTXO_BARE, scriptRef: { type: 'PlutusV3', script: ADVERT_SCRIPT_CBOR } };
@@ -191,61 +181,13 @@ describe('vector_build_marketplace_advert_retire, a legacy-layout advert', () =>
     assert.equal(n.evaluations.length, 1, 'the deployed advert validator accepted it');
   });
 });
-
-const refScript: UTxO = { ...REPUTATION_REF_UTXO_BARE, scriptRef: { type: 'PlutusV3', script: REPUTATION_SCRIPT_CBOR } };
-const stakeNode = (extra: UTxO[] = []) => uplcEvaluatingProvider([STAKE_A.wallet, STAKE_A.registry, PARAMS_UTXO, CROSS_REFS_UTXO, refScript, ...extra], nowSlot());
-
-describe('vector_build_reputation_stake_open and vector_build_reputation_stake', () => {
-  test('the current deployment takes no new stakes: both tools refuse with the neutral text before they read the node or the network', async () => {
-    const refusal = 'The current Module-3 deployment takes no new stakes. New stakes use the new Module-3 deployment, which is published after the identity release.';
-    assert.equal(NO_NEW_STAKES, refusal);
-    node = undefined;
-    const open = await call('vector_build_reputation_stake_open', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: STAKE_A.capabilities });
-    assert.equal(open, `Failed to build stake opening: ${refusal}`);
-    const stake = await call('vector_build_reputation_stake', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: STAKE_A.capabilities, opening_ref: `${STAKE_A.opening.txHash}#0` });
-    assert.equal(stake, `Failed to build reputation stake: ${refusal}`);
-    assert.deepEqual(requested, [], 'nothing is fetched');
-  });
-  test('with the build path on, step 1 shows the opening ref and what step 2 needs', async () => {
-    const wallet: UTxO[] = [{ ...STAKE_A.wallet, txHash: 'ab'.repeat(32) }, { ...STAKE_A.wallet, txHash: 'ab'.repeat(32), outputIndex: 2, assets: { lovelace: 5_000_000n } }];
-    node = uplcEvaluatingProvider([...wallet, STAKE_A.registry, PARAMS_UTXO, CROSS_REFS_UTXO, refScript], nowSlot());
-    const t = await callOn(building)('vector_build_reputation_stake_open', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: STAKE_A.capabilities });
-    assert.ok(t.startsWith('# Unsigned Stake Opening Built (Not Submitted), step 1 of 2\n\n**Opening ref (after submit):** '), t.slice(0, 300));
-    const j = jsonOf(t);
-    assert.equal(j.opening_ref, `${j.tx_hash}#0`);
-    assert.deepEqual(j.capabilities, STAKE_A.capabilities);
-    assert.match(t, /\*\*Locked:\*\* 2\.000000 \(returns as change when step 2 consumes it\)/);
-    assert.ok(t.includes(`Once it confirms, call vector_build_reputation_stake with opening_ref \`${j.opening_ref}\` and the same agent_id and capabilities.\n\n${JSON_FENCE.slice(1)}`));
-  });
-  test('with the build path on, step 2 shows the stake and its token; the deployed validator accepts the transaction', async () => {
-    const n = stakeNode([STAKE_A.opening]);
-    node = n;
-    const t = await callOn(building)('vector_build_reputation_stake', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: STAKE_A.capabilities, opening_ref: `${STAKE_A.opening.txHash}#0` });
-    assert.ok(t.startsWith('# Unsigned Reputation Stake Built (Not Submitted), step 2 of 2\n\n**Stake ref (after submit):** '), t.slice(0, 300));
-    assert.ok(t.includes(`**Stake locked:** 10.000000 with stake token \`${stakeTokenUnit(STAKE_A.agentDidHex)}\`\n`));
-    assert.match(t, /\*\*Valid until:\*\* \S+ \(sign and submit before then, or build it again\)/);
-    const j = jsonOf(t);
-    assert.equal(j.stake_ref, `${j.tx_hash}#0`);
-    assert.equal(j.stake_lovelace, '10000000');
-    assert.equal(j.opening_ref, `${STAKE_A.opening.txHash}#0`);
-    assert.equal(n.evaluations.length, 1);
-  });
-  test('with the build path on, refusals name the rule: a capability the registry record does not list', async () => {
-    node = stakeNode([STAKE_A.opening]);
-    const t = await callOn(building)('vector_build_reputation_stake', { changeAddress: STAKE_A.ownerAddress, agent_id: STAKE_A.agentId, capabilities: ['data_analysis'], opening_ref: `${STAKE_A.opening.txHash}#0` });
-    assert.match(t, /^Failed to build reputation stake: Capability data_analysis is not in the registry record of did:vector:agent:/);
-    assert.match(t, /\*\*Troubleshooting Tips:\*\*\n1\. opening_ref must be the confirmed output/);
-  });
-});
-
-describe('the rate limit covers the new tools', () => {
-  test('a spent limiter answers each of the four with the rate-limit text and touches nothing', async () => {
+describe('the rate limit covers the advert tools', () => {
+  test('a spent limiter answers each of the two with the rate-limit text and touches nothing', async () => {
     const spent = new RateLimiter(1);
     spent.check();
     const limited = new Map<string, Handler>();
     registerMarketplaceTools(serverOf(limited), 'limited', () => { throw new Error('the node was touched'); }, spent);
-    registerReputationTools(serverOf(limited), 'limited', () => { throw new Error('the node was touched'); }, spent);
-    for (const name of ['vector_build_marketplace_post_advert', 'vector_build_marketplace_advert_retire', 'vector_build_reputation_stake_open', 'vector_build_reputation_stake']) {
+    for (const name of ['vector_build_marketplace_post_advert', 'vector_build_marketplace_advert_retire']) {
       assert.match(await callOn(limited)(name, {}), /^Rate limit exceeded\. Retry after \d+ms\.$/, name);
     }
   });
