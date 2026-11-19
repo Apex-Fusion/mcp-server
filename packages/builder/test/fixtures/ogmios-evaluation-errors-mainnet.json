@@ -1,0 +1,91 @@
+{
+  "_source": "Vector mainnet Ogmios evaluateTransaction (HTTP status and body as the node sent them) for drafts of buildVaultPay with ledgerDecides; made by capture-ogmios-evaluation-errors.mjs. The vault is aa373b0b647dcffc654031990ae85df83d07e17def69e6affda3b503ee1c61a5#1.",
+  "cases": {
+    "above_per_tx": {
+      "description": "The payment from the live vault aa373b0b647dcffc654031990ae85df83d07e17def69e6affda3b503ee1c61a5#1 for the advert with the largest lock, 53468fd7fe4df14769eacec35438a56822a835b1e4b25c87a00dde7b24db09b8#0 (7000000 lovelace): above per_tx of the delegation of the vault.",
+      "httpStatus": 400,
+      "body": {
+        "jsonrpc": "2.0",
+        "method": "evaluateTransaction",
+        "error": {
+          "code": 3010,
+          "message": "Some scripts of the transactions terminated with error(s).",
+          "data": [
+            {
+              "validator": {
+                "index": 1,
+                "purpose": "spend"
+              },
+              "error": {
+                "code": 3012,
+                "message": "Some of the scripts failed to evaluate to a positive outcome. The field 'data.validationError' informs about the nature of the error, and 'data.traces' lists all the execution traces collected during the script execution.",
+                "data": {
+                  "validationError": "An error has occurred:\nThe machine terminated because of an error, either from a built-in function or from an explicit use of 'error'.\nCaused by: (error)",
+                  "traces": []
+                }
+              }
+            }
+          ]
+        },
+        "id": null
+      }
+    },
+    "past_total": {
+      "description": "A payment from the live vault aa373b0b647dcffc654031990ae85df83d07e17def69e6affda3b503ee1c61a5#1 inside its running period (period_start 1794846798000): the period total is passed.",
+      "httpStatus": 400,
+      "body": {
+        "jsonrpc": "2.0",
+        "method": "evaluateTransaction",
+        "error": {
+          "code": 3010,
+          "message": "Some scripts of the transactions terminated with error(s).",
+          "data": [
+            {
+              "validator": {
+                "index": 1,
+                "purpose": "spend"
+              },
+              "error": {
+                "code": 3012,
+                "message": "Some of the scripts failed to evaluate to a positive outcome. The field 'data.validationError' informs about the nature of the error, and 'data.traces' lists all the execution traces collected during the script execution.",
+                "data": {
+                  "validationError": "An error has occurred:\nThe machine terminated because of an error, either from a built-in function or from an explicit use of 'error'.\nCaused by: (error)",
+                  "traces": []
+                }
+              }
+            }
+          ]
+        },
+        "id": null
+      }
+    },
+    "past_horizon": {
+      "description": "A payment from the live vault aa373b0b647dcffc654031990ae85df83d07e17def69e6affda3b503ee1c61a5#1 with a validity range 14 days from now: beyond the end of the era that the node can foresee.",
+      "httpStatus": 400,
+      "body": {
+        "jsonrpc": "2.0",
+        "method": "evaluateTransaction",
+        "error": {
+          "code": 3010,
+          "message": "Some scripts of the transactions terminated with error(s).",
+          "data": [
+            {
+              "validator": {
+                "index": 1,
+                "purpose": "spend"
+              },
+              "error": {
+                "code": 3004,
+                "message": "Unable to create the evaluation context from the given transaction.",
+                "data": {
+                  "reason": "Uncomputable slot arithmetic; transaction's validity bounds go beyond the foreseeable end of the current era: PastHorizon {pastHorizonCallStack = [(\"runQuery\",SrcLoc {srcLocPackage = \"ouroboros-consensus-0.27.0.0-bcbf178da6ef032034151b45cc1ec14778a5ebb880fa35aed727763ca5f8a489\", srcLocModule = \"Ouroboros.Consensus.HardFork.History.Qry\", srcLocFile = \"src/ouroboros-consensus/Ouroboros/Consensus/HardFork/History/Qry.hs\", srcLocStartLine = 438, srcLocStartCol = 44, srcLocEndLine = 438, srcLocEndCol = 52}),(\"interpretQuery\",SrcLoc {srcLocPackage = \"ouroboros-consensus-0.27.0.0-bcbf178da6ef032034151b45cc1ec14778a5ebb880fa35aed727763ca5f8a489\", srcLocModule = \"Ouroboros.Consensus.HardFork.History.EpochInfo\", srcLocFile = \"src/ouroboros-consensus/Ouroboros/Consensus/HardFork/History/EpochInfo.hs\", srcLocStartLine = 44, srcLocStartCol = 50, srcLocEndLine = 44, srcLocEndCol = 64}),(\"interpretQuery'\",SrcLoc {srcLocPackage = \"ouroboros-consensus-0.27.0.0-bcbf178da6ef032034151b45cc1ec14778a5ebb880fa35aed727763ca5f8a489\", srcLocModule = \"Ouroboros.Consensus.HardFork.History.EpochInfo\", srcLocFile = \"src/ouroboros-consensus/Ouroboros/Consensus/HardFork/History/EpochInfo.hs\", srcLocStartLine = 38, srcLocStartCol = 9, srcLocEndLine = 38, srcLocEndCol = 24}),(\"epochInfoSlotToRelativeTime_\",SrcLoc {srcLocPackage = \"cardano-slotting-0.2.0.1-accbf2b508cce82d3684e8f73e3cc3b921218b781b3fc28f88a062d2f3e2dcdc\", srcLocModule = \"Cardano.Slotting.EpochInfo.API\", srcLocFile = \"src/Cardano/Slotting/EpochInfo/API.hs\", srcLocStartLine = 56, srcLocStartCol = 5, srcLocEndLine = 56, srcLocEndCol = 33}),(\"a use of `epochInfoSlotToRelativeTime_'\",SrcLoc {srcLocPackage = \"cardano-slotting-0.2.0.1-accbf2b508cce82d3684e8f73e3cc3b921218b781b3fc28f88a062d2f3e2dcdc\", srcLocModule = \"Cardano.Slotting.EpochInfo.API\", srcLocFile = \"src/Cardano/Slotting/EpochInfo/API.hs\", srcLocStartLine = 113, srcLocStartCol = 31, srcLocEndLine = 113, srcLocEndCol = 59}),(\"epochInfoSlotToRelativeTime\",SrcLoc {srcLocPackage = \"cardano-slotting-0.2.0.1-accbf2b508cce82d3684e8f73e3cc3b921218b781b3fc28f88a062d2f3e2dcdc\", srcLocModule = \"Cardano.Slotting.EpochInfo.API\", srcLocFile = \"src/Cardano/Slotting/EpochInfo/API.hs\", srcLocStartLine = 129, srcLocStartCol = 42, srcLocEndLine = 129, srcLocEndCol = 69}),(\"epochInfoSlotToRelativeTime_\",SrcLoc {srcLocPackage = \"cardano-slotting-0.2.0.1-accbf2b508cce82d3684e8f73e3cc3b921218b781b3fc28f88a062d2f3e2dcdc\", srcLocModule = \"Cardano.Slotting.EpochInfo.API\", srcLocFile = \"src/Cardano/Slotting/EpochInfo/API.hs\", srcLocStartLine = 56, srcLocStartCol = 5, srcLocEndLine = 56, srcLocEndCol = 33}),(\"a use of `epochInfoSlotToRelativeTime_'\",SrcLoc {srcLocPackage = \"cardano-slotting-0.2.0.1-accbf2b508cce82d3684e8f73e3cc3b921218b781b3fc28f88a062d2f3e2dcdc\", srcLocModule = \"Cardano.Slotting.EpochInfo.API\", srcLocFile = \"src/Cardano/Slotting/EpochInfo/API.hs\", srcLocStartLine = 113, srcLocStartCol = 31, srcLocEndLine = 113, srcLocEndCol = 59}),(\"epochInfoSlotToRelativeTime\",SrcLoc {srcLocPackage = \"cardano-slotting-0.2.0.1-accbf2b508cce82d3684e8f73e3cc3b921218b781b3fc28f88a062d2f3e2dcdc\", srcLocModule = \"Cardano.Slotting.EpochInfo.API\", srcLocFile = \"src/Cardano/Slotting/EpochInfo/API.hs\", srcLocStartLine = 94, srcLocStartCol = 30, srcLocEndLine = 94, srcLocEndCol = 57}),(\"epochInfoSlotToUTCTime\",SrcLoc {srcLocPackage = \"cardano-ledger-core-1.17.0.0-cd5f8edfc5504be1c452d8470fb6702d293d21d7d4f15a0601c062ccd94ac85e\", srcLocModule = \"Cardano.Ledger.Plutus.TxInfo\", srcLocFile = \"src/Cardano/Ledger/Plutus/TxInfo.hs\", srcLocStartLine = 168, srcLocStartCol = 9, srcLocEndLine = 168, srcLocEndCol = 31})], pastHorizonExpression = Some (EPair (ERelToAbsTime (ERelSlotToTime (EAbsToRelSlot (ELit (SlotNo 39722078))))) (ESlotLength (ELit (SlotNo 39722078)))), pastHorizonSummary = [EraSummary {eraStart = Bound {boundTime = RelativeTime 0s, boundSlot = SlotNo 0, boundEpoch = EpochNo 0}, eraEnd = EraEnd (Bound {boundTime = RelativeTime 86400s, boundSlot = SlotNo 86400, boundEpoch = EpochNo 4}), eraParams = EraParams {eraEpochSize = EpochSize 21600, eraSlotLength = SlotLength 1s, eraSafeZone = StandardSafeZone 4320, eraGenesisWin = GenesisWindow {unGenesisWindow = 4320}}},EraSummary {eraStart = Bound {boundTime = RelativeTime 86400s, boundSlot = SlotNo 86400, boundEpoch = EpochNo 4}, eraEnd = EraEnd (Bound {boundTime = RelativeTime 518400s, boundSlot = SlotNo 518400, boundEpoch = EpochNo 9}), eraParams = EraParams {eraEpochSize = EpochSize 86400, eraSlotLength = SlotLength 1s, eraSafeZone = StandardSafeZone 25920, eraGenesisWin = GenesisWindow {unGenesisWindow = 25920}}},EraSummary {eraStart = Bound {boundTime = RelativeTime 518400s, boundSlot = SlotNo 518400, boundEpoch = EpochNo 9}, eraEnd = EraEnd (Bound {boundTime = RelativeTime 1209600s, boundSlot = SlotNo 1209600, boundEpoch = EpochNo 17}), eraParams = EraParams {eraEpochSize = EpochSize 86400, eraSlotLength = SlotLength 1s, eraSafeZone = StandardSafeZone 25920, eraGenesisWin = GenesisWindow {unGenesisWindow = 25920}}},EraSummary {eraStart = Bound {boundTime = RelativeTime 1209600s, boundSlot = SlotNo 1209600, boundEpoch = EpochNo 17}, eraEnd = EraEnd (Bound {boundTime = RelativeTime 1382400s, boundSlot = SlotNo 1382400, boundEpoch = EpochNo 19}), eraParams = EraParams {eraEpochSize = EpochSize 86400, eraSlotLength = SlotLength 1s, eraSafeZone = StandardSafeZone 25920, eraGenesisWin = GenesisWindow {unGenesisWindow = 25920}}},EraSummary {eraStart = Bound {boundTime = RelativeTime 1382400s, boundSlot = SlotNo 1382400, boundEpoch = EpochNo 19}, eraEnd = EraEnd (Bound {boundTime = RelativeTime 1900800s, boundSlot = SlotNo 1900800, boundEpoch = EpochNo 25}), eraParams = EraParams {eraEpochSize = EpochSize 86400, eraSlotLength = SlotLength 1s, eraSafeZone = StandardSafeZone 25920, eraGenesisWin = GenesisWindow {unGenesisWindow = 25920}}},EraSummary {eraStart = Bound {boundTime = RelativeTime 1900800s, boundSlot = SlotNo 1900800, boundEpoch = EpochNo 25}, eraEnd = EraEnd (Bound {boundTime = RelativeTime 17452800s, boundSlot = SlotNo 17452800, boundEpoch = EpochNo 205}), eraParams = EraParams {eraEpochSize = EpochSize 86400, eraSlotLength = SlotLength 1s, eraSafeZone = StandardSafeZone 25920, eraGenesisWin = GenesisWindow {unGenesisWindow = 25920}}},EraSummary {eraStart = Bound {boundTime = RelativeTime 17452800s, boundSlot = SlotNo 17452800, boundEpoch = EpochNo 205}, eraEnd = EraEnd (Bound {boundTime = RelativeTime 38620800s, boundSlot = SlotNo 38620800, boundEpoch = EpochNo 450}), eraParams = EraParams {eraEpochSize = EpochSize 86400, eraSlotLength = SlotLength 1s, eraSafeZone = StandardSafeZone 25920, eraGenesisWin = GenesisWindow {unGenesisWindow = 25920}}}]}"
+                }
+              }
+            }
+          ]
+        },
+        "id": null
+      }
+    }
+  }
+}

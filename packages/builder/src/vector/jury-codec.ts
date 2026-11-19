@@ -470,7 +470,12 @@ export function decodeChallengeDatum(hex: string): ChallengeDatum {
   });
 }
 
-/** The Module-1 redeemers that the claim and challenge builders use: ClaimAction.SubmitClaim, ClaimAction.MarkChallenged, ChallengeAction.OpenChallenge. */
+/**
+ * The Module-1 redeemers that the claim and challenge builders use: ClaimAction.SubmitClaim, ClaimAction.WithdrawClaim,
+ * ClaimAction.MarkChallenged, ChallengeAction.OpenChallenge. WithdrawClaim (constructor 1) is the redeemer of both the spend of the claim
+ * and the burn of its token (claim.ak: the mint handler allows the burn, the spend handler enforces the rules).
+ */
 export const SUBMIT_CLAIM_REDEEMER = Data.to(tag(0));
+export const WITHDRAW_CLAIM_REDEEMER = Data.to(tag(1));
 export const MARK_CHALLENGED_REDEEMER = Data.to(tag(2));
 export const OPEN_CHALLENGE_REDEEMER = Data.to(tag(0));

@@ -1,18 +1,22 @@
 // packages/builder/src/vector/module1-build.ts
-// Keyless builders of the two Module-1 actions that start a dispute, for the deployment in oracle mode (Module-1/jury/SPEC.md
-// Section 1): SubmitClaim and OpenChallenge. They port build_submit_claim and build_open_challenge of the Python builders
-// (Module-1/simulation/tx_builder.py): the same datums, token names, reference inputs, validity window and required signer. The
-// wallet inputs are chosen as Python chooses them (jury-chain.ts module1Inputs). They hold the stake and MODULE1_FEE_BUFFER for the
-// fee and the change, so Lucid's coin selection adds no input (it takes the kept collateral output only when the change needs more
-// than the buffer leaves), and the first input in ledger order, which names the new token, is known before the build; each build
-// checks it again. Coin selection stays on because Lucid adds the fee of the reference scripts only on that path: without it a script
-// that only the mint uses is not paid, and the node refuses the transaction. Lucid runs the deployed scripts of the reference inputs
-// on the transaction (local evaluation), so a build that completes passes them, minus the signatures. Nothing is signed or submitted.
+// Keyless builders of the Module-1 actions of a claim, for the deployment in oracle mode (Module-1/jury/SPEC.md Section 1): the two
+// that start a dispute, SubmitClaim and OpenChallenge, and the one that ends a claim that nobody challenged, WithdrawClaim. They port
+// build_submit_claim, build_open_challenge and build_withdraw_claim of the Python builders (Module-1/simulation/tx_builder.py): the
+// same datums, token names, reference inputs, validity window and required signer. The wallet inputs of SubmitClaim and OpenChallenge
+// are chosen as Python chooses them (jury-chain.ts module1Inputs). They hold the stake and MODULE1_FEE_BUFFER for the fee and the
+// change, so Lucid's coin selection adds no input (it takes the kept collateral output only when the change needs more than the buffer
+// leaves), and the first input in ledger order, which names the new token, is known before the build; each of the two builds checks it
+// again. WithdrawClaim names no wallet input: the claim output holds exactly the stake, which goes back to the wallet, so the coin
+// selection of Lucid adds what the fee needs. Coin selection stays on in all three builds because Lucid adds the fee of the reference
+// scripts only on that path: without it a script that only the mint uses is not paid, and the node refuses the transaction. Lucid runs
+// the deployed scripts of the reference inputs on the transaction (local evaluation), so a build that completes passes them, minus the
+// signatures. Nothing is signed or submitted.
+import { CML } from '@lucid-evolution/lucid';
 import type { LucidEvolution, Provider, UTxO } from '@lucid-evolution/lucid';
 import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
 import {
-  MARK_CHALLENGED_REDEEMER, OPEN_CHALLENGE_REDEEMER, SUBMIT_CLAIM_REDEEMER, TOKEN_PREFIX, decodeClaimDatum, encodeChallengeDatum,
-  encodeClaimDatum, seedTokenName,
+  MARK_CHALLENGED_REDEEMER, OPEN_CHALLENGE_REDEEMER, SUBMIT_CLAIM_REDEEMER, TOKEN_PREFIX, WITHDRAW_CLAIM_REDEEMER, decodeClaimDatum,
+  encodeChallengeDatum, encodeClaimDatum, seedTokenName,
 } from './jury-codec.js';
 import type { ChallengeDatum, ClaimDatum } from './jury-codec.js';
 import { readScriptRef, refText } from './jury-deployment.js';
@@ -270,5 +274,93 @@ export async function buildOpenChallenge(ctx: Module1Context, p: OpenChallengePa
     ...result, challengeToken, challengeOutputIndex: outputIndexOf(result.txCbor, module1.challenge.address, unit),
     claimOutputIndex: outputIndexOf(result.txCbor, claim.utxo.address, `${module1.claim.hash}${claim.token}`), claimToken: claim.token,
     claimInput: refText(claim.utxo), seed: refText(seed), challenge, claim: challenged, deadline: challengedAt + p.resolutionDeadlineMs,
+  };
+}
+
+// ─── WithdrawClaim ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+export interface WithdrawClaimParams {
+  /** The wallet: it pays the fee, gives the collateral, and receives the stake and the change. Its key is the claimer credential. */
+  changeAddress: string;
+  claim: { token?: string; ref?: OutRef };
+  nowMs?: number;
+  validMinutes?: number;
+}
+
+export interface WithdrawClaimBuild extends SignedByBuild {
+  claimToken: string;
+  /** The claim output that the transaction spends. */
+  claimInput: string;
+  /** `<txHash>#0`: the output that pays the stake back, exactly the stake, at the address of the wallet. */
+  payoutRef: string;
+  /** The claim that the transaction ends (state Open). */
+  claim: ClaimDatum;
+  /** `submitted_at + challenge_window`: the last moment of the challenge window. The transaction starts after it. */
+  challengeDeadline: number;
+}
+
+/**
+ * The payout of a withdrawal is output 0 (the payout ref is `<txHash>#0`): at the address of the wallet and exactly `lovelace`. Lucid
+ * keeps the order of the outputs that a builder adds, and the change comes last; this turns that into a checked fact, and the claim
+ * script has already accepted the output on the build (claim.ak: one output at the claimer credential with exactly the stake).
+ */
+export function assertPayoutIsOutputZero(txCbor: string, address: string, lovelace: bigint): void {
+  const outputs = CML.Transaction.from_cbor_hex(txCbor).body().outputs();
+  const first = outputs.len() > 0 ? outputs.get(0) : undefined;
+  if (first === undefined || first.address().to_bech32() !== address || first.amount().coin() !== lovelace) {
+    throw new Error('The built transaction does not have the payout of the stake as output 0 (the address of the wallet and exactly the stake), so the payout reference would point at the wrong output; nothing is returned.');
+  }
+}
+
+/**
+ * Builds the unsigned WithdrawClaim (claim.ak validate_withdraw_claim; build_withdraw_claim): it spends the claim with the redeemer
+ * WithdrawClaim, burns the claim token with the same redeemer (the mint handler allows the burn, the spend handler enforces the rules),
+ * and pays exactly the stake to the claimer credential in one output at the address of the wallet. No claim output continues. The
+ * claim output holds exactly the stake, so Lucid's coin selection adds the wallet inputs that the fee needs, and the fee of the claim
+ * script (the reference input) is added on that path (see the header). The claim script and the cross_refs and params outputs are
+ * reference inputs; the wallet key is the claimer credential and signs. Module-1 reads no identity record for a withdrawal, so a claimer
+ * whose record is suspended or revoked can still withdraw. The window starts after the end of the challenge window: the validator
+ * needs its start strictly after `submitted_at + challenge_window`, so the tool refuses before then. Refuses before it builds: a claim
+ * that is not Open, a wallet key that is not the claimer credential, and a challenge window that has not ended.
+ */
+export async function buildWithdrawClaim(ctx: Module1Context, p: WithdrawClaimParams): Promise<WithdrawClaimBuild> {
+  const { lucid, provider, module1 } = ctx;
+  await chainClock(provider);
+  const nowMs = p.nowMs ?? Date.now();
+  const claim = await findClaim(provider, module1, p.claim);
+  const { datum } = claim;
+  if (datum.state !== 'Open') {
+    throw new Error(`The claim ${claim.token} is ${datum.state}; only an Open claim can be withdrawn (claim.ak validate_withdraw_claim). A claim that was challenged ends through its dispute: the stake follows the verdict.`);
+  }
+  const wallet = await walletOf(lucid, p.changeAddress);
+  const claimer = datum.claimerCredential;
+  if (claimer.type !== 'VerificationKey' || claimer.hash !== wallet.keyHash) {
+    throw new Error(`The wallet key ${wallet.keyHash} is not the claimer credential of the claim ${claim.token} (${claimer.type === 'VerificationKey' ? claimer.hash : `a script, ${claimer.hash}`}): only the claimer credential can withdraw it (claim.ak validate_withdraw_claim).`);
+  }
+  const deadline = datum.submittedAt + datum.challengeWindow;
+  // claim.ak: tx_started_after(submitted_at + challenge_window) holds when the start of the window is strictly after that time. The first
+  // whole second after it is the earliest start (slots start on whole seconds, chainClock checks it).
+  const window = windowWithin(nowMs, p.validMinutes, {
+    at: deadline + 1, why: `the challenge window of the claim ends at ${iso(deadline)}, and a withdrawal must start after it`,
+  }, null);
+  const claimScript = await readScriptRef(provider, module1.claim, 'Module-1 claim');
+  const recordUtxos = await module1RecordUtxos(provider, module1);
+
+  const unit = `${module1.claim.hash}${claim.token}`;
+  const signers = new SignerList().add(wallet.keyHash, 'claimer (the claimer credential of the claim)');
+  const completed = await lucid.newTx()
+    .collectFrom([claim.utxo], WITHDRAW_CLAIM_REDEEMER)
+    .mintAssets({ [unit]: -1n }, WITHDRAW_CLAIM_REDEEMER)
+    .pay.ToAddress(p.changeAddress, { lovelace: datum.stakeAmount })
+    .readFrom(uniqueUtxos([claimScript, ...recordUtxos]))
+    .addSignerKey(wallet.keyHash)
+    .validFrom(window.lo)
+    .validTo(window.hi)
+    .complete();
+  const result = signedByResult(completed, window, signers, wallet.keyHash);
+  assertPayoutIsOutputZero(result.txCbor, p.changeAddress, datum.stakeAmount);
+  return {
+    ...result, claimToken: claim.token, claimInput: refText(claim.utxo), payoutRef: refText({ txHash: result.txHash, outputIndex: 0 }),
+    claim: datum, challengeDeadline: deadline,
   };
 }

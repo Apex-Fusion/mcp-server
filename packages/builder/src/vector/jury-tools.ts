@@ -1,9 +1,9 @@
 // packages/builder/src/vector/jury-tools.ts
-// The Module-1 dispute tools (Module-1/jury/SPEC.md): documents on chain (publish, read), the Module-1 claim and challenge of the
-// deployment in oracle mode, the juror actions of the jury contract (register, exit, top-up, commit, reveal) and the reads of the jury
-// (deployments with jurors, cases with ballots and the canonical case). The build tools are keyless: they return the unsigned
-// transaction with every key hash that must sign. The node comes from `providerFor`, the deployments from `configFor` (the manifests of
-// the server's environment) and Koios and fetch from `access`, so that a test can hand in its own.
+// The Module-1 dispute tools (Module-1/jury/SPEC.md): documents on chain (publish, read), the Module-1 claim, challenge and claim
+// withdrawal of the deployment in oracle mode, the juror actions of the jury contract (register, exit, top-up, commit, reveal) and the
+// reads of the jury (deployments with jurors, cases with ballots and the canonical case). The build tools are keyless: they return the
+// unsigned transaction with every key hash that must sign. The node comes from `providerFor`, the deployments from `configFor` (the
+// manifests of the server's environment) and Koios and fetch from `access`, so that a test can hand in its own.
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod/v4';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -24,7 +24,7 @@ import type { JuryConfig, JuryDeployment, OutRef } from './jury-deployment.js';
 import {
   DEFAULT_MEDIA_TYPE, DOCUMENT_LABEL, DOCUMENT_TYPES, MAX_DOCUMENT_BYTES, documentBytes, documentHash, readDocument, utf8Text,
 } from './jury-document.js';
-import { buildOpenChallenge, buildSubmitClaim, defaultChallengeWindow, MAX_URI_BYTES } from './module1-build.js';
+import { buildOpenChallenge, buildSubmitClaim, buildWithdrawClaim, defaultChallengeWindow, MAX_URI_BYTES } from './module1-build.js';
 import {
   VOTE_NAMES, buildDocumentPublish, buildJuryCommit, buildJuryExit, buildJuryRegister, buildJuryRequestExit, buildJuryReveal, buildJuryTopUp,
 } from './jury-build.js';
@@ -64,6 +64,16 @@ const zDocText = (what: string, max: number) => z.string().min(1).max(max).optio
 const zDocBase64 = (what: string) => z.string().min(1).max(24_000).optional().describe(`${what} as base64 of the exact bytes (the bytes must be UTF-8 text). Use it when the exact bytes matter, for example to keep line ends`);
 const zMediaType = z.string().min(1).max(64).optional().describe(`The media type of the document (default ${DEFAULT_MEDIA_TYPE})`);
 const zUri = (what: string) => z.string().min(1).max(MAX_URI_BYTES).describe(`The URI of the ${what} document: vector-tx:… (vector_build_document_publish gives it) or https://…`);
+const zClaim = z.string().min(1).max(256).describe('The claim: its claim token name (64 hex, starts with 636c6d5f "clm_") or its claim output reference (<txid>#<index>)');
+
+/** The claim that the input of a tool names: by its claim output reference (<txid>#<index>) or by its claim token name (64 hex). */
+function claimNamed(input: string): { token?: string; ref?: OutRef } {
+  const value = input.trim();
+  const refMatch = /^([0-9a-fA-F]{64})#(0|[1-9][0-9]{0,5})$/.exec(value);
+  if (refMatch) return { ref: { txHash: refMatch[1].toLowerCase(), outputIndex: Number(refMatch[2]) } };
+  if (/^[0-9a-fA-F]{64}$/.test(value)) return { token: value.toLowerCase() };
+  throw new Error('Name the claim by its claim token name (64 hex) or by its claim output reference (<txid>#<index>).');
+}
 
 /** The fenced block of untrusted text: a fence longer than any run of backticks in it. */
 function fenced(body: string): string {
@@ -168,7 +178,7 @@ export function registerJuryTools(server: McpServer, checkRateLimit: RateGate, p
     }),
   );
 
-  // ─── Module-1 claim and challenge ───────────────────────────────────────────────────────────────────────────────────────────
+  // ─── Module-1 claim, challenge and claim withdrawal ───────────────────────────────────────────────────────────────────────────
 
   server.tool(
     'vector_build_module1_claim',
@@ -213,7 +223,7 @@ export function registerJuryTools(server: McpServer, checkRateLimit: RateGate, p
         claim_token: r.claimToken, claim_utxo: claimUtxo, claimer_did: didOf(r.claim.claimerDid), claim_hash: claimHash.hash, claim_uri: args.claim_uri.trim(),
         claim_type: args.claim_type, stake_lovelace: r.claim.stakeAmount, submitted_at: r.claim.submittedAt, challenge_window_ms: r.claim.challengeWindow,
         challenge_deadline: r.challengeDeadline, seed: r.seed, default_window_ms: defaultChallengeWindow(module1),
-      }, `Anybody can challenge the claim until ${isoOrRaw(r.challengeDeadline)} (vector_build_module1_challenge). Without a challenge, the claimer can withdraw the stake after that time.`);
+      }, `Anybody can challenge the claim until ${isoOrRaw(r.challengeDeadline)} (vector_build_module1_challenge). Without a challenge, the claimer can withdraw the stake after that time (vector_build_module1_withdraw_claim).`);
     }),
   );
 
@@ -225,7 +235,7 @@ export function registerJuryTools(server: McpServer, checkRateLimit: RateGate, p
     {
       changeAddress: zChangeAddress,
       agent: zDid('the auditor agent'),
-      claim: z.string().min(1).max(256).describe('The claim: its claim token name (64 hex, starts with 636c6d5f "clm_") or its claim output reference (<txid>#<index>)'),
+      claim: zClaim,
       evidence_uri: zUri('evidence'),
       evidence_hash: zHash('blake2b-256 of the evidence document, 64 hex. Default: read the document from evidence_uri and compute it').optional(),
       stake: z.number().positive().describe('AP3X to stake: at least the stake of the claim'),
@@ -242,11 +252,7 @@ export function registerJuryTools(server: McpServer, checkRateLimit: RateGate, p
       const provider = providerFor();
       const module1 = requireModule1(await configFor(provider));
       const evidenceHash = await hashOf(args.evidence_uri, args.evidence_hash, 'evidence');
-      const value = args.claim.trim();
-      const refMatch = /^([0-9a-fA-F]{64})#(0|[1-9][0-9]{0,5})$/.exec(value);
-      const claim = refMatch ? { ref: { txHash: refMatch[1].toLowerCase(), outputIndex: Number(refMatch[2]) } }
-        : /^[0-9a-fA-F]{64}$/.test(value) ? { token: value.toLowerCase() } : null;
-      if (claim === null) throw new Error('Name the claim by its claim token name (64 hex) or by its claim output reference (<txid>#<index>).');
+      const claim = claimNamed(args.claim);
       const deadlineMs = args.resolution_deadline_hours === undefined ? module1.protocol.resolutionDeadline : Math.round(args.resolution_deadline_hours * 3600) * 1000;
       const lucid = await lucidForAddress(provider, args.changeAddress);
       const r = await buildOpenChallenge({ lucid, provider, module1 }, {
@@ -272,6 +278,43 @@ export function registerJuryTools(server: McpServer, checkRateLimit: RateGate, p
         evidence_hash: evidenceHash.hash, evidence_uri: args.evidence_uri.trim(), stake_lovelace: r.challenge.stakeAmount,
         challenged_at: r.challenge.challengedAt, resolution_deadline_ms: deadlineMs, deadline: r.deadline, seed: r.seed, jury_time_warning: short,
       }, note);
+    }),
+  );
+
+  server.tool(
+    'vector_build_module1_withdraw_claim',
+    'Build an UNSIGNED Module-1 WithdrawClaim transaction (oracle mode). The claimer takes the stake of a claim back after its challenge window, when nobody challenged the claim. ' +
+      'It spends the claim output with the WithdrawClaim redeemer, burns the claim token, and pays exactly the stake to your wallet in one output. No claim output continues. ' +
+      'The claim must be Open, and the transaction must start after the challenge window ends: the tool refuses before that time and says when to build again. ' +
+      'Your wallet key must be the claimer credential of the claim, which is the key that built the claim. Module-1 checks no identity record for a withdrawal: a claimer whose DID is suspended or revoked can still withdraw. ' +
+      'A claim that was challenged ends through its dispute (vector_get_jury_cases). Your wallet key signs. Takes no key material.',
+    {
+      changeAddress: zChangeAddress,
+      claim: zClaim,
+      valid_minutes: zValidMinutes,
+    },
+    async (args) => run('build Module-1 claim withdrawal', [
+      'The claim must be Open: a claim that was challenged ends through its dispute (vector_get_jury_cases), not through a withdrawal',
+      'The withdrawal starts after the end of the challenge window of the claim: the answer of vector_build_module1_claim gives the deadline',
+      'Your wallet key must be the claimer credential of the claim: the key that built it',
+      FEE_TIP,
+      CONFIG_TIP,
+    ], async () => {
+      const provider = providerFor();
+      const module1 = requireModule1(await configFor(provider));
+      const claim = claimNamed(args.claim);
+      const lucid = await lucidForAddress(provider, args.changeAddress);
+      const r = await buildWithdrawClaim({ lucid, provider, module1 }, { changeAddress: args.changeAddress, claim, nowMs: now(), validMinutes: args.valid_minutes });
+      const payoutUtxo = r.payoutRef;
+      const facts: Array<[string, string]> = [
+        ['Claim', `${r.claimToken} of ${didOf(r.claim.claimerDid)}: ${r.claimInput} is spent and the claim token is burned`],
+        ['Payout', `${payoutUtxo}, ${ada(r.claim.stakeAmount)} to your wallet (exactly the stake)`],
+        ['Challenge window', `${Math.round(r.claim.challengeWindow / 60_000)} min, from ${isoOrRaw(r.claim.submittedAt)}; it ended at ${isoOrRaw(r.challengeDeadline)}`],
+      ];
+      return buildText('Module-1 Claim Withdrawal Built', facts, r, {
+        claim_token: r.claimToken, claim_input: r.claimInput, payout_utxo: payoutUtxo, claimer_did: didOf(r.claim.claimerDid), stake_lovelace: r.claim.stakeAmount,
+        submitted_at: r.claim.submittedAt, challenge_window_ms: r.claim.challengeWindow, challenge_deadline: r.challengeDeadline,
+      }, 'The transaction is valid only after the challenge window, which has ended. Submit it before the end of its validity.');
     }),
   );
 

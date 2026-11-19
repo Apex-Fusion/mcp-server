@@ -1,0 +1,85 @@
+{
+  "_source": "Vector mainnet: Koios tx_info and utxo_info of b3a165bd55d1569cea444b3b5a7d1b4e7c282911836ada08553a37348640445f and of the outputs it spent, and Blockfrost required_signers; made by capture-module1-withdrawal.mjs. The withdrawal was built by the Python builder of vector-agent-modules (build_withdraw_claim); amounts are strings.",
+  "tx": {
+    "txHash": "b3a165bd55d1569cea444b3b5a7d1b4e7c282911836ada08553a37348640445f",
+    "slot": 38162962,
+    "invalidBefore": "38160588",
+    "invalidAfter": "38164248",
+    "fee": "736724",
+    "referenceInputs": [
+      "72e417cad239afc47626574246ee3a15dd2cddd8bc648f0a21fa290299dc8941#0",
+      "72e417cad239afc47626574246ee3a15dd2cddd8bc648f0a21fa290299dc8941#1",
+      "a5ad79d3ded0804241649242f03ab5aa22792361d625391ba5d42a58fec08335#0"
+    ],
+    "inputs": [
+      "289b45d83745bd7a5e5cc329b6ee9070f90eeae121360b67d9c312a498b372f2#0",
+      "289b45d83745bd7a5e5cc329b6ee9070f90eeae121360b67d9c312a498b372f2#1"
+    ],
+    "collateral": [
+      "f14576d9ac26917fd1d8b4763a0244d42c05020a16533c6b09d20ff4e814ee2a#0"
+    ],
+    "outputs": [
+      {
+        "index": 0,
+        "address": "addr1v9724kkjrw5j072u0v7wzl47zvejz362hey9ygy8e4j3mcsclvtyg",
+        "lovelace": "50000000",
+        "assets": {}
+      },
+      {
+        "index": 1,
+        "address": "addr1v9724kkjrw5j072u0v7wzl47zvejz362hey9ygy8e4j3mcsclvtyg",
+        "lovelace": "14382183",
+        "assets": {}
+      }
+    ],
+    "minted": {
+      "53f6fc36219a3bc3c8af33c830480cff65aadb51baabb0bf485b4523636c6d5f250044e5891bc4cca19c6162f68c1c4767b5a7c3da0411f942e4ea7b": "-1"
+    },
+    "redeemers": [
+      {
+        "purpose": "mint",
+        "scriptHash": "53f6fc36219a3bc3c8af33c830480cff65aadb51baabb0bf485b4523",
+        "data": {
+          "fields": [],
+          "constructor": 1
+        },
+        "dataHash": "8392f0c940435c06888f9bdb8c74a95dc69f156367d6a089cf008ae05caae01e"
+      },
+      {
+        "purpose": "spend",
+        "scriptHash": "53f6fc36219a3bc3c8af33c830480cff65aadb51baabb0bf485b4523",
+        "data": {
+          "fields": [],
+          "constructor": 1
+        },
+        "dataHash": "8392f0c940435c06888f9bdb8c74a95dc69f156367d6a089cf008ae05caae01e"
+      }
+    ],
+    "requiredSigners": [
+      "7caadad21ba927f95c7b3ce17ebe133321474abe48522087cd651de2"
+    ]
+  },
+  "claim": {
+    "ref": "289b45d83745bd7a5e5cc329b6ee9070f90eeae121360b67d9c312a498b372f2#0",
+    "address": "addr1w9fldlpkyxdrhs7g4ueusvzgpnlkt2km2xa2hv9lfpd52gcz33v7u",
+    "lovelace": "50000000",
+    "assets": {
+      "53f6fc36219a3bc3c8af33c830480cff65aadb51baabb0bf485b4523636c6d5f250044e5891bc4cca19c6162f68c1c4767b5a7c3da0411f942e4ea7b": "1"
+    },
+    "datum": "d8799f58206611937ea70f5a4f239d0909765f0b4cac2e73cc1367a8780f3d8f0d746b96b4d8799f581c7caadad21ba927f95c7b3ce17ebe133321474abe48522087cd651de2ff5820b5a571af5196c9524caddc8cc9b17c831fb6ba73eea4b13504b2657e83f5cc5e477175616c6974795835766563746f722d74783a7078434e686656416e6b6b50304f364134776c4664486e4b47704e2d385648445857326c796a47695f6e631a02faf0801b000001a1d922ec381a001b7740d87980ff"
+  },
+  "wallet": [
+    {
+      "ref": "289b45d83745bd7a5e5cc329b6ee9070f90eeae121360b67d9c312a498b372f2#1",
+      "address": "addr1v9724kkjrw5j072u0v7wzl47zvejz362hey9ygy8e4j3mcsclvtyg",
+      "lovelace": "15118907",
+      "assets": {}
+    },
+    {
+      "ref": "f14576d9ac26917fd1d8b4763a0244d42c05020a16533c6b09d20ff4e814ee2a#0",
+      "address": "addr1v9724kkjrw5j072u0v7wzl47zvejz362hey9ygy8e4j3mcsclvtyg",
+      "lovelace": "5000000",
+      "assets": {}
+    }
+  ]
+}

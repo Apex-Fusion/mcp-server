@@ -31,7 +31,7 @@ import { startServer, stopServer, ServerContext } from '../setup.ts';
 // tool for both advert layouts took it to 63: vector_build_marketplace_advert_retire also retires a legacy advert. The Module-1 dispute
 // tools took it to 74: 2 document tools (publish, read), the Module-1 claim and challenge builds, 5 juror builds and 2 jury reads. The
 // reputation stake tools on the identity-era Module-3 deployment took it to 78: the increase, capability update and decrease builds and
-// the read of stakes (the two steps that make a stake were already tools).
+// the read of stakes (the two steps that make a stake were already tools). The Module-1 claim withdrawal took it to 79.
 const EXPECTED_TOOLS = [
   'vector_await_transaction',
   'vector_build_attestation_attest',
@@ -74,6 +74,7 @@ const EXPECTED_TOOLS = [
   'vector_build_marketplace_release',
   'vector_build_module1_challenge',
   'vector_build_module1_claim',
+  'vector_build_module1_withdraw_claim',
   'vector_build_reputation_stake',
   'vector_build_reputation_stake_decrease',
   'vector_build_reputation_stake_increase',

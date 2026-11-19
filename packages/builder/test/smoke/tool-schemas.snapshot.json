@@ -2721,6 +2721,35 @@
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
+  "vector_build_module1_withdraw_claim": {
+    "description": "Build an UNSIGNED Module-1 WithdrawClaim transaction (oracle mode). The claimer takes the stake of a claim back after its challenge window, when nobody challenged the claim. It spends the claim output with the WithdrawClaim redeemer, burns the claim token, and pays exactly the stake to your wallet in one output. No claim output continues. The claim must be Open, and the transaction must start after the challenge window ends: the tool refuses before that time and says when to build again. Your wallet key must be the claimer credential of the claim, which is the key that built the claim. Module-1 checks no identity record for a withdrawal: a claimer whose DID is suspended or revoked can still withdraw. A claim that was challenged ends through its dispute (vector_get_jury_cases). Your wallet key signs. Takes no key material.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "changeAddress": {
+          "description": "Your wallet address: it pays the fee and any deposit, gives the collateral, and receives the change. Get it from vector_signer_get_address.",
+          "type": "string"
+        },
+        "claim": {
+          "description": "The claim: its claim token name (64 hex, starts with 636c6d5f \"clm_\") or its claim output reference (<txid>#<index>)",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "valid_minutes": {
+          "description": "Minutes from now until the transaction expires (default 30, at most 59): every key holder must sign and the transaction must be submitted before then",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        }
+      },
+      "required": [
+        "changeAddress",
+        "claim"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
   "vector_build_reputation_stake": {
     "description": "Build step 2 of 2 of an agent's Module-3 reputation self-stake (CreateStake): an UNSIGNED transaction that consumes the opening output from vector_build_reputation_stake_open, mints the agent's stake token and locks the stake behind the named capabilities. The stake is at least the module minimum (read from the module's parameters: 10 AP3X); amount locks more. The owner of the stake is owner_key_hash when you pass it, else the owner key that step 1 named in the opening output, which the record must declare now. The validator reads the owner of the stake, not the owner in the opening output, so the answer says when the stake gets another owner than the opening output names. The agent's controller key and the owner key sign, and the wallet pays the fee; the build lists each key hash with its role. The stake time (last_updated) is the end of the validity window, and the stake can be decreased or its capabilities changed one cooldown after it (stake_cooldown, 24 h in the deployed parameters). The owner cannot withdraw the module minimum. Each agent has one stake through these tools: a second create is refused, and the refusal names the stake and vector_build_reputation_stake_increase. Takes no key material.",
     "inputSchema": {
