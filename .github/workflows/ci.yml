@@ -52,7 +52,7 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=12288
 
   typecheck:
-    runs-on: ubuntu-latest
+    runs-on: nixos
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
