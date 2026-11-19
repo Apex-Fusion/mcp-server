@@ -278,8 +278,9 @@ input can make the signer count less than the signature gives away. Point
   is complete in this codebase, and as of the 2026-07-31 cutover deploy, on both hosted
   instances too: pair this signer with a self-hosted builder, the testnet instance, or the
   mainnet instance now, since any of them running the 2026-07-31 deploy or later carries the
-  guarantee above. Both hosted instances currently require a bearer token from the operators
-  to connect - that is an access control, separate from the custody guarantee above.
+  guarantee above. Both hosted instances are open access: no bearer token is required to
+  connect, and callers are admitted anonymously with per-IP rate limiting. That is an access
+  rule, separate from the custody guarantee above.
 
 ## Running it
 
