@@ -4,6 +4,7 @@
 // that hold an attestation token), and every row is decoded and filtered on the decoded field. The check gives each condition of the
 // rule with its result, then each expectation of the caller. Reads only: nothing is built, signed or submitted.
 import { Constr, Data } from '@lucid-evolution/lucid';
+import { decodePlutusData } from './guarded-decode.js';
 import type { UTxO } from '@lucid-evolution/lucid';
 import { attTypeName, envelopeVerifies, withdrawableFrom } from './attestation-build.js';
 import type { AttestationUtxo } from './attestation-build.js';
@@ -45,7 +46,7 @@ export interface ReadDatum { datum: AttestationDatum; revokeReason: bigint | nul
  * is a whole number. The codec holds a reason as a number, and refuses one that a number cannot hold.
  */
 function withoutReason(hex: string): DatumWithoutReason | null {
-  const data = Data.from(hex);
+  const data = decodePlutusData(hex, 'The attestation datum');
   if (!(data instanceof Constr) || data.index !== 0 || data.fields.length !== 16) return null;
   const status = data.fields[13];
   if (!(status instanceof Constr) || status.index !== 1 || status.fields.length !== 2 || typeof status.fields[1] !== 'bigint') return null;

@@ -17,6 +17,7 @@ import { blake2b } from '@noble/hashes/blake2b';
 import { S3Client, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { apexToLovelace, lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
 import { paymentKeyHashOf } from './gov-build.js';
+import { decodeTransaction } from './guarded-decode.js';
 import {
   SignerList, ancestorsOf, chainClock, didOf, findRecord, identifierOf, recordsById, requireRecord, signedByResult, uniqueUtxos,
   walletOf, windowAt,
@@ -327,7 +328,7 @@ function continuedValue(lucid: LucidEvolution, utxo: UTxO, datum: string): Asset
 
 /** The index of the first output of the built transaction that passes `test`. */
 function outputIndexWhere(txCbor: string, test: (o: CML.TransactionOutput) => boolean, what: string): number {
-  const outputs = CML.Transaction.from_cbor_hex(txCbor).body().outputs();
+  const outputs = decodeTransaction(txCbor).body().outputs();
   for (let i = 0; i < outputs.len(); i++) if (test(outputs.get(i))) return i;
   throw new Error(`The built transaction has no ${what}; nothing is returned.`);
 }

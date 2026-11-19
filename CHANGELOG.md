@@ -228,15 +228,38 @@
 
 ### Changed
 
+- Refuse CBOR that is nested deeper than 64 levels before it is decoded. The builder checks CBOR that it did not build itself
+  before a decoder reads it. It refuses a transaction, Plutus data or transaction metadata that is nested deeper than 64
+  levels, that is not well-formed CBOR, that declares a length past its end, or that holds a float or a simple value where
+  the decoder reads none. A transaction may hold false, true and null in a few places only, and its body holds no empty
+  byte string except as an asset name. The limit is far above real data: the live datums of the marketplace, identity,
+  jury and reputation scripts nest at most 9 levels. The check covers the `txCbor` of `vector_delegation_request_cosign`;
+  the `initialDatum`, `datum` and `redeemer` of `vector_build_deploy_contract` and `vector_build_interact_contract`; the
+  transaction CBOR and the metadata CBOR that `vector_get_document` reads from Koios and Blockfrost; the datums that
+  Ogmios and Koios give for an output; a datum that is looked up by its hash; and the datums that the codecs and the
+  read tools read from chain data. An output whose inline datum is refused stays in the list of its address, with its
+  value and without its datum. The check is in `packages/shared/src/cbor-depth.ts`. Nothing else changes: no tool text,
+  and no result for CBOR that is inside the limits.
 - `vector_dry_run` reads the fee of a given transaction (`txCbor`) from its bytes, and does not decode the
-  transaction. A transaction whose fee it can read (the unsigned integer under key 2 of its body) goes to the
-  evaluation of the node, and the node judges the rest of it. A `txCbor` from which it cannot read the fee is refused
-  with the same message as before. The fee shows in full above 2^53 lovelace. The reader is
+  transaction. It applies the check above to the bytes first: a `txCbor` that is nested deeper than 64 levels, or is
+  not well-formed CBOR, is refused. A transaction whose fee it can read (the unsigned integer under key 2 of its
+  body) goes to the evaluation of the node, and the node judges the rest of it. A `txCbor` from which it cannot read
+  the fee is refused with the same message as before. The fee shows in full above 2^53 lovelace. The reader is
   `packages/builder/src/vector/tx-fee.ts`.
+- Signer, version 3.0.1: `vector_signer_sign` and `vector_signer_decode_transaction` run the same check before they decode
+  a transaction. A transaction that is nested deeper than 64 levels, or is not well-formed CBOR, is refused with the
+  message "Transaction could not be decoded". The signer imports the check from
+  `@apexfusion/vector-mcp-shared/cbor-depth`, which has no imports of its own. It adds no dependency. Nothing else
+  changes.
+- The `datum`, `initialDatum` and `redeemer` of `vector_build_deploy_contract` and `vector_build_interact_contract` have
+  at most 32,768 hex characters, and so has their `scriptCbor` (a transaction has at most 16,384 bytes). A longer text is
+  refused before a library reads it. The `scriptCbor` must also be one CBOR byte string of definite length, in one
+  encoding or in two (a byte string inside a byte string). A text of another shape is refused, with the reason, before
+  Lucid reads it. No valid datum, redeemer or script is refused.
 - The builder reads every address through one checked function (`addressDetails` in
   `packages/builder/src/vector/guarded-decode.ts`). It refuses the empty string with the message that Lucid gives
   for text that is not an address, and then calls `getAddressDetails`. No tool text changes. A test names each call
-  of `getAddressDetails`.
+  of Lucid that decodes inside Lucid, with the check that runs before it.
 - After each tool call the server checks that the stack pointer of the decoder library is back at its start value,
   and puts it back when a failed call left it changed. It reads the start value two times when it starts. A pointer
   below the start value is put back, and one line with the difference goes to stderr. A pointer at the start value

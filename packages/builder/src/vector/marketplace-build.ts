@@ -9,13 +9,14 @@
 // the escrow input is the only script input, no mint, withdrawal or certificate, a validity range of at most one hour, and buyer
 // payouts at the refund address with its datum when the escrow names one. Its spends are evaluated locally with the real script, read
 // from the deployment's reference-script UTxO. Post refuses an escrow above the value cap F-29 in both layouts.
-import { Data, Constr, CML, calculateMinLovelaceFromUTxO, credentialToAddress } from '@lucid-evolution/lucid';
+import { Data, Constr, calculateMinLovelaceFromUTxO, credentialToAddress } from '@lucid-evolution/lucid';
 import type { Assets, LucidEvolution, Provider, TxSignBuilder, UTxO } from '@lucid-evolution/lucid';
 import { VECTOR_KOIOS_URL } from '@apexfusion/vector-mcp-shared/config';
 import type { VectorUnsignedBuildResult } from '@apexfusion/vector-mcp-shared/types';
 import { toBuildResult } from './build.js';
 import { ensureSlotConfig, paymentKeyHashOf, ChainClockError } from './gov-build.js';
 import type { SlotClockProvider } from './gov-build.js';
+import { decodeTransaction } from './guarded-decode.js';
 import {
   ESCROW_ADDRESS, ESCROW_REF_UTXO, ACCEPT_WINDOW_MS, DELIVER_BY_BUFFER_MS, MAX_PROCESSING_MS_CEILING, MARKETPLACE_MIN_FEE,
   COLLATERAL_MIN_LOVELACE, MIN_UTXO_LOVELACE, REDEEMER, MAX_ESCROW_LOVELACE, ESCROW_SWITCH_SLOT, ESCROW_SWITCH_AT,
@@ -254,7 +255,7 @@ export function reserveCollateralInputs(utxos: UTxO[], lockLovelace: bigint): UT
  * datum) is an error, never a result. `address` is the escrow address of the Post's layout (default the legacy one).
  */
 export function assertEscrowIsOutputZero(txCbor: string, expected: { datumHex: string; lockLovelace: bigint; address?: string }): void {
-  const outputs = CML.Transaction.from_cbor_hex(txCbor).body().outputs();
+  const outputs = decodeTransaction(txCbor).body().outputs();
   const first = outputs.len() > 0 ? outputs.get(0) : undefined;
   const ok = first !== undefined
     && first.address().to_bech32() === (expected.address ?? ESCROW_ADDRESS)

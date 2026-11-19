@@ -1,7 +1,8 @@
 // packages/builder/src/vector/tx-fee.ts
 // The fee of a transaction, read from its bytes without a decoder library: key 2 of the body, the first item of the transaction.
 // The reader goes over the keys of the body one after the other, and skips the items that it does not need with a loop and a list of
-// its own (cborReader, which tx-body.ts uses too). The time is linear in the size of the input.
+// its own (cborReader, which tx-body.ts uses too). The time is linear in the size of the input. The caller checks the bytes first
+// (cbor-depth.ts).
 
 /** The count of an array or a map that has none: it ends at a break code. */
 export const INDEFINITE = -1;

@@ -29,6 +29,7 @@ import type {
   Delegation,
   EvalRedeemer,
 } from '@lucid-evolution/lucid';
+import { assertCborHexDepth } from './cbor-depth.js';
 
 interface OgmiosProviderConfig {
   ogmiosUrl: string;
@@ -358,6 +359,23 @@ function describeError(err: unknown): string {
 /** A field of a JSON value that a service answered, or undefined when the value is not an object. */
 function fieldOf(value: unknown, key: string): unknown {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[key] : undefined;
+}
+
+/**
+ * The inline datum of an output as Lucid may decode it: `datum` itself, or null when it is nested too deep or is not CBOR at all (the
+ * ref of the output goes into `withheld`). Such an output is not dropped from the list: it keeps its address, its value and its other
+ * fields, and it has no datum. Its value still counts in a balance. A builder that reads the datum of an output at a script address
+ * takes an output with no datum for another output, as it does for one whose datum is not of its type.
+ */
+function readableDatum(datum: string | null, ref: string, withheld: string[]): string | null {
+  if (datum === null) return null;
+  try {
+    assertCborHexDepth(datum, { what: 'The datum' });
+    return datum;
+  } catch {
+    withheld.push(ref);
+    return null;
+  }
 }
 
 export class OgmiosProvider implements Provider {
@@ -694,6 +712,7 @@ export class OgmiosProvider implements Provider {
 
   async getDatum(datumHash: string): Promise<string> {
     // Try Koios if available - same shape again.
+    let bytes: string | undefined;
     if (this.koiosUrl) {
       try {
         const response = await fetch(`${this.koiosUrl}/api/v1/datum_info`, {
@@ -704,7 +723,7 @@ export class OgmiosProvider implements Provider {
         if (response.ok) {
           const data = await response.json();
           if (data.length > 0 && data[0].bytes) {
-            return data[0].bytes;
+            bytes = data[0].bytes;
           }
         } else {
           console.error(`[OgmiosProvider] Koios datum_info query failed at ${this.koiosUrl}: ${response.status} ${response.statusText}`);
@@ -713,7 +732,10 @@ export class OgmiosProvider implements Provider {
         console.error(`[OgmiosProvider] Koios datum_info error at ${this.koiosUrl}: ${describeError(err)}`);
       }
     }
-    throw new Error(`Datum not found for hash: ${datumHash}. Datum lookups require Koios indexer.`);
+    if (bytes === undefined) throw new Error(`Datum not found for hash: ${datumHash}. Datum lookups require Koios indexer.`);
+    // The caller decodes what it gets: a datum that is nested too deep is refused here, with the hash that was asked for.
+    try { assertCborHexDepth(bytes, { what: `The datum of the hash ${datumHash}` }); } catch (err) { throw new Error(describeError(err)); }
+    return bytes;
   }
 
   /**
@@ -1014,7 +1036,8 @@ export class OgmiosProvider implements Provider {
   private ogmiosUtxosToLucid(ogmiosUtxos: any[]): UTxO[] {
     if (!Array.isArray(ogmiosUtxos)) return [];
 
-    return ogmiosUtxos.map((utxo) => {
+    const withheld: string[] = [];
+    const utxos = ogmiosUtxos.map((utxo) => {
       const txHash = utxo.transaction?.id ?? utxo.txId;
       const outputIndex = utxo.index ?? utxo.outputIndex;
       const output = utxo.output ?? utxo;
@@ -1070,6 +1093,7 @@ export class OgmiosProvider implements Provider {
           datum = output.datum.value || output.datum.bytes;
         }
       }
+      datum = readableDatum(datum, `${txHash}#${outputIndex}`, withheld);
 
       // Handle script reference
       let scriptRef: any = null;
@@ -1108,6 +1132,10 @@ export class OgmiosProvider implements Provider {
         scriptRef,
       } as UTxO;
     });
+    if (withheld.length > 0) {
+      console.error(`[OgmiosProvider] ${withheld.length} output(s) of an Ogmios answer carry a datum that is not read; first: ${withheld[0]}`);
+    }
+    return utxos;
   }
 
   /**
@@ -1124,13 +1152,17 @@ export class OgmiosProvider implements Provider {
       }
     }
 
+    const ref = `${koiosUtxo.tx_hash}#${koiosUtxo.tx_index}`;
+    const withheld: string[] = [];
+    const datum = readableDatum(koiosUtxo.inline_datum?.bytes || null, ref, withheld);
+    if (withheld.length > 0) console.error(`[OgmiosProvider] The output ${ref} of a Koios answer carries a datum that is not read`);
     return {
       txHash: koiosUtxo.tx_hash,
       outputIndex: koiosUtxo.tx_index,
       assets,
       address: koiosUtxo.address,
       datumHash: koiosUtxo.datum_hash || null,
-      datum: koiosUtxo.inline_datum?.bytes || null,
+      datum,
       scriptRef: null,
     } as UTxO;
   }

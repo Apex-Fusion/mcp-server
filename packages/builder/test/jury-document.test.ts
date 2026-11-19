@@ -3,7 +3,7 @@
 // chunk rules over many documents, the metadata both ways, the vector-tx URI, and the reader with a fake Koios, a fake Blockfrost and a
 // fake host: the JSON form of the metadata, the CBOR form for a transaction for which Koios gives no JSON (real answers of Vector
 // mainnet in fixtures/jury-document-mainnet.json), and the refusals. No network.
-import { describe, test } from 'node:test';
+import { describe, test, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -16,6 +16,7 @@ import {
 } from '../src/vector/jury-document.ts';
 import type { DocumentReadOpts } from '../src/vector/jury-document.ts';
 import { NOW, WALLET_ADDRESS, juryWorld } from './fixtures/jury-world.ts';
+import { watchAllDecoders } from './fixtures/decoder-watch.ts';
 
 const V = JSON.parse(readFileSync(resolve(import.meta.dirname!, 'fixtures/jury-python-vectors.json'), 'utf8'));
 
@@ -347,5 +348,57 @@ describe('readDocument: the CBOR form, for a transaction for which Koios gives n
     } finally {
       if (saved === undefined) delete process.env.VECTOR_BLOCKFROST_URL; else process.env.VECTOR_BLOCKFROST_URL = saved;
     }
+  });
+
+  // CBOR that nests past 64 levels is refused before CML decodes it, in the whole transaction that Koios gives and in the metadata that
+  // Blockfrost gives. The watch (fixtures/decoder-watch.ts) fails a test when such CBOR reaches a decoder.
+  describe('CBOR that is nested past the limit', () => {
+    const nested = (levels: number): string => `${'81'.repeat(levels)}00`;
+    const body = `a30081825820${'22'.repeat(32)}0001800200`;
+    /** A transaction whose auxiliary data is the metadata map { 22084: a list nested `levels` levels deep }. */
+    const transactionWith = (levels: number): string => `84${body}a0f5a1195644${nested(levels)}`;
+    const normalDocument = async () => {
+      const tx: string = REAL.txHash;
+      const fetched = await read(tx, indexers(tx, { metadata: REAL.koios }).fetchImpl);
+      assert.equal(fetched.hash, REAL.documentHash);
+    };
+    afterEach(() => { mock.restoreAll(); });
+
+    test('a transaction that Koios gives is refused as one that does not decode, and a normal document is read after it', async () => {
+      const watch = watchAllDecoders();
+      const tx = 'ab'.repeat(32);
+      // The transaction, the map of its metadata and the list: 2 levels and the levels of the list.
+      for (const levels of [63, 5000]) {
+        const f = indexers(tx, { cbor: [{ tx_hash: tx, cbor: transactionWith(levels) }] });
+        await assert.rejects(read(tx, f.fetchImpl), /^Error: The CBOR of the transaction (?:ab)+ does not decode \(The transaction is nested deeper than 64 levels\.\)\.$/, `${levels} levels`);
+        assert.deepEqual(f.calls, [`${KOIOS}/tx_metadata`, `${KOIOS}/tx_cbor`], 'Blockfrost is not asked: a CBOR that does not decode ends the read');
+      }
+      assert.equal(watch.reached(), 0);
+      await normalDocument();
+    });
+
+    test('a transaction at the limit is decoded: it is refused for what it holds, which is no document', async () => {
+      const tx = 'ab'.repeat(32);
+      const f = indexers(tx, { cbor: [{ tx_hash: tx, cbor: transactionWith(62) }] });
+      await assert.rejects(read(tx, f.fetchImpl), /is not an object/);
+    });
+
+    test('metadata that Blockfrost gives is refused as metadata that does not decode, and a normal document is read after it', async () => {
+      const watch = watchAllDecoders();
+      const tx = 'ab'.repeat(32);
+      // The map { 22084: value } and the list: 1 level and the levels of the list.
+      for (const levels of [64, 5000]) {
+        const f = indexers(tx, { blockfrost: [{ label: '22084', metadata: `a1195644${nested(levels)}` }] });
+        await assert.rejects(read(tx, f.fetchImpl), /^Error: The CBOR metadata of the transaction (?:ab)+ does not decode \(The metadata is nested deeper than 64 levels\.\)\.$/, `${levels} levels`);
+      }
+      assert.equal(watch.reached(), 0);
+      await normalDocument();
+    });
+
+    test('metadata at the limit is decoded: it is refused for what it holds, which is no document', async () => {
+      const tx = 'ab'.repeat(32);
+      const f = indexers(tx, { blockfrost: [{ label: '22084', metadata: `a1195644${nested(63)}` }] });
+      await assert.rejects(read(tx, f.fetchImpl), /is not an object/);
+    });
   });
 });

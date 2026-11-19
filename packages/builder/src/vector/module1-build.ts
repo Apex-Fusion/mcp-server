@@ -20,6 +20,7 @@ import {
 } from './jury-codec.js';
 import type { ChallengeDatum, ClaimDatum } from './jury-codec.js';
 import { readScriptRef, refText } from './jury-deployment.js';
+import { decodeTransaction } from './guarded-decode.js';
 import type { Module1Deployment, OutRef } from './jury-deployment.js';
 import { agentRecords, findTokenOutputAtScript, firstInput, identityRefusal, iso, ledgerOrder, module1Inputs, tokenAtScript, windowWithin } from './jury-chain.js';
 import { chainClock, didOf, signedByResult, uniqueUtxos, walletOf, windowAt, SignerList } from './identity-chain.js';
@@ -305,7 +306,7 @@ export interface WithdrawClaimBuild extends SignedByBuild {
  * script has already accepted the output on the build (claim.ak: one output at the claimer credential with exactly the stake).
  */
 export function assertPayoutIsOutputZero(txCbor: string, address: string, lovelace: bigint): void {
-  const outputs = CML.Transaction.from_cbor_hex(txCbor).body().outputs();
+  const outputs = decodeTransaction(txCbor).body().outputs();
   const first = outputs.len() > 0 ? outputs.get(0) : undefined;
   if (first === undefined || first.address().to_bech32() !== address || first.amount().coin() !== lovelace) {
     throw new Error('The built transaction does not have the payout of the stake as output 0 (the address of the wallet and exactly the stake), so the payout reference would point at the wrong output; nothing is returned.');

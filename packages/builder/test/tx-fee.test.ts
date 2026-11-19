@@ -1,9 +1,9 @@
 // packages/builder/test/tx-fee.test.ts
 // The fee of a transaction that a caller gives vector_dry_run: readTransactionFee reads it from the bytes (tx-fee.ts), and declaredFee
-// (build.ts) gives it. No decoder library reads the transaction. The reader gets the bytes of the caller as they are, so the tests give it
-// bytes that are not well-formed CBOR too: it must return at once, give no error, and give nothing, or the fee when key 2 comes before the
-// bad part. Each direct call of the reader has a time limit (atOnce), so that a reader that does not return fails its test and does not
-// hang the run.
+// (build.ts) checks the bytes first (cbor-depth.ts) and then reads the fee. No decoder library reads the transaction. The tests call the
+// reader directly with bytes that are not well-formed CBOR too: it must return at once, give no error, and give nothing, or the fee when
+// key 2 comes before the bad part. Each direct call of the reader has a time limit (atOnce), so that a reader that does not return fails
+// its test and does not hang the run.
 import { afterEach, describe, test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML } from '@lucid-evolution/lucid';
@@ -96,6 +96,18 @@ describe('readTransactionFee', () => {
       assert.equal(feeOf(withBody(`a2${'00'}${value}0205`)), 5n, `${name}, as a value`);
       assert.equal(feeOf(withBody(`a3${value}00${'00'}${value}0205`)), 5n, `${name}, as a key and a value`);
       assert.equal(feeOf(withBody(`bf${value}${value}0205ff`)), 5n, `${name}, in a body of indefinite length`);
+    }
+  });
+
+  test('a value of any shape that is nested 100,000 levels deep is skipped, and key 2 is read', () => {
+    const levels = 100_000;
+    const shapes: Record<string, [string, string]> = {
+      arrays: ['81', '00'], maps: ['a100', '00'], tags: ['c1', '00'], 'arrays of indefinite length': ['9f', '00'], 'maps of indefinite length': ['bf00', '00'],
+    };
+    for (const [name, [open, inner]] of Object.entries(shapes)) {
+      const closing = name.endsWith('indefinite length') ? 'ff'.repeat(levels) : '';
+      const hex = withBody(`a2 00 ${open.repeat(levels)}${inner}${closing} 02 05`.replace(/ /g, ''));
+      assert.equal(feeOf(hex), 5n, name);
     }
   });
 
@@ -304,8 +316,15 @@ describe('declaredFee', () => {
     assert.equal(declaredFee(withFee('1bffffffffffffffff')), '18446744073709551615');
   });
 
-  test('bytes that hold no fee keep the old message', () => {
-    for (const tx of ['zz', 'a1', '84', 'ff', 'f6', '84a0a0f5f6', withBody('a1024105'), '84a1021a0000']) {
+  test('a transaction nested past 64 levels is refused with the reason, before the fee is read', () => {
+    const levels = (n: number): string => `${'81'.repeat(n)}00`;
+    for (const tx of [withBody(`a2 00 ${levels(5000)} 02 05`.replace(/ /g, '')), withBody(`a2 02 05 00 ${levels(5000)}`.replace(/ /g, '')), levels(5000)]) {
+      assert.throws(() => declaredFee(tx), { message: 'txCbor is nested deeper than 64 levels. It cannot be evaluated.' });
+    }
+  });
+
+  test('bytes that are refused, or hold no fee, keep the old message', () => {
+    for (const tx of ['zz', 'a1', '84', 'ff', 'f6', '84a0a0f5f6', withBody('a1024105'), withFee('1a0000')]) {
       assert.throws(() => declaredFee(tx), { message: NOT_READ }, tx);
     }
   });
@@ -318,11 +337,12 @@ describe('declaredFee', () => {
     assert.equal(decoder.mock.callCount(), 0);
   });
 
-  test('bytes that are not well-formed give the old message at once, or the fee when key 2 comes first, and no decoder is called', () => {
+  test('bytes that are not well-formed give the old message at once, wherever the bad part is, and no decoder is called', () => {
     const decoder = mock.method(CML.Transaction, 'from_cbor_hex', () => { throw new Error('CML decoded a transaction that a caller gave'); });
     for (const bad of ['5f5fffff', '7f7fffff', 'ff', '1c', '9bffffffffffffffff', '5f5f']) {
-      for (const [place, hex] of Object.entries(beforeFee(bad))) assert.throws(() => atOnce(() => declaredFee(hex)), { message: NOT_READ }, `${bad} ${place}`);
-      for (const [place, hex] of Object.entries(afterFee(bad))) assert.equal(atOnce(() => declaredFee(hex)), '5', `${bad} ${place}, after the fee`);
+      for (const [place, hex] of [...Object.entries(beforeFee(bad)), ...Object.entries(afterFee(bad))]) {
+        assert.throws(() => atOnce(() => declaredFee(hex)), { message: NOT_READ }, `${bad} ${place}`);
+      }
     }
     assert.equal(decoder.mock.callCount(), 0);
   });

@@ -14,6 +14,7 @@ import {
   outRefData, outRefOf, plutusAddressOf, plutusAddressToData,
 } from './identity-codec.js';
 import type { Credential, OutputReference, PlutusAddress } from './identity-codec.js';
+import { decodePlutusData } from './guarded-decode.js';
 
 const HEX = /^(?:[0-9a-f]{2})*$/;
 
@@ -24,7 +25,7 @@ function codec<T>(name: string, body: () => T): T {
 
 function parse(hex: string): Data {
   if (typeof hex !== 'string' || !HEX.test(hex.toLowerCase())) throw new Error('cbor: expected hex');
-  try { return Data.from(hex.toLowerCase()); } catch { throw new Error('cbor: not Plutus Data'); }
+  try { return decodePlutusData(hex.toLowerCase()); } catch { throw new Error('cbor: not Plutus Data'); }
 }
 
 const tag = (index: number, fields: Data[] = []): Data => new Constr(index, fields);

@@ -2,6 +2,7 @@
 // constructor requires a Provider, which would put a network object inside the
 // signer. This path was verified to produce a byte-identical result.
 import * as CML from '@anastasia-labs/cardano-multiplatform-lib-nodejs';
+import { assertCborHexDepth } from '@apexfusion/vector-mcp-shared/cbor-depth';
 
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
 
@@ -34,6 +35,8 @@ export function signTransaction(
 ): { signedCborHex: string; txHashHex: string } {
   let tx: CML.Transaction;
   try {
+    // The check comes first: CBOR that is nested deeper than 64 levels, or is not CBOR, never reaches the library.
+    assertCborHexDepth(unsignedCborHex, { what: 'The transaction', kind: 'transaction' });
     tx = CML.Transaction.from_cbor_hex(unsignedCborHex);
   } catch (err) {
     throw new Error(

@@ -15,12 +15,13 @@ import {
   bigintOf, boolData, boolOf, bytesOf, constrFields, constrIndex, hexData, intData, intOf, listOf, outRefData, outRefOf, timeOf,
 } from './identity-codec.js';
 import type { OutputReference } from './identity-codec.js';
+import { decodePlutusData } from './guarded-decode.js';
 
 const HEX = /^(?:[0-9a-f]{2})*$/;
 
 function parse(hex: string, what: string): Data {
   if (typeof hex !== 'string' || !HEX.test(hex.toLowerCase())) throw new Error(`${what}: cbor: expected hex`);
-  try { return Data.from(hex.toLowerCase()); } catch { throw new Error(`${what}: cbor: not Plutus Data`); }
+  try { return decodePlutusData(hex.toLowerCase()); } catch { throw new Error(`${what}: cbor: not Plutus Data`); }
 }
 function codec<T>(name: string, body: () => T): T {
   try { return body(); } catch (err) { throw new Error(`${name}: ${err instanceof Error ? err.message : String(err)}`); }

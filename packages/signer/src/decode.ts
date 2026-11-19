@@ -3,6 +3,7 @@
 // the owner of each input are not in the transaction, so the own-inputs spend
 // rule needs them from resolve.ts; without them policy.ts uses the body alone.
 import * as CML from '@anastasia-labs/cardano-multiplatform-lib-nodejs';
+import { assertCborHexDepth } from '@apexfusion/vector-mcp-shared/cbor-depth';
 
 export interface DecodedOutput {
   address: string;
@@ -128,6 +129,8 @@ function depositRefundKeyHashes(body: CML.TransactionBody): string[] {
 export function decodeTransaction(cborHex: string): DecodedTx {
   let tx: CML.Transaction;
   try {
+    // The check comes first: CBOR that is nested deeper than 64 levels, or is not CBOR, never reaches the library.
+    assertCborHexDepth(cborHex, { what: 'The transaction', kind: 'transaction' });
     tx = CML.Transaction.from_cbor_hex(cborHex);
   } catch (err) {
     // Fail closed: refuse rather than return something partially understood.

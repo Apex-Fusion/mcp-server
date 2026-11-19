@@ -12,12 +12,13 @@
 // signed by the datum's supplier key, and an output to that key. A Post runs no script, so the checks of planPostAdvert (the terms rules
 // of both layouts, checkAdvertTerms) are what stands between a typing slip and a listing nobody can hire; an advert it accepts is one
 // vector_build_marketplace_post_escrow would hire.
-import { Data, Constr, CML, validatorToScriptHash } from '@lucid-evolution/lucid';
+import { Data, Constr, validatorToScriptHash } from '@lucid-evolution/lucid';
 import type { LucidEvolution, Provider, TxSignBuilder, UTxO } from '@lucid-evolution/lucid';
 import type { VectorUnsignedBuildResult } from '@apexfusion/vector-mcp-shared/types';
 import { toBuildResult } from './build.js';
 import { ensureSlotConfig, paymentKeyHashOf } from './gov-build.js';
 import type { SlotClockProvider } from './gov-build.js';
+import { decodeTransaction } from './guarded-decode.js';
 import {
   ADVERT_ADDRESS, ADVERT_REF_UTXO, ADVERT_SCRIPT_HASH, ADVERT_REDEEMER, ADVERT_DEPOSIT_FLOOR_LOVELACE, ADVERT_VALID_BEFORE_MS,
   ADVERT_VALID_AFTER_MS, MARKETPLACE_MIN_FEE,
@@ -77,7 +78,7 @@ export function planPostAdvert(terms: AdvertTerms, supplierPkh: string, nowMs: n
  * planned deposit (Lucid may raise it to the ledger minimum). Returns the lovelace output 0 locks.
  */
 export function advertOutputZero(txCbor: string, expected: { datumHex: string; depositLovelace: bigint }): bigint {
-  const outputs = CML.Transaction.from_cbor_hex(txCbor).body().outputs();
+  const outputs = decodeTransaction(txCbor).body().outputs();
   const first = outputs.len() > 0 ? outputs.get(0) : undefined;
   const coin = first ? BigInt(first.amount().coin().toString()) : -1n;
   const ok = first !== undefined

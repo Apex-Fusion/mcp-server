@@ -14,6 +14,7 @@ import type { Provider, Script, UTxO } from '@lucid-evolution/lucid';
 import { apply_params_to_script } from '@lucid-evolution/uplc';
 import { IDENTITY_SCRIPTS } from './identity-scripts.generated.js';
 import type { IdentityScriptName } from './identity-scripts.generated.js';
+import { decodePlutusData } from './guarded-decode.js';
 import { LEGACY_REGISTRY_POLICY_ID } from './legacy-registry.js';
 
 export interface OutRef { txHash: string; outputIndex: number }
@@ -233,7 +234,7 @@ export async function findConfigRecord(provider: Pick<Provider, 'getUtxos'>, dep
   const utxo = (await provider.getUtxos(deployment.configHolder.address)).find((u) => u.assets[unit] === 1n);
   if (!utxo) return null;
   let m1: unknown;
-  try { m1 = utxo.datum ? Data.from(utxo.datum) : undefined; } catch { /* refused below */ }
+  try { m1 = utxo.datum ? decodePlutusData(utxo.datum) : undefined; } catch { /* refused below */ }
   if (typeof m1 !== 'string' || !HEX56.test(m1.toLowerCase())) throw new Error(`The configuration record ${utxo.txHash}#${utxo.outputIndex} has no 28-byte Module-1 hash as its inline datum.`);
   return { utxo, m1: m1.toLowerCase() };
 }

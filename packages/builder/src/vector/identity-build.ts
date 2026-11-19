@@ -5,11 +5,12 @@
 // check before it builds (identity-rules.ts), so that a refusal names the rule, then assembles the transaction, lets Lucid run the
 // identity script on it (local evaluation of the applied script that the reference input holds), and returns the unsigned CBOR with
 // every key hash that must sign. Nothing is signed or submitted.
-import { CML, Constr, Data, calculateMinLovelaceFromUTxO, credentialToAddress } from '@lucid-evolution/lucid';
+import { Constr, Data, calculateMinLovelaceFromUTxO, credentialToAddress } from '@lucid-evolution/lucid';
 import type { LucidEvolution, Provider, UTxO } from '@lucid-evolution/lucid';
 import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
 import { decodeLegacyDatum, encodeIdentityDatum, encodeIdentityMint, encodeIdentitySpend, sameSigner, textOf } from './identity-codec.js';
 import type { Actor, Hold, IdentityDatum, IdentitySpend, Key, LegacyDatum, Party, Role, Signer, Status } from './identity-codec.js';
+import { decodeTransaction } from './guarded-decode.js';
 import { readRefScript } from './identity-deployment.js';
 import type { ConfigRecord, IdentityDeployment } from './identity-deployment.js';
 import {
@@ -45,7 +46,7 @@ export type PartySpec = Omit<Party, 'notBefore'> & { notBefore?: number };
 
 /** The index of the output at `address` holding `unit`, in the built transaction. */
 export function outputIndexOf(txCbor: string, address: string, unit: string): number {
-  const outputs = CML.Transaction.from_cbor_hex(txCbor).body().outputs();
+  const outputs = decodeTransaction(txCbor).body().outputs();
   for (let i = 0; i < outputs.len(); i++) {
     const output = outputs.get(i);
     if (output.address().to_bech32() !== address) continue;
@@ -363,7 +364,7 @@ export function adoptedProfile(legacy: LegacyDatum, given: ProfilePatch): { prof
 
 /** The index of the first output at `address` that holds exactly `lovelace` and no token, in the built transaction. */
 function paymentIndexOf(txCbor: string, address: string, lovelace: bigint): number {
-  const outputs = CML.Transaction.from_cbor_hex(txCbor).body().outputs();
+  const outputs = decodeTransaction(txCbor).body().outputs();
   for (let i = 0; i < outputs.len(); i++) {
     const output = outputs.get(i);
     if (output.address().to_bech32() === address && output.amount().coin() === lovelace && !output.amount().has_multiassets()) return i;

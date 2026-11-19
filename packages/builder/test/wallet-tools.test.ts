@@ -2,7 +2,7 @@
 // Handler-level tests of the wallet build tools and vector_dry_run (vector.ts): a minimal fake server captures the handlers, and the
 // node is a FixtureProvider handed in as registerVectorTools's nodeFor, with Ogmios's evaluateTransaction stubbed. The builds are real
 // (Lucid against the fixture ledger; the contract spend runs the always-succeeds script with Lucid's own evaluator). No network.
-import { describe, test, afterEach } from 'node:test';
+import { describe, test, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML, applyDoubleCborEncoding, getAddressDetails, validatorToAddress } from '@lucid-evolution/lucid';
 import type { SpendingValidator, UTxO } from '@lucid-evolution/lucid';
@@ -10,6 +10,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerVectorTools } from '../src/vector/vector.ts';
 import type { BuildNode } from '../src/vector/vector.ts';
 import { FixtureProvider, FIXTURE_UTXOS, FIXTURE_TXHASH, FIXTURE_TOKEN_UNIT, FOREIGN_ADDRESS, OWN_ADDRESS } from './fixtures/fixture-provider.ts';
+import { watchAllDecoders } from './fixtures/decoder-watch.ts';
 
 type Handler = (args: Record<string, unknown>) => Promise<{ content: { type: string; text: string }[] }>;
 const serverOf = (into: Map<string, Handler>) => ({ tool: (name: string, _d: string, _s: unknown, handler: Handler) => { into.set(name, handler); } }) as unknown as McpServer;
@@ -168,5 +169,25 @@ describe('vector_dry_run', () => {
       assert.ok(!/Estimated Fee/.test(t), t);
     }
     assert.deepEqual(asked, []);
+  });
+
+  test('a txCbor that is nested past 64 levels is refused with the reason, with no fee and no evaluation, and a normal dry run works after it', async () => {
+    const watch = watchAllDecoders();
+    try {
+      const asked: string[] = [];
+      node = nodeOver(FIXTURE_UTXOS, async (cbor) => { asked.push(cbor); return []; });
+      const input = `825820${'22'.repeat(32)}00`;
+      const deep = `84a30081${input}01800200a10481${'81'.repeat(5000)}00f5f6`;
+      const t = await call('vector_dry_run', { txCbor: deep });
+      assert.equal(t, 'Dry run failed: txCbor is nested deeper than 64 levels. It cannot be evaluated.');
+      assert.deepEqual(asked, []);
+      assert.equal(watch.reached(), 0);
+      const { cbor, fee } = await built();
+      const ok = await call('vector_dry_run', { txCbor: cbor });
+      assert.match(ok, /^# Dry Run Result\n\nValid: Yes\n/);
+      assert.equal(feeOf(ok).lovelace, fee);
+    } finally {
+      mock.restoreAll();
+    }
   });
 });

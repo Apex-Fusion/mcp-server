@@ -619,3 +619,28 @@ describe('publicKeyOf', () => {
     assert.throws(() => publicKeyOf(rejected), (err: Error) => /Invalid private key/.test(err.message) && !err.message.includes(rejected));
   });
 });
+
+// The check of the shared package runs before CML reads the transaction (cbor-depth.ts): the signer refuses CBOR that is nested deeper than
+// 64 levels, or that is not CBOR, and the library does not see it.
+describe('signTransaction — CBOR that is refused before the library reads it', () => {
+  // The fixture ends with `f6`: no auxiliary data. Here its fourth item is a list that holds `levels` more lists, and then 0.
+  const withNesting = (levels: number): string => `${FIXTURE_CBOR.slice(0, -2)}${'81'.repeat(levels)}00`;
+
+  test('a transaction that is nested deeper than 64 levels is refused, and the library does not read it', (t) => {
+    const read = t.mock.method(CML.Transaction, 'from_cbor_hex');
+    assert.throws(() => signTransaction(withNesting(64), KEY), /could not be decoded: The transaction is nested deeper than 64 levels/i);
+    assert.equal(read.mock.callCount(), 0);
+  });
+
+  test('a transaction at 64 levels passes the check, and the library reads it', (t) => {
+    const read = t.mock.method(CML.Transaction, 'from_cbor_hex');
+    assert.throws(() => signTransaction(withNesting(63), KEY), (err: Error) => /could not be decoded/i.test(err.message) && !/nested deeper/.test(err.message));
+    assert.equal(read.mock.callCount(), 1);
+  });
+
+  test('the clean fixture passes the check and the library reads it', (t) => {
+    const read = t.mock.method(CML.Transaction, 'from_cbor_hex');
+    assert.doesNotThrow(() => signTransaction(FIXTURE_CBOR, KEY));
+    assert.equal(read.mock.callCount(), 1);
+  });
+});
