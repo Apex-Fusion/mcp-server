@@ -464,7 +464,7 @@ describe('assertCborDepth: simple values and floats', () => {
     ];
     for (const [description, hex] of values) {
       for (const place of ['%', '81%', '8200%', 'a100%', 'd8799f%ff', '9f%ff', 'bf00%ff', 'c1%']) {
-        assert.throws(() => assertCborDepth(bytes(place.replace('%', hex))), holds, `${description} in ${place}`);
+        assert.throws(() => assertCborDepth(bytes(place.split('%').join(hex))), holds, `${description} in ${place}`);
       }
     }
     assert.throws(() => assertCborHexDepth('f6'), holds);
