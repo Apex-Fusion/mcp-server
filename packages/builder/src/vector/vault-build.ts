@@ -2,9 +2,11 @@
 // Keyless builders of the vault (Part 2 Section 5.3; contracts vault/handlers.ak): open a vault for a delegation, pay identity-
 // marketplace escrows from it as the delegate (Pay), and close vaults as the owner (Close). A vault output is AP3X only with the datum
 // Live { owner, delegation, spent, period_start } or Returned { owner } (an escrow refund). Each builder checks the rules it can check
-// before it builds, so that a refusal names the rule; the vault script then runs on the build (local evaluation of the applied script
-// that the reference input holds). buildVaultPay can also let the node judge the payment (`ledgerDecides`): the builder then makes no
-// refusal for a rule of the ledger, the node evaluates the scripts, and a refusal comes back as a typed error. Nothing is signed or submitted.
+// before it builds, so that a refusal names the rule and says who refuses: a rule that the vault contract enforces ends with the sentence
+// that the chain refuses the same transaction, and a rule of the builder alone says that the builder refuses. The vault script then runs on
+// the build (local evaluation of the applied script that the reference input holds). buildVaultPay can also let the node judge the
+// payment (`ledgerDecides`): the builder then makes no refusal for a rule of the ledger, the node evaluates the scripts, and a refusal
+// comes back as a typed error. Nothing is signed or submitted.
 import { calculateMinLovelaceFromUTxO, makeTxBuilder } from '@lucid-evolution/lucid';
 import { addressDetails } from './guarded-decode.js';
 import type { LucidConfig, LucidEvolution, Provider, TxBuilder, TxSignBuilder, UTxO } from '@lucid-evolution/lucid';
@@ -14,9 +16,10 @@ import type { Delegator, ValueLimit, VaultDatum } from './identity-codec.js';
 import { readRefScript } from './identity-deployment.js';
 import type { IdentityDeployment } from './identity-deployment.js';
 import {
-  chainClock, chainRecords, delegationChain, didOf, findDelegation, recordsById, requireRecord, signedByResult, uniqueUtxos, walletOf, windowAt, SignerList,
+  ap3xText, chainClock, chainRecords, chainRefuses, ChainGapError, delegationChain, delegationChainToGap, didOf, findDelegation, LEDGER_DECIDES_HINT, recordsById, requireRecord,
+  signedByResult, uniqueUtxos, walletOf, windowAt, SignerList,
 } from './identity-chain.js';
-import type { SignedByBuild, Window } from './identity-chain.js';
+import type { ChainGap, DelegationUtxo, SignedByBuild, Window } from './identity-chain.js';
 import type { BuildCommon, IdentityContext } from './identity-build.js';
 import { HIRE_ACTION, delegationUseProblems, escrowResource, patternsCover, patternsOf } from './delegation-build.js';
 import {
@@ -29,6 +32,9 @@ import type { IdentityAdvertDatum } from './marketplace-datum.js';
 
 const VAULT_PAY = encodeVaultSpend({ type: 'Pay' });
 const VAULT_CLOSE = encodeVaultSpend({ type: 'Close' });
+
+/** The sentence that says that the vault contract refuses the same payment on chain, and by which rule of Pay. */
+const vaultRefuses = (rule: string): string => chainRefuses('vault', 'Pay', rule, 'payment');
 
 /** The text of an owner, for messages and facts. */
 export const ownerText = (owner: Delegator): string =>
@@ -150,8 +156,11 @@ export interface VaultPayBuild extends SignedByBuild {
   deliverBy: number; promptHash: string; priceLovelace: bigint; supplierBondLovelace: bigint; buyerBondLovelace: bigint;
 }
 
-/** What the builder planned for a payment: the lock that leaves the vault, what the vault keeps, the period after it and the limit. */
-export type VaultPayAttempt = Pick<VaultPayBuild, 'amountLovelace' | 'vaultLovelace' | 'spent' | 'periodStart' | 'newPeriod' | 'limit'>;
+/**
+ * What the builder planned for a payment: the lock that leaves the vault, what the vault keeps, the period after it and the limit.
+ * `missingParent` is set when the draft has no reference input for an ancestor delegation that has no output on the node.
+ */
+export type VaultPayAttempt = Pick<VaultPayBuild, 'amountLovelace' | 'vaultLovelace' | 'spent' | 'periodStart' | 'newPeriod' | 'limit'> & { missingParent?: ChainGap };
 
 /** The facts without which buildVaultPay with `ledgerDecides` cannot build a payment at all, and the checks of the builder that stay. */
 export type VaultPayImpossibleReason = 'no_vault' | 'vault_not_live' | 'no_delegation' | 'no_advert' | 'buyer_is_supplier' | 'advert_terms' | 'below_minimum';
@@ -159,8 +168,9 @@ export type VaultPayImpossibleReason = 'no_vault' | 'vault_not_live' | 'no_deleg
 /**
  * buildVaultPay with `ledgerDecides` cannot build the payment, whatever the ledger would say: a fact that the transaction needs is
  * missing, or a check of the builder that is no rule of the ledger fails. `reason` names it. `no_vault`: the vault output, or the vault
- * script that it needs, is not on the node. `vault_not_live`: the vault holds an escrow refund. `no_delegation`: the delegation output,
- * one of its parents or a record that its use checks read is not on the node, or the delegation has no value limit. `no_advert`: the
+ * script that it needs, is not on the node. `vault_not_live`: the vault holds an escrow refund. `no_delegation`: the delegation output
+ * of the vault, or a record that its use checks read, is not on the node, or the delegation has no value limit (a missing ANCESTOR is
+ * no reason: the draft goes to the node without it). `no_advert`: the
  * advert output is not on the node, is no identity-marketplace advert, or is retired. `buyer_is_supplier`: the delegate key is the
  * supplier key of the advert. `advert_terms`: no escrow can be written for the terms of the advert (an amount that does not fit the
  * datum, a processing window that is unusable or above 24 h, an endpoint without a host), or the advert is of a fleet capability, which
@@ -176,6 +186,22 @@ export class VaultPayImpossible extends Error {
   }
 }
 
+/**
+ * buildVaultPay refuses a rule of the vault contract that the option `ledgerDecides` makes the builder skip: the other assets of the
+ * vault, the delegator, the use checks of the delegation, per_tx and total. The message is the plain text of old. The type is the mark
+ * of the refusal: a caller that tells how to skip the check (`vector_build_vault_pay`) reads the type, never the message, because a
+ * message carries text from the chain, and a supplier writes some of it. See `skippedByLedgerDecides`.
+ */
+export class VaultRuleRefusal extends Error {}
+
+/**
+ * Does the option `ledgerDecides` make the builder skip the check that `err` refuses? True for a VaultRuleRefusal, for the value cap of
+ * the escrow planner (an EscrowPlanRefusal with the fault `value_cap`) and for a gap in the delegation chain (a ChainGapError). It reads
+ * the type and the fault, never the message. The other refusals stay with the option, so passing it does not change them.
+ */
+export const skippedByLedgerDecides = (err: unknown): boolean =>
+  err instanceof VaultRuleRefusal || err instanceof ChainGapError || (err instanceof EscrowPlanRefusal && err.fault === 'value_cap');
+
 /** The reason of the VaultPayImpossible for each refusal of the escrow planner that stays with `ledgerDecides` (the value cap is the ledger's). */
 const PLAN_FAULT_REASON: Record<Exclude<EscrowPlanFault, 'value_cap'>, VaultPayImpossibleReason> = {
   advert_retired: 'no_advert', buyer_is_supplier: 'buyer_is_supplier', advert_terms: 'advert_terms',
@@ -184,9 +210,11 @@ const PLAN_FAULT_REASON: Record<Exclude<EscrowPlanFault, 'value_cap'>, VaultPayI
 /**
  * What one validator of the transaction answered when the node evaluated it: its purpose and its index in the transaction, and the code
  * and the message of its error. `detail` is the text that the node gives for the error: `data.validationError` of a validator that
- * failed, `data.reason` of an evaluation context that the node could not make. `traces` are the traces of the execution.
+ * failed, `data.reason` of an evaluation context that the node could not make. `traces` are the traces of the execution. They are null
+ * when the node gave no list of texts (no list at all, or a list that holds more than texts): an empty list is the node saying "none",
+ * and a caller must not read that from an answer that had no list.
  */
-export interface ValidatorError { purpose: string; index: number; code: number; message: string; detail: string | null; traces: string[] }
+export interface ValidatorError { purpose: string; index: number; code: number; message: string; detail: string | null; traces: string[] | null }
 
 /**
  * What buildVaultPay with `ledgerDecides` holds of the answer of the node, when the node answered the evaluation with an error
@@ -226,16 +254,22 @@ export class VaultPayRefused extends VaultPayEvaluationError {
 }
 
 /**
- * buildVaultPay with `ledgerDecides`: the node answered the evaluation, and no validator of the transaction failed. The scripts were not
- * evaluated, so this is no refusal by the ledger and no evidence of one. It is no failure to reach the node either: the node answered,
- * and its answer is in `evaluationError` and `validators`. Examples: a validity range that ends beyond the end of the era that the node
- * can foresee (the error 3004 of Ogmios inside 3010: the node cannot make the evaluation context), or an error that is about no script
- * (the tip of the node is too old). It is no VaultPayImpossible, because that error means that the builder knew a missing fact and
- * sent nothing to the node, and here the node was asked and its answer decides. A caller can build again with another window, or later.
+ * buildVaultPay with `ledgerDecides`: the node answered the evaluation, and the builder read no failed validator in the answer. Mostly
+ * the scripts were not evaluated, so this is no refusal by the ledger and no evidence of one. It is no failure to reach the node either:
+ * the node answered, and its answer is in `evaluationError` and `validators`. Examples: a validity range that ends beyond the end of the
+ * era that the node can foresee (the error 3004 of Ogmios inside 3010: the node cannot make the evaluation context), or an error that is
+ * about no script (the tip of the node is too old). One more case: the provider cut or dropped the data of the error (`cause.dataTruncated`
+ * or `cause.dataDropped`), so that the builder read no validator. Then it cannot tell whether a validator failed, and the message says so.
+ * It is no VaultPayImpossible, because that error means that the builder knew a missing fact and sent nothing to the node, and here the
+ * node was asked and its answer decides. A caller can build again with another window, or later.
  */
 export class VaultPayNotEvaluated extends VaultPayEvaluationError {
   constructor(evaluationError: string, validators: ValidatorError[], draftTx: string, attempt: VaultPayAttempt, cause: unknown) {
-    super('VaultPayNotEvaluated', `The node did not evaluate the scripts of the payment of ${attempt.amountLovelace} lovelace from the vault, and no validator failed (${evaluationError}). The draft transaction that the node was asked to evaluate is in draftTx.`, evaluationError, validators, draftTx, attempt, cause);
+    const lost = cause instanceof OgmiosRpcError && (cause.dataTruncated || cause.dataDropped);
+    super('VaultPayNotEvaluated', lost
+      ? `The node answered the evaluation of the payment of ${attempt.amountLovelace} lovelace from the vault with an error, and the builder could not read its data in full (the provider cut it or dropped it), so it cannot tell whether a validator failed (${evaluationError}). The draft transaction that the node was asked to evaluate is in draftTx.`
+      : `The node did not evaluate the scripts of the payment of ${attempt.amountLovelace} lovelace from the vault, and no validator failed (${evaluationError}). The draft transaction that the node was asked to evaluate is in draftTx.`,
+    evaluationError, validators, draftTx, attempt, cause);
   }
 }
 
@@ -262,7 +296,9 @@ function validatorErrorsOf(json: string): ValidatorError[] {
     const data = fieldOf(error, 'data');
     const detail = fieldOf(data, 'validationError') ?? fieldOf(data, 'reason');
     const traces = fieldOf(data, 'traces');
-    return [{ purpose, index, code, message, detail: typeof detail === 'string' ? detail : null, traces: Array.isArray(traces) ? traces.filter((t): t is string => typeof t === 'string') : [] }];
+    // Only a list of texts is a list of traces: anything else is null, because an empty list says "none" and the node did not say that.
+    const listOfTexts = Array.isArray(traces) && traces.every((t) => typeof t === 'string');
+    return [{ purpose, index, code, message, detail: typeof detail === 'string' ? detail : null, traces: listOfTexts ? (traces as string[]) : null }];
   });
 }
 
@@ -361,8 +397,12 @@ function configOn(lucid: LucidEvolution, provider: Provider): LucidConfig {
  * Returned { owner }, payment + both bonds exactly the output's AP3X) and one continuing vault output at output 1 with the new
  * spent and period_start. Refuses before it builds: a vault that is not Live or holds other assets, a delegation that fails the use
  * checks of Part 2 Section 5.2 for marketplace.hire.v1 on the escrow script, whose delegator is not the owner, or that has no value
- * limit, an amount above per_tx or a period total above total, and a vault too small to keep its minimum output. The delegate key
- * signs. `fetchImpl` stands in for fetch in the Koios and indexer calls (tests).
+ * limit, an amount above per_tx or a period total above total, and a vault too small to keep its minimum output. Each refusal of a rule
+ * that the vault contract enforces says that the contract refuses the same payment on chain; a refusal that the option `ledgerDecides`
+ * skips says how to pass it, and its error has a mark by type: a VaultRuleRefusal (per_tx, total, the use checks, the delegator, the
+ * other assets), an EscrowPlanRefusal with the fault `value_cap`, or a ChainGapError (`skippedByLedgerDecides` tells them). A caller
+ * reads the mark, not the message, because a message carries text from the chain. The delegate key signs. `fetchImpl` stands in for
+ * fetch in the Koios and indexer calls (tests).
  *
  * With `ledgerDecides` the node judges the payment, not the builder. The builder makes no refusal for the per-transaction limit, the
  * period total, the use checks of the delegation, the delegator, the other assets of the vault, the value cap, the indexer listing and
@@ -370,10 +410,15 @@ function configOn(lucid: LucidEvolution, provider: Provider): LucidConfig {
  * scripts (`localUPLCEval: false`). The refusal of a fleet capability stays (VaultPayImpossible, the reason `advert_terms`). An
  * evaluation in which a validator of the transaction ran and failed throws
  * VaultPayRefused: it holds the code and the message of the node, the error of each validator and the draft transaction. An answer of
- * the node in which no validator failed (for example a validity range beyond the end of the era that the node can foresee) throws
- * VaultPayNotEvaluated: the scripts were not evaluated, so it is no refusal. What makes a transaction impossible is still refused, as
- * VaultPayImpossible with a reason. Any other failure (the node does not answer, the wallet, the coin selection) is an ordinary error,
- * so a caller tells a build, a refusal of the ledger, an evaluation that did not happen and an impossible transaction apart by type.
+ * the node in which the builder read no failed validator (for example a validity range beyond the end of the era that the node can
+ * foresee) throws VaultPayNotEvaluated: the scripts were not evaluated, so it is no refusal. What makes a transaction impossible is still refused, as
+ * VaultPayImpossible with a reason. A delegation whose ANCESTOR has no output on the node (it was undelegated) is not impossible: the
+ * draft is built with the chain up to the gap, and the node evaluates it. The vault script needs every ancestor as a reference input
+ * (delegation/chain.ak, `expect Some(parent)`), so it cannot pass with this chain: it fails at the gap, or at an earlier check of the
+ * links below it. The result is VaultPayRefused, with `attempt.missingParent`. Only a missing
+ * delegation of the vault itself stays impossible, because nothing says which delegate key it names. Any other failure (the node does
+ * not answer, the wallet, the coin selection) is an ordinary error, so a caller tells a build, a refusal of the ledger, an evaluation
+ * that did not happen and an impossible transaction apart by type.
  */
 export async function buildVaultPay(ctx: IdentityContext, p: VaultPayParams, fetchImpl: typeof fetch = fetch): Promise<VaultPayBuild> {
   const { lucid, deployment } = ctx;
@@ -393,17 +438,21 @@ export async function buildVaultPay(ctx: IdentityContext, p: VaultPayParams, fet
   const window: Window = windowAt(p.nowMs ?? Date.now(), p.validMinutes);
   const wallet = await walletOf(lucid, p.changeAddress);
   const { ref: vaultRef, utxo, vault } = await read('no_vault', () => readVault({ ...ctx, provider }, p.vaultRef));
-  if (vault.type !== 'Live') throw cannot('vault_not_live', `Vault ${vaultRef} holds an escrow refund (Returned): only its owner can close it, and it cannot pay.`);
-  if (!decides && Object.keys(utxo.assets).some((unit) => unit !== 'lovelace')) throw new Error(`Vault ${vaultRef} holds assets other than AP3X, so it cannot pay (vault decision 5); its owner can close it.`);
+  if (vault.type !== 'Live') throw cannot('vault_not_live', `Vault ${vaultRef} holds an escrow refund (Returned): only its owner can close it, and it cannot pay. ${vaultRefuses('a Returned output cannot pay')}`);
+  if (!decides && Object.keys(utxo.assets).some((unit) => unit !== 'lovelace')) throw new VaultRuleRefusal(`Vault ${vaultRef} holds assets other than AP3X, so it cannot pay; its owner can close it. ${vaultRefuses('the vault input holds AP3X only')} ${LEDGER_DECIDES_HINT}`);
 
-  const chain = await read('no_delegation', () => delegationChain(provider, deployment, vault.delegation));
+  // With `ledgerDecides` the chain may end at a gap: an ancestor that was undelegated. The draft then has no reference input for it, and
+  // the node judges that draft. Without it a gap is an error, as it always was.
+  const { chain, gap } = await read('no_delegation', async (): Promise<{ chain: DelegationUtxo[]; gap: ChainGap | null }> => (decides
+    ? delegationChainToGap(provider, deployment, vault.delegation)
+    : { chain: await delegationChain(provider, deployment, vault.delegation), gap: null }));
   const leaf = chain[0].delegation;
-  if (!decides && !sameDelegator(leaf.delegator, vault.owner)) throw new Error(`The delegator of delegation ${vault.delegation} is not the owner of vault ${vaultRef}.`);
+  if (!decides && !sameDelegator(leaf.delegator, vault.owner)) throw new VaultRuleRefusal(`The delegator of delegation ${vault.delegation} is not the owner of vault ${vaultRef}. ${vaultRefuses('the delegator of the delegation is the owner of the vault')} ${LEDGER_DECIDES_HINT}`);
   const limit = leaf.value;
-  if (limit === null) throw cannot('no_delegation', `Delegation ${vault.delegation} has no value limit, and a vault pays only under one (Part 2 Section 5.3).`);
-  const records = await read('no_delegation', () => chainRecords(provider, deployment, chain));
+  if (limit === null) throw cannot('no_delegation', `Delegation ${vault.delegation} has no value limit, and a vault pays only under one (Part 2 Section 5.3). ${vaultRefuses('the delegation has a value limit')}`);
+  const records = await read('no_delegation', () => chainRecords(provider, deployment, chain, gap === null));
   const problems = decides ? [] : delegationUseProblems(chain, recordsById(records), HIRE_ACTION, escrowResource(deployment.escrow.hash), window);
-  if (problems.length > 0) throw new Error(`The delegation ${vault.delegation} cannot be used for this payment (Part 2 Section 5.2): ${problems.join('; ')}.`);
+  if (problems.length > 0) throw new VaultRuleRefusal(`The delegation ${vault.delegation} cannot be used for this payment (Part 2 Section 5.2). ${vaultRefuses('the use checks of the delegation')} ${LEDGER_DECIDES_HINT} The builder found: ${problems.join('; ')}.`);
 
   let advert: { ref: string; advert: IdentityAdvertDatum; agentId: string };
   if (decides) {
@@ -414,7 +463,7 @@ export async function buildVaultPay(ctx: IdentityContext, p: VaultPayParams, fet
     advert = onNode;
   } else {
     const hireable = await readHireableAdvert(p.advertRef, fetchImpl, deployment);
-    if (hireable.layout !== 'identity') throw new Error(`Advert ${hireable.ref} is a legacy advert; a vault pays only identity-marketplace escrows.`);
+    if (hireable.layout !== 'identity') throw new Error(`Advert ${hireable.ref} is a legacy advert; a vault pays only identity-marketplace escrows. ${vaultRefuses('the escrow outputs at the identity escrow address hold at least the amount that leaves the vault')}`);
     advert = hireable;
   }
   const refund = { address: plutusAddressFromBech32(deployment.vault.address), datum: encodeVaultDatum({ type: 'Returned', owner: vault.owner }) };
@@ -430,15 +479,15 @@ export async function buildVaultPay(ctx: IdentityContext, p: VaultPayParams, fet
   }
 
   const amount = plan.lockLovelace;
-  if (!decides && amount > limit.perTx) throw new Error(`The payment of ${amount} lovelace is above the per-transaction limit of delegation ${vault.delegation} (${limit.perTx}).`);
+  if (!decides && amount > limit.perTx) throw new VaultRuleRefusal(`The payment of ${ap3xText(amount)} is above the per-transaction limit of delegation ${vault.delegation}: per_tx is ${ap3xText(limit.perTx)}. The payment is what the hire takes from the vault: price + buyer bond + supplier bond. ${vaultRefuses('amount <= per_tx')} ${LEDGER_DECIDES_HINT}`);
   const newPeriod = window.lo >= vault.periodStart + limit.periodMs;
   const spent = newPeriod ? amount : vault.spent + amount;
   const periodStart = newPeriod ? window.hi : vault.periodStart;
-  if (!decides && spent > limit.total) throw new Error(`The payment would bring this period's spending to ${spent} lovelace, above the total limit of delegation ${vault.delegation} (${limit.total}).`);
+  if (!decides && spent > limit.total) throw new VaultRuleRefusal(`The payment would bring this period's spending to ${ap3xText(spent)}, above the total limit of delegation ${vault.delegation}: total is ${ap3xText(limit.total)}. The payment of ${ap3xText(amount)} is what the hire takes from the vault: price + buyer bond + supplier bond. ${vaultRefuses('spent in the period <= total')} ${LEDGER_DECIDES_HINT}`);
   const next: VaultDatum = { type: 'Live', owner: vault.owner, delegation: vault.delegation, spent, periodStart };
   const kept = utxo.assets.lovelace - amount;
   const minimum = vaultMinimum(lucid, deployment, next);
-  if (kept < minimum) throw cannot('below_minimum', `Vault ${vaultRef} holds ${utxo.assets.lovelace} lovelace: after the payment of ${amount} it would keep ${kept}, below the ${minimum} its output needs. Pay less, or have the owner add to a new vault.`);
+  if (kept < minimum) throw cannot('below_minimum', `Vault ${vaultRef} holds ${ap3xText(utxo.assets.lovelace)}: after the payment of ${ap3xText(amount)} it would keep ${ap3xText(kept)}, below the ${ap3xText(minimum)} its output needs. The ledger refuses an output below its minimum. Pay less, or have the owner add to a new vault.`);
 
   const signers = new SignerList().add(leaf.delegateKey, `delegate key of delegation ${vault.delegation}`);
   const vaultScript = await read('no_vault', () => readRefScript(provider, deployment, 'vault', deployment.vault.hash));
@@ -452,7 +501,8 @@ export async function buildVaultPay(ctx: IdentityContext, p: VaultPayParams, fet
     .validFrom(window.lo)
     .validTo(window.hi);
   for (const hash of signers.hashes()) tx = tx.addSignerKey(hash);
-  const completed = watch === null ? await tx.complete() : await completeByNode(tx, watch, { amountLovelace: amount, vaultLovelace: kept, spent, periodStart, newPeriod, limit });
+  const attempt: VaultPayAttempt = { amountLovelace: amount, vaultLovelace: kept, spent, periodStart, newPeriod, limit, ...(gap === null ? {} : { missingParent: gap }) };
+  const completed = watch === null ? await tx.complete() : await completeByNode(tx, watch, attempt);
   const result = signedByResult(completed, window, signers, wallet.keyHash);
   assertEscrowIsOutputZero(result.txCbor, { datumHex: plan.datumHex, lockLovelace: amount, address: deployment.escrow.address });
   return {

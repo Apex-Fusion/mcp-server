@@ -553,7 +553,7 @@ describe('vector_build_marketplace_post_escrow', () => {
   test('from the escrow switch slot on, a legacy advert is refused as text before its author is checked; one slot before, it is hired', async () => {
     assert.equal(legacyEscrowRefusal(ADVERT_REF), `Advert ${ADVERT_REF} has the legacy layout (it names no agent DID). From the escrow switch (slot 37226741, 2026-11-03T13:25:41Z) on, ` +
       'new escrows go to identity-layout adverts only, so no new escrow is built for it. Hire an advert that names an agent (vector_marketplace_list_suppliers shows its DID) with ' +
-      'vector_build_marketplace_post_escrow, or ask the supplier to post one with vector_build_marketplace_advert_post. Escrows posted before the switch keep their Accept, Reclaim and Release.');
+      'vector_build_marketplace_post_escrow, or ask the supplier to post one with vector_build_marketplace_advert_post. Escrows posted before the switch keep their Accept, Reclaim and Release. The builder refuses this; no contract rule is involved.');
     for (const slot of [ESCROW_SWITCH_SLOT, PAST_THE_SWITCH]) {
       tipAt(slot);
       stub({ utxos: [advertUtxo(TEMPLATE_ADVERT)] });
@@ -641,7 +641,7 @@ describe('vector_build_marketplace_accept', () => {
     const submitted = submittedAt(BASE, BASE.posted_at + 60_000); // the live August escrow: its window closed long ago
     escrowWorld([escrowAt(SUBMIT_TX, submitted)], BASE, true);
     const t = await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
-    assert.equal(t, `Failed to build accept: Accept window closed at ${new Date(submitted.submitted_at! + 600_000).toISOString()}; the supplier may now Release. (escrow ${ESCROW_REF})${ACCEPT_TIPS}`);
+    assert.equal(t, `Failed to build accept: Accept window closed at ${new Date(submitted.submitted_at! + 600_000).toISOString()}; the supplier may now Release. The escrow contract refuses the same transaction on chain (Accept: the validity range ends at most 600 s after the Submit). (escrow ${ESCROW_REF})${ACCEPT_TIPS}`);
     // a poll cannot see the chain, so the tips do not send the buyer to one: the refusal above names the state, and the receipt is verified first
     assert.doesNotMatch(t, /get_job|poll/);
     assert.ok(t.includes('1. The escrow must be in Submitted state; the refusal above names the state when one was found. If a receipt has arrived, verify it first with vector_marketplace_verify_receipt\n'), t);
@@ -687,7 +687,7 @@ describe('vector_build_marketplace_accept', () => {
     escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 60_000))], posted, true);
     assert.match(await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: 'nope#1' }), /^Failed to build accept: Invalid out ref/);
     escrowWorld([escrowAt(SUBMIT_TX, submittedAt({ ...posted, buyer_pkh: 'aa'.repeat(28) }, now - 60_000))], { ...posted, buyer_pkh: 'aa'.repeat(28) }, true);
-    assert.match(await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF }), /^Failed to build accept: This escrow was posted by another key; you are not the buyer\. \(escrow /);
+    assert.match(await call(ACCEPT_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF }), /^Failed to build accept: This escrow was posted by another key; you are not the buyer\. The escrow contract refuses the same transaction on chain \(Accept: the buyer key signs\)\. \(escrow /);
   });
 });
 
@@ -721,7 +721,7 @@ describe('vector_build_marketplace_reclaim', () => {
     escrowWorld([escrowAt(ESCROW_TX, posted)], posted, false);
     const t = await call(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
     const opens = Math.ceil((posted.deliver_by + 1) / 1000) * 1000;
-    assert.equal(t, `Failed to build reclaim: Reclaim opens at ${new Date(opens).toISOString()}: deliver_by is ${new Date(posted.deliver_by).toISOString()}, and the validity range may start only on a whole second after it. (escrow ${ESCROW_REF})${RECLAIM_TIPS}`);
+    assert.equal(t, `Failed to build reclaim: Reclaim opens at ${new Date(opens).toISOString()}: deliver_by is ${new Date(posted.deliver_by).toISOString()}, and the validity range may start only on a whole second after it. The escrow contract refuses the same transaction on chain (Reclaim: the validity range starts at or after deliver_by). (escrow ${ESCROW_REF})${RECLAIM_TIPS}`);
   });
   test('says when the payout was raised to the 1-unit minimum', async () => {
     const now = Date.now();
@@ -742,7 +742,7 @@ describe('vector_build_marketplace_reclaim', () => {
     const posted = postedAround(now, { deliver_by: now - 300_000 });
     escrowWorld([escrowAt(SUBMIT_TX, submittedAt(posted, now - 60_000))], posted, true);
     const t = await call(RECLAIM_TOOL, { changeAddress: OWN_ADDRESS, escrow_ref: ESCROW_REF });
-    assert.equal(t, `Failed to build reclaim: Escrow state is Submitted; Reclaim needs Open or Claimed. (escrow ${ESCROW_REF})${RECLAIM_TIPS}`);
+    assert.equal(t, `Failed to build reclaim: Escrow state is Submitted; Reclaim needs Open or Claimed. The escrow contract refuses the same transaction on chain (Reclaim: the state is Open or Claimed). (escrow ${ESCROW_REF})${RECLAIM_TIPS}`);
   });
 });
 

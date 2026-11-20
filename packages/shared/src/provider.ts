@@ -597,6 +597,19 @@ export class OgmiosProvider implements Provider {
   }
 
   /**
+   * The block height of the tip of the node (Ogmios `queryNetwork/blockHeight`). Ogmios gives the text "origin" for a chain with no block.
+   * Any answer that is not a whole number that is not negative is refused, so that a caller that compares block heights never gets a value
+   * that it cannot trust. The tip that `getNetworkTip` gives has a slot and no height.
+   */
+  async getBlockHeight(): Promise<number> {
+    const result = await this.rpc('queryNetwork/blockHeight');
+    if (typeof result !== 'number' || !Number.isSafeInteger(result) || result < 0) {
+      throw new Error(formatServiceError('Ogmios', 'queryNetwork/blockHeight', 'invalid response'));
+    }
+    return result;
+  }
+
+  /**
    * Query the genesis system start time from Ogmios.
    * Returns POSIX milliseconds (e.g. 1756485600000 for Vector mainnet).
    */

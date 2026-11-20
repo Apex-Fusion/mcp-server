@@ -926,14 +926,14 @@ describe('buildAccept / buildReclaim (offline)', () => {
     });
     test('refuses when the wallet is not bound to changeAddress: the payout would go to one address and Lucid\'s change to another', async () => {
       const w = await afterSubmit();
-      await assert.rejects(() => accept(w, { changeAddress: enterpriseAddressOf(OWN_PKH) }), /changeAddress is not the address this wallet is bound to/);
+      await assert.rejects(() => accept(w, { changeAddress: enterpriseAddressOf(OWN_PKH) }), /changeAddress is not the address this wallet is bound to: .* Bind the wallet to changeAddress\. This is a check of the builder, not of a contract\./);
       refused(w);
     });
     test('a plan refusal names the escrow too', async () => {
       const w = await afterSubmit();
       await assert.rejects(() => accept(w, { changeAddress: keyAddress('cc'.repeat(28)) }), (err: unknown) => {
         assert.ok(err instanceof Error);
-        assert.equal(err.message, `This escrow was posted by another key; you are not the buyer. (escrow ${ESCROW_REF})`);
+        assert.equal(err.message, `This escrow was posted by another key; you are not the buyer. The escrow contract refuses the same transaction on chain (Accept: the buyer key signs). (escrow ${ESCROW_REF})`);
         return true;
       });
       refused(w);
@@ -989,7 +989,7 @@ describe('buildAccept / buildReclaim (offline)', () => {
         [at(0, { lovelace: 900_000_000n, [FIXTURE_TOKEN_UNIT]: 5n })], // plenty of funds, but nothing pure to be the collateral
       ]) {
         const w = await afterSubmit(SUBMITTED, wallet);
-        await assert.rejects(() => accept(w), /Collateral required: the wallet must hold one pure output of at least 5 units/);
+        await assert.rejects(() => accept(w), /Collateral required: the wallet must hold one pure output of at least 5 units\. The builder refuses to build without it: the ledger needs collateral for a transaction that runs a script\./);
         refused(w);
       }
     });

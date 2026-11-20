@@ -1,4 +1,4 @@
-// Agent identity family: 3 read-only tools (resolve a DID, an agent's profile, discovery through the marketplace indexer)
+// Agent identity family: 4 read-only tools (resolve a DID, check a signature at a time, an agent's profile, discovery through the marketplace indexer)
 // + the keyless deregistration of a legacy record (Part 2 Section 10: the legacy registry writes are retired, and a legacy record
 // that does not adopt can still deregister). The identity registry build tools live in identity-tools.ts.
 // KEYLESS since spec PR 7: no tool here takes key material. Builds are
@@ -7,6 +7,7 @@
 // and the identity gateway client in identity-gateway.ts.
 import { z } from "zod/v4";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { slotToUnixTime } from '@lucid-evolution/lucid';
 import type { Provider } from '@lucid-evolution/lucid';
 import { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
 import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
@@ -16,6 +17,7 @@ import {
 import { limiterFor } from './rate-limiter.js';
 import type { RateLimiter } from './rate-limiter.js';
 import { lucidForAddress } from './build.js';
+import { ensureSlotConfig } from './gov-build.js';
 import { resolveAgentUtxo, buildDeregisterAgent } from './registry-build.js';
 import {
   resolveDid, resolutionError, isJsonObject, CANONICAL_DID, LEGACY_DID_PREFIX,
@@ -23,9 +25,24 @@ import {
 import type { GatewayAnswer, ResolutionResult } from './identity-gateway.js';
 import { fetchSuppliers, withJson } from './marketplace-indexer.js';
 import { text, fail, cell, host } from './marketplace-shared.js';
+import { registerSignatureAtTool } from './signature-at-tools.js';
+import type { NodeTipRead, SignatureAtAccess } from './signature-at.js';
 
 function newProvider(): Provider {
   return new OgmiosProvider({ ogmiosUrl: VECTOR_OGMIOS_URL, submitUrl: VECTOR_SUBMIT_URL, koiosUrl: VECTOR_KOIOS_URL });
+}
+
+/**
+ * The tip of the node, read with the chain provider of the server (Ogmios): the block height, and the time of the tip block. The time is the
+ * slot of the tip, converted with the chain clock of the server (`ensureSlotConfig`, the clock that the builders use). A provider that is not
+ * Ogmios, a tip without a slot, and a clock that cannot be set fail the read.
+ */
+async function nodeTip(node: Provider): Promise<NodeTipRead> {
+  if (!(node instanceof OgmiosProvider)) throw new Error('the chain provider cannot give the tip of the node');
+  const [height, tip] = await Promise.all([node.getBlockHeight(), node.getNetworkTip(), ensureSlotConfig(node)]);
+  // `getNetworkTip` gives the slot 0 and an empty hash for an answer that has neither of them.
+  if (tip.hash === '' || !Number.isSafeInteger(tip.slot) || tip.slot <= 0) throw new Error('the node gave a tip without a slot');
+  return { height, timeMs: slotToUnixTime('Mainnet', tip.slot) };
 }
 
 const SIGN_AND_SUBMIT_COPY =
@@ -168,11 +185,13 @@ interface DiscoveredAgent {
 
 /**
  * Registers the agent identity read tools and the legacy deregistration. The server passes only `server` and `identity`;
- * `provider` (the node the legacy reads and the build tool use) and `limiter` are for tests.
+ * `provider` (the node the legacy reads, the build tool uses, and the signature check reads its tip from), `limiter` and `signatureAt`
+ * (the gateway, the node tip and the clock of the signature check) are for tests.
  */
 export function registerAgentNetworkTools(
   server: McpServer, identity: string,
   provider: () => Provider = newProvider, limiter: Pick<RateLimiter, 'check'> = limiterFor(identity),
+  signatureAt: SignatureAtAccess = {},
 ) {
   // Rate limit wrapper - defined inside the register function (not at module
   // scope) so this closes over the per-identity `limiter` above rather
@@ -211,6 +230,10 @@ export function registerAgentNetworkTools(
       }
     }
   );
+
+  // vector_verify_signature_at (read-only): a signature against the DID document of a time, from the identity gateway (signature-at.ts). The
+  // gateway must be current: its tip is compared with the tip of the node, which comes from the chain provider of this server.
+  registerSignatureAtTool(server, checkRateLimit, { nodeTip: () => nodeTip(provider()), ...signatureAt });
 
   // vector_get_agent_profile (read-only): a canonical DID through the gateway, a legacy DID from the legacy registry.
   server.tool(

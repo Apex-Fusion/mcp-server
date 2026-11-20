@@ -124,6 +124,8 @@ Build an unsigned transaction interacting with a deployed smart contract: lock A
 
 The `vector_build_identity_*`, `vector_build_attestation_*`, `vector_build_delegation_*` and `vector_build_vault_*` tools build unsigned transactions for the `did:vector` identity registry (Part 2 of the identity registry plan). Each takes `changeAddress` (the wallet that pays the fee, any deposit and the collateral) and an optional `valid_minutes` (1 to 59, default 30), and returns the unsigned CBOR with every key hash that must sign it. Each key holder signs in turn with `vector_signer_sign` (it keeps the witnesses already present), then `vector_submit_transaction` broadcasts once. The README lists the tools; their input schemas are in `packages/builder/test/smoke/tool-schemas.snapshot.json`. The server needs the identity deployment values (`VECTOR_IDENTITY_LEGACY_ROOT`, `VECTOR_IDENTITY_CONFIG_SEED` and the reference-script UTxOs; see the README).
 
+**Who refuses.** A refusal of a contract rule names the rule and says that the contract refuses the same transaction on chain. A refusal of a rule of the builder alone says that the builder refuses. With `ledger_decides: true`, `vector_build_vault_pay` skips most of its checks. A build means that the node ran the scripts and none failed. A refusal shows the failed validator, not the rule. With the flag, a payment to an advert that no supplier can claim locks the vault funds until `deliver_by`.
+
 **Example prompt:** "Register an agent named ResearchAgent with my signer key as controller and Accountable Party, and the capability research"
 
 The legacy registry writes (`vector_build_register_agent`, `vector_build_update_agent`, `vector_build_transfer_agent`) are retired. A legacy record moves into the identity registry with `vector_build_identity_adopt`.
@@ -163,6 +165,43 @@ Resolve a `did:vector` DID through the identity gateway (`GET /1.0/identifiers/{
 The gateway URL comes from `VECTOR_IDENTITY_GATEWAY_URL` (default `https://id.vector.apexfusion.org`).
 
 **Example prompt:** "Resolve did:vector:3ddd0751... and tell me its effective status"
+
+### vector_verify_signature_at
+
+Check an Ed25519 signature of a `did:vector` agent against the DID document that was valid at a time that you name. The tool asks the identity gateway for the DID at that time (`versionTime`) and decides from that one answer. It also reads the tip of the node, to see that the gateway is current. It builds and signs nothing. Read-only.
+
+**Parameters:**
+- `did` (string, required) - `did:vector:<64 lowercase hex>`
+- `message` (string) or `message_hex` (string) - The signed bytes, as UTF-8 text or as hex. Give one. At most 16,384 bytes
+- `signature_hex` (string, required) - The raw Ed25519 signature, 128 hex characters. It has no COSE or JWS wrapper
+- `key` (string, required) - A verification method id `did:vector:<id>#<key hash>`, a key hash (56 hex) or an Ed25519 public key (64 hex)
+- `purpose` (string, optional) - `assertionMethod` (default) or `authentication`
+- `at` (string, required) - `YYYY-MM-DDThh:mm:ssZ`, UTC, whole seconds, at least 10 minutes before now and before the tip block of the node
+
+The result is VALID only when all of these are true:
+- The time is at least 10 minutes before now, and at least 10 minutes before the tip block of the node.
+- The DID has a version at that time, and the version has a DID document.
+- The gateway is current: its ledger tip is at most 30 blocks behind the tip of the node.
+- The tip of the node is at most 10 minutes old. The node is the reference for the tip of the chain.
+- The time lies inside the version: the version started at or before the time, and its `nextUpdate`, when there is one, is after the time.
+- The effective status of the version is active, and the status of the record agrees with it.
+- No invalid-from time lies at or before the time.
+- The version lists the key for the purpose, as a `Multikey` method with the DID as its controller.
+- The listed key is the key that you give, and the signature verifies over the message.
+
+A check that fails gives INVALID with a reason (`did_not_found`, `deactivated`, `version_not_started`, `version_superseded`, `ambiguous_second`, `status_not_active`, `invalid_from`, `key_not_listed`, `purpose_missing`, `key_differs`, `signature_mismatch`). A check that cannot decide gives NOT CHECKED with a reason:
+- `too_recent` - The time is less than 10 minutes before now, less than 10 minutes before the tip block of the node, or in the future. A change after the time can still have fewer than 30 confirmations, and the gateway does not show it. The tool asks nobody when the clock of the server makes the time too recent.
+- `gateway_behind` - The ledger tip of the gateway is more than 30 blocks behind the tip of the node.
+- `tip_stale` - The tip block of the node is more than 10 minutes old. A node that is behind is no reference for the tip of the chain, and a gateway that is as far behind as the node would pass the check of the lag.
+- `tip_unreadable` - The tool cannot read the tip of the node, or the answer of the gateway has no ledger tip.
+- `next_update_missing` - The DID has a later version, and the gateway does not give its time (`nextUpdate`). When the gateway gives no `nextUpdate`, a signature at a time before the latest version of a DID gives NOT CHECKED.
+- `gateway_error`, `answer_unreadable` (the answer is not complete or not well formed), `key_type_unsupported` (a P-256 key).
+
+When the gateway gives `nextUpdate`, a signature in the exact second of an update is INVALID (`ambiguous_second`). A check that fails and a check that cannot decide can happen together: the result is then INVALID. An error never gives VALID.
+
+The answer shows the version that the tool used, the status of that version, both ledger tips, the keys of that version, and the state of the DID now. The time is the claim of the caller. The tool cannot prove when the signature was made. An auditor needs a time anchor, for example a transaction.
+
+**Example prompt:** "Was this signature by did:vector:c103... valid at 2026-11-03T15:56:00Z?"
 
 ### vector_get_agent_profile
 

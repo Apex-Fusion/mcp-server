@@ -59,6 +59,33 @@ describe('vector_build_identity_register', () => {
     assert.match(answer, /^Failed to build identity registration: .*Accountable Party that covers/);
   });
 
+  test('the answer shows the endpoint; a record that is not a subagent and has none gets a Warning, and the JSON has the endpoint', async () => {
+    const base = { changeAddress: OWN_ADDRESS, controller: CONTROLLER.publicKey, name: 'Tool Agent', parties: [{ role: 'Accountable', signer: 'controller' }] };
+    const WARNING = '**Warning:** no endpoint, so the catalogs, the agent card and protocol detection stay empty for this agent. Add one with the endpoint input of vector_build_identity_update';
+    const without = await call('vector_build_identity_register', base);
+    assert.ok(without.includes('**Endpoint:** none\n'), without);
+    assert.ok(without.includes(WARNING), without);
+    assert.equal(jsonOf(without).endpoint, null);
+    const empty = await call('vector_build_identity_register', { ...base, endpoint: '' });
+    assert.ok(empty.includes(WARNING), 'an empty text is no endpoint');
+    const given = await call('vector_build_identity_register', { ...base, endpoint: 'https://agent.example/a|b`c' });
+    assert.ok(given.includes('**Endpoint:** https://agent.example/a¦b\'c\n'), 'the endpoint is escaped in the line');
+    assert.ok(!given.includes('**Warning:**'));
+    assert.equal(jsonOf(given).endpoint, 'https://agent.example/a|b`c', 'the JSON has the verbatim endpoint');
+  });
+
+  test('a subagent has no endpoint by rule, and gets no Warning', async () => {
+    const parentId = 'a9'.repeat(32);
+    const sub = identityTools(() => identityWorld([recordUtxo(parentId, rootRecord({ parties: [{ role: 'Accountable', signer: { type: 'ControllerSet' }, organisation: null, notBefore: NOW - 30 * DAY, notAfter: null, rights: 3, removalAfter: null }] }))]));
+    const answer = await sub('vector_build_identity_register', {
+      changeAddress: OWN_ADDRESS, controller: OTHER.publicKey, name: 'Sub Agent', parent: `did:vector:${parentId}`, parties: [{ role: 'Accountable', signer: 'controller' }],
+    });
+    assert.match(answer, /# Identity Registration Built/);
+    assert.ok(answer.includes('**Endpoint:** none\n'), answer);
+    assert.ok(!answer.includes('**Warning:**'), 'no warning for a subagent');
+    assert.match(answer, /\*\*Kind:\*\* subagent of did:vector:a9a9/);
+  });
+
   test('without a deployment the tool says which variables to set', async () => {
     const unconfigured = identityTools(() => identityWorld(), () => { throw new IdentityConfigError(NOT_CONFIGURED); });
     const answer = await unconfigured('vector_build_identity_register', {
@@ -133,6 +160,18 @@ describe('vector_build_identity_adopt', () => {
     assert.deepEqual(new Set(signersOf(answer)), new Set([OWN_KEY_HASH, CONTROLLER.keyHash, LISTED.keyHash]));
   });
 
+  test('the answer shows the endpoint that the legacy record gives; an endpoint that is cleared gets the Warning', async () => {
+    const proof = allowlistProof(LEGACY_IDS, legacyId);
+    const copied = await identityTools(() => identityWorld([legacy()]))('vector_build_identity_adopt', args({ proof }));
+    assert.ok(copied.includes('**Endpoint:** https://legacy.example\n'), copied);
+    assert.ok(!copied.includes('**Warning:**'));
+    assert.equal(jsonOf(copied).endpoint, 'https://legacy.example');
+    const cleared = await identityTools(() => identityWorld([legacy()]))('vector_build_identity_adopt', args({ proof, endpoint: '' }));
+    assert.ok(cleared.includes('**Endpoint:** none\n'), cleared);
+    assert.ok(cleared.includes('**Warning:** no endpoint, so the catalogs, the agent card and protocol detection stay empty for this agent.'), cleared);
+    assert.equal(jsonOf(cleared).endpoint, null);
+  });
+
   test('without a proof: the allowlist comes from the deployment URL (fetch stubbed)', async () => {
     const url = 'https://203.0.113.10/allowlist.json';
     const realFetch = globalThis.fetch;
@@ -170,6 +209,20 @@ describe('vector_build_identity_update and vector_build_identity_change_controll
     assert.match(answer, /\*\*Change:\*\* name "Test Agent" to "Updated Agent"/);
     assert.match(answer, /\*\*Change:\*\* the removal of the Accountable Party \(key hash [0-9a-f]{56}\) is announced/);
     assert.deepEqual(new Set(signersOf(answer)), new Set([CONTROLLER.keyHash, OTHER.keyHash, OWN_KEY_HASH]));
+  });
+
+  test('update: the answer shows the endpoint of the record after the update, and warns when it has none', async () => {
+    const kept = await actionTools(live())('vector_build_identity_update', { changeAddress: OWN_ADDRESS, did, name: 'Renamed' });
+    assert.ok(kept.includes('**Endpoint:** https://agent.example\n'), kept);
+    assert.ok(!kept.includes('**Warning:**'));
+    assert.equal(jsonOf(kept).endpoint, 'https://agent.example');
+    const changed = await actionTools(live())('vector_build_identity_update', { changeAddress: OWN_ADDRESS, did, endpoint: 'https://new.example' });
+    assert.ok(changed.includes('**Endpoint:** https://new.example\n'), 'the endpoint after the update, not before');
+    const cleared = await actionTools(live())('vector_build_identity_update', { changeAddress: OWN_ADDRESS, did, endpoint: '' });
+    assert.ok(cleared.includes('**Endpoint:** none\n') && cleared.includes('**Warning:** no endpoint, so the catalogs'), cleared);
+    const none = await actionTools(live({ endpoint: '' }))('vector_build_identity_update', { changeAddress: OWN_ADDRESS, did, name: 'Renamed' });
+    assert.ok(none.includes('**Endpoint:** none\n') && none.includes('**Warning:** no endpoint, so the catalogs'), 'a record that had none still warns');
+    assert.equal(jsonOf(none).endpoint, null);
   });
 
   test('update: Module-1 joins through its consent; a change of a Module-1 party is refused', async () => {

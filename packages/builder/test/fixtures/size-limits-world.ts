@@ -1,6 +1,6 @@
 // packages/builder/test/fixtures/size-limits-world.ts
 //
-// The world of input-size-limits.test.ts: the 86 tools of registerVectorTools behind an MCP client in the same process, a node that
+// The world of input-size-limits.test.ts: the 87 tools of registerVectorTools behind an MCP client in the same process, a node that
 // answers at once (no network, no wait), the texts that a caller can send, and the walk over the input schema of each tool that finds
 // every string input. The schema snapshot (test/smoke/tool-schemas.snapshot.json) is the list of tools and inputs.
 import './size-limits-env.ts'; // first: it sets the environment before the modules of the builder are loaded
@@ -147,6 +147,7 @@ function sampleString(name: string, schema: Schema, world: { txCbor: string }): 
   else if (name === 'assetName') text = FIXTURE_TOKEN_UNIT.slice(56);
   else if (/^(?:signer|author|delegator_signer)$/.test(name)) text = 'controller';
   else if (name === 'amount') text = '10';
+  else if (name === 'at') text = '2026-11-03T15:56:00Z';
   else if (name === 'metadata') text = '{"674":{"msg":["a note"]}}';
   else if (/^(?:did|dids|agent|agent_id|agentDid|delegate|delegator|owner_did|successor|parent|juror|case|claim|challenge|issuer_did|subject|proposerDid)$/.test(name)) text = DID;
   else if (name === 'jury') text = HEX56;
@@ -197,6 +198,8 @@ export function baseArguments(tool: string, leaf: Leaf | undefined, world: { txC
   // The check of a delegation use needs an action and a resource that follow the rules (Part 2 Section 5.1), and a vault read needs exactly one of its three selectors.
   if (tool === 'vector_check_delegation_use') Object.assign(base, { action: 'marketplace.hire.v1', resource: `script:${HEX56}` });
   if (tool === 'vector_get_vault' && leaf === undefined) base.delegation = HEX64;
+  // The signature check takes exactly one of `message` and `message_hex`: a call that names neither is refused before the check asks the gateway.
+  if (tool === 'vector_verify_signature_at' && leaf?.path[0] !== 'message_hex') base.message = 'a message';
   return base;
 }
 

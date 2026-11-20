@@ -307,7 +307,7 @@ async function readVaultsIn(env: LedgerEnv, session: ReadSession, selector: Vaul
     const limit = leaf?.value ?? null;
     const isDelegator = leaf === undefined ? null : sameDelegator(leaf.delegator, vault.owner);
     const problems: string[] = [];
-    if (Object.keys(output.utxo.assets).some((unit) => unit !== 'lovelace')) problems.push('the output holds assets other than AP3X, so it cannot pay (vault decision 5); its owner can close it');
+    if (Object.keys(output.utxo.assets).some((unit) => unit !== 'lovelace')) problems.push('the output holds assets other than AP3X, so it cannot pay (the vault contract refuses a Pay from it); its owner can close it');
     if (leaf === undefined) problems.push(`the delegation ${vault.delegation} does not exist: it was never made, or it was undelegated and its token is burned; the owner can still close this output`);
     else {
       if (isDelegator === false) problems.push('the owner of this output is not the delegator of the delegation, so it cannot pay (Part 2 Section 5.3)');
