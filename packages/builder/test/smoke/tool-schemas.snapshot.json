@@ -3547,7 +3547,7 @@
     }
   },
   "vector_build_vault_pay": {
-    "description": "Build an UNSIGNED transaction in which the delegate of a vault's delegation hires an identity-marketplace advert from the vault: it pays one escrow (output 0; its escrow_ref is <txHash>#0) whose buyer is the delegate key and whose refunds go back to the vault for the owner, and keeps the rest in the vault (output 1). The delegation must pass its use checks (Part 2 Section 5.2: Active delegate, delegate key still listed, period, action marketplace.hire.v1 on the escrow script) and its value limit (per payment, per period). The advert must be listed. The delegate key signs. After it confirms, send the job with vector_marketplace_send_job using the escrow_ref and a buyerAddress whose key is the delegate key. Takes no key material.",
+    "description": "Build an UNSIGNED transaction in which the delegate of a vault's delegation hires an identity-marketplace advert from the vault: it pays one escrow (output 0; its escrow_ref is <txHash>#0) whose buyer is the delegate key and whose refunds go back to the vault for the owner, and keeps the rest in the vault (output 1). What leaves the vault is price + buyer bond + supplier bond. The delegation must pass its use checks (Part 2 Section 5.2: Active delegate, delegate key still listed, period, action marketplace.hire.v1 on the escrow script) and its value limit (per payment, per period). The builder checks these rules first, so that a refusal names the rule; the vault contract refuses the same payment on chain. The advert must be listed: only the builder checks this. With ledger_decides: true the builder skips its own checks of per_tx, total, the use checks, the delegator, the other assets of the vault, the value cap, the indexer listing and the listing rule. The node then runs the vault script on the draft transaction, and its verdict is the answer: a build means that the node ran the scripts and none failed, and a refusal shows the failed validator (the node does not name the rule). With the flag, a payment to an advert that no supplier can claim locks the vault funds until deliver_by; then Reclaim and a vault Close return them. The delegate key signs. After it confirms, send the job with vector_marketplace_send_job using the escrow_ref and a buyerAddress whose key is the delegate key. Takes no key material.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3573,6 +3573,10 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 59
+        },
+        "ledger_decides": {
+          "description": "Let the node judge the payment (default false). The builder then skips its own checks of per_tx, total, the use checks of the delegation, the delegator, the other assets of the vault, the value cap, the indexer listing and the listing rule. The node runs the vault script on the draft, and its verdict is the answer. An advert that no supplier can claim then locks the vault funds until deliver_by",
+          "type": "boolean"
         }
       },
       "required": [
@@ -4325,6 +4329,60 @@
       },
       "required": [
         "signedTxCbor"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  "vector_verify_signature_at": {
+    "description": "Check an Ed25519 signature of a did:vector agent against the DID document that was valid at a time that you name. The tool asks the identity gateway for the DID as it was at that time (DID Resolution versionTime). It decides from that one answer. The result is VALID only when all of these are true. The time is at least 10 minutes before now, and at least 10 minutes before the tip block of the node. The DID has a version at that time. The version has a DID document, so the DID is not deactivated or invalidated at that time. The gateway is current: its ledger tip is at most 30 blocks behind the tip of the node. The tip of the node is at most 10 minutes old, so the node is a reference for the tip of the chain. The time lies inside the version: the version started at or before the time, and its next update, when there is one, is after the time. The effective status of the version is active. No invalid-from time lies at or before the time. The version lists the key for the purpose (assertionMethod or authentication). The listed key is the key that you give. The signature verifies over the message. The result is INVALID, with the reason, when a check fails. When the gateway gives nextUpdate, a signature in the exact second of an update is INVALID (ambiguous_second). The result is NOT CHECKED when the tool cannot decide. This happens when the time is less than 10 minutes before now, less than 10 minutes before the tip block of the node, or in the future (too_recent): a later change can still have fewer than 30 confirmations, and the gateway does not show it. It happens when the gateway is more than 30 blocks behind the node (gateway_behind), when the tip of the node is more than 10 minutes old (tip_stale), or when the tool cannot read a ledger tip (tip_unreadable). It happens when the gateway gives an error, or when its answer is not complete or not well formed (gateway_error, answer_unreadable). It happens when the listed key is not an Ed25519 key (key_type_unsupported). It happens when the DID has a later version and the gateway does not give its time (nextUpdate): the tool cannot apply the nextUpdate check then (next_update_missing). When the gateway gives no nextUpdate, a signature at a time before the latest version gives NOT CHECKED (next_update_missing). Give the message as UTF-8 text (message) or as hex (message_hex), not both. It is at most 16384 bytes. The signature is the raw Ed25519 signature of 64 bytes over exactly these bytes. It has no COSE or JWS wrapper. Give the key as a verification method id (did:vector:<id>#<key hash>), a key hash (56 hex) or an Ed25519 public key (64 hex). The controller key counts only when the DID lists it for the purpose. The time (at) is YYYY-MM-DDThh:mm:ssZ in UTC, in whole seconds. The answer names the version that it used (versionId, and updated and nextUpdate when the gateway gives them). It lists the keys of that version and gives the state of the DID now. When the DID is revoked now, the answer shows the reason and the invalid-from time. A signature that was made before the invalid-from time stays valid. The time is the claim of the caller. The tool cannot prove when the signature was made. An auditor needs a time anchor, for example a transaction. Read-only: the tool builds and signs nothing.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "did": {
+          "description": "The DID of the agent that signed: did:vector:<64 lowercase hex>",
+          "type": "string",
+          "pattern": "^did:vector:[0-9a-f]{64}$"
+        },
+        "message": {
+          "description": "The signed message as UTF-8 text, at most 16384 bytes. Give this or message_hex",
+          "type": "string",
+          "maxLength": 16384
+        },
+        "message_hex": {
+          "description": "The signed message as hex (an even number of characters), at most 16384 bytes. Give this or message",
+          "type": "string",
+          "maxLength": 32768,
+          "pattern": "^(?:[0-9a-fA-F]{2})+$"
+        },
+        "signature_hex": {
+          "description": "The Ed25519 signature: 64 bytes, 128 hex characters",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{128}$"
+        },
+        "key": {
+          "description": "The key that signed: a verification method id (did:vector:<64 hex>#<56 hex>), a key hash (56 hex) or an Ed25519 public key (64 hex)",
+          "type": "string",
+          "pattern": "^(?:did:vector:[0-9a-f]{64}#[0-9a-f]{56}|[0-9a-fA-F]{56}|[0-9a-fA-F]{64})$"
+        },
+        "purpose": {
+          "description": "What the version of the DID must list the key for: assertionMethod or authentication (default assertionMethod)",
+          "type": "string",
+          "enum": [
+            "assertionMethod",
+            "authentication"
+          ]
+        },
+        "at": {
+          "description": "The time of the signature: YYYY-MM-DDThh:mm:ssZ (UTC, whole seconds, at least 10 minutes before now and before the tip block of the node). The tool takes it as the claim of the caller",
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+        }
+      },
+      "required": [
+        "did",
+        "signature_hex",
+        "key",
+        "at"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     }

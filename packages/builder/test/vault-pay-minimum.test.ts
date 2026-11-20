@@ -119,7 +119,7 @@ describe('the smallest escrow output that a vault payment can make, against the 
     assert.ok(floor < lock, 'the lock of this advert is above the floor of the builder for the shortest datum: the amounts of the advert decide');
     const short = await readLive(owner, kept + lock - 1n);
     assert.deepEqual([short.canPay, short.allowance!.nextMax], [true, lock - 1n], 'the least escrow output fits, so the read says that the output can pay');
-    await assert.rejects(() => build(kept + lock - 1n), /below the \d+ its output needs/);
+    await assert.rejects(() => build(kept + lock - 1n), /below the [\d.]+ AP3X \(\d+ lovelace\) its output needs/);
     const exact = await readLive(owner, kept + lock);
     assert.deepEqual([exact.canPay, exact.allowance!.nextMax], [true, lock]);
     const built = await build(kept + lock);

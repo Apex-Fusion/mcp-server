@@ -50,7 +50,7 @@ const NOT_CONFIGURED = /^vector_(?:build_jury_|build_module1_|get_jury|build_rep
 describe('the tools of the snapshot', () => {
   test('are the tools that the server registers', async () => {
     assert.deepEqual((await world.tools()).sort(), Object.keys(SNAPSHOT).sort());
-    assert.equal(Object.keys(SNAPSHOT).length, 86);
+    assert.equal(Object.keys(SNAPSHOT).length, 87);
   });
 
   test('are all answered by the tool itself for valid values: the configuration, the rate limit and the input schema do not stop a call', async () => {

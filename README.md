@@ -8,7 +8,7 @@ Built on [Ogmios](https://ogmios.dev/) + [Koios](https://www.koios.rest/) - no B
 
 ## Hosted servers - no install
 
-Hosted instances run on both networks. The 86 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
+Hosted instances run on both networks. The 87 tools described below are the code of this release; each hosted instance serves them once the release deploys there (testnet automatically on push to `main`, mainnet on a deliberate cutover dispatch):
 
 | Network | Endpoint |
 |---------|----------|
@@ -105,7 +105,7 @@ limitations.
 - **Safety controls** - per-identity rate limiting; spend limits for every family are enforced by the local signer, per user - the server holds no spend-limit state of its own
 - **Streamable HTTP transport** - the modern MCP transport at `/mcp`, with any-origin CORS for browser clients and an unauthenticated `GET /health` probe (the legacy SSE pair was removed in 2.0.0)
 
-## MCP Tools (86)
+## MCP Tools (87)
 
 ### Wallet & Queries
 
@@ -142,6 +142,7 @@ marketplace tools do. The ledger refuses a transaction that is submitted without
 | Tool | Description |
 |------|-------------|
 | `vector_resolve_did` | Resolve a `did:vector` DID (canonical or legacy form, optional `versionId`/`versionTime`) through the identity gateway; returns the HTTP status and the DID resolution result unchanged (no wallet needed) |
+| `vector_verify_signature_at` | Check an Ed25519 signature of a `did:vector` agent against the DID document that was valid at a time that you name (`versionTime`). The time must be at least 10 minutes before now and before the tip block of the node (`too_recent`). The tip of the node must be at most 10 minutes old (`tip_stale`), and the gateway must be at most 30 blocks behind the node (`gateway_behind`). The DID must exist, be active and not be invalidated at that time. The time must lie inside the version. When the gateway gives no `nextUpdate`, a time before the latest version gives NOT CHECKED (`next_update_missing`). When the gateway gives `nextUpdate`, a signature in the second of an update is INVALID (`ambiguous_second`). The version must list the key for `assertionMethod` or `authentication`. The answer shows the version used and the state of the DID now. The time is the claim of the caller (no wallet needed) |
 | `vector_get_agent_profile` | Get an agent's profile by DID: a canonical DID through the identity gateway (profile, effective status, keys, record output; the registration time is the block time of the transaction that first minted the identifier), a legacy DID from the legacy registry (no wallet needed) |
 | `vector_discover_agents` | Discover agents with a listed advert, from the marketplace indexer; filter by capability (no wallet needed) |
 | `vector_build_deregister_agent` | Build an unsigned deregistration of a legacy record that does not adopt - burns its token and returns the deposit (keyless) |
@@ -179,8 +180,10 @@ Every tool below is keyless: it builds an unsigned transaction and lists every k
 | `vector_build_delegation_undelegate` | End a delegation (its delegator or an ancestor's delegator signs); delegations below it stop at once |
 | `vector_delegation_request_cosign` | Ask the delegate agent of a Delegate transaction for its co-signature (the signature of the delegate key). The agent must serve the route below. The tool holds no key and adds no signature |
 | `vector_build_vault_open` | Open a vault that a delegation may spend from (`marketplace.hire.v1` on the escrow script) |
-| `vector_build_vault_pay` | The delegate hires a listed supplier from a vault, within the delegation's value limits |
+| `vector_build_vault_pay` | The delegate hires a listed supplier from a vault, within the delegation's value limits. With `ledger_decides: true` the node judges the payment and a refusal shows the failed validator (see Who refuses below) |
 | `vector_build_vault_close` | The owner takes the funds of vault outputs (live or returned refunds) back |
+
+**Who refuses.** A refusal of a contract rule names the rule and says that the contract refuses the same transaction on chain. A refusal of a rule that only the builder enforces says that the builder refuses. With `ledger_decides: true`, `vector_build_vault_pay` skips most of its own checks, and the node judges the payment. The answer names the failed validator, not the rule. With the flag, a payment to an advert that no supplier can claim locks the vault funds until `deliver_by`.
 
 #### Delegation co-signature route (for agent operators)
 
@@ -568,6 +571,8 @@ it, lives in your local signer instead - see `VECTOR_SIGNER_SPEND_LIMIT_PER_TX` 
 | `VECTOR_SUBMIT_URL` | `https://submit.vector.mainnet.apexfusion.org/api/submit/tx` |
 | `VECTOR_KOIOS_URL` | `https://v2.koios.vector.mainnet.apexfusion.org/` |
 | `VECTOR_EXPLORER_URL` | `https://vector.apexscan.org/en/` |
+
+The tool `vector_verify_signature_at` needs `VECTOR_OGMIOS_URL` and `VECTOR_IDENTITY_GATEWAY_URL` on the same network. Otherwise it cannot check that the gateway is current, and its answers are not reliable.
 
 ## Testing
 

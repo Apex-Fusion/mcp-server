@@ -17,7 +17,7 @@ import { ESCROW_SWITCH_SLOT } from '../src/vector/marketplace-constants.ts';
 import { escrowAt, koiosFor, SUBMIT_TX as LEGACY_SUBMIT_TX, SUPPLIER_ADDRESS as LEGACY_SUPPLIER_ADDRESS } from './fixtures/escrow-koios.fixture.ts';
 import { REF_SCRIPT_UTXO, evaluatingProvider } from './fixtures/escrow-node.fixture.ts';
 import { FIXTURE_TOKEN_UNIT } from './fixtures/fixture-provider.ts';
-import { buildAccept, buildPostEscrow, buildReclaim, buildRefundRevoked, buildRelease, planPostEscrow } from '../src/vector/marketplace-build.ts';
+import { buildAccept, buildPostEscrow, buildReclaim, buildRefundRevoked, buildRelease, planAccept, planPostEscrow, planReclaim, planRelease } from '../src/vector/marketplace-build.ts';
 import { decodeEscrowDatum, decodeIdentityEscrowDatum, encodeEscrowDatum, identityEscrowLockFloor } from '../src/vector/marketplace-datum.ts';
 import type { EscrowDatum, IdentityEscrowDatum } from '../src/vector/marketplace-datum.ts';
 import { readEscrowOutput, resolveEscrowLineage } from '../src/vector/marketplace-lineage.ts';
@@ -95,11 +95,15 @@ describe('Post in the identity layout (Part 2 Section 6.1)', () => {
     await assert.rejects(post({ records: [agentRecord({ capabilities: [] })] }), /does not list the capability/);
     await assert.rejects(post({ records: [] }), /has no record in the identity registry/);
   });
-  test('refuses price + bonds above 10,000 AP3X in both layouts (F-29), and lets exactly the cap through', () => {
+  test('refuses price + bonds above 10,000 AP3X in both layouts (F-29), says who refuses in each, and lets exactly the cap through', () => {
     const at = (price: bigint) => ({ ...IDENTITY_ADVERT, price_lovelace: price });
     const identity = { agentId: AGENT_ID, refund: null };
-    assert.throws(() => planPostEscrow(at(9_998_000_001n), ADVERT_REF, OWN_PKH, PAYLOAD, NOW, undefined, identity), /above the 10000\.000000 AP3X value cap of an escrow \(F-29\)/);
-    assert.throws(() => planPostEscrow(at(9_998_000_001n), ADVERT_REF, OWN_PKH, PAYLOAD, NOW), /value cap of an escrow \(F-29\)/);
+    const asks = `Advert ${ADVERT_REF} asks for price + both bonds of 10000.000001 AP3X (10000000001 lovelace), above the 10000 AP3X (10000000000 lovelace) value cap of an escrow (F-29)`;
+    // The identity escrow contract refuses to claim such an escrow. The legacy escrow contract has no value cap, so only the builder refuses.
+    assert.throws(() => planPostEscrow(at(9_998_000_001n), ADVERT_REF, OWN_PKH, PAYLOAD, NOW, undefined, identity),
+      (err: Error) => err.message === `${asks}: such an escrow cannot be claimed, so it is not built. The escrow contract refuses to claim an escrow above the cap on chain (Claim: payment + both bonds is at most 10,000 AP3X).`, 'identity');
+    assert.throws(() => planPostEscrow(at(9_998_000_001n), ADVERT_REF, OWN_PKH, PAYLOAD, NOW, undefined, undefined),
+      (err: Error) => err.message === `${asks}. The builder refuses to build it. The legacy escrow contract has no value cap.`, 'legacy');
     assert.equal(planPostEscrow(at(9_998_000_000n), ADVERT_REF, OWN_PKH, PAYLOAD, NOW, undefined, identity).lockLovelace, 10_000_000_000n);
     assert.throws(() => planPostEscrow({ ...IDENTITY_ADVERT, buyer_bond_lovelace: -1n }, ADVERT_REF, OWN_PKH, PAYLOAD, NOW, undefined, identity), /a negative amount/);
   });
@@ -232,6 +236,11 @@ describe('Accept, Reclaim, Release and RefundRevoked of an identity escrow (the 
   test('RefundRevoked refuses an agent that is still Active', async () => {
     const { world, k } = open(posted, [otherWallet, agentRecord()]);
     await assert.rejects(buildRefundRevoked(await lucidForAddress(world, OTHER_ADDRESS), world, KOIOS, p(OTHER_ADDRESS), k.f), /RefundRevoked is not allowed: the escrow is Open and the agent's record is Active/);
+    await assert.rejects(buildRefundRevoked(await lucidForAddress(world, OTHER_ADDRESS), world, KOIOS, p(OTHER_ADDRESS), k.f),
+      /The escrow contract refuses the same transaction on chain \(RefundRevoked: refund_allowed\)\. \(escrow [0-9a-f]{64}#0\)$/);
+    const noRecord = open(posted, [otherWallet]);
+    await assert.rejects(buildRefundRevoked(await lucidForAddress(noRecord.world, OTHER_ADDRESS), noRecord.world, KOIOS, p(OTHER_ADDRESS), noRecord.k.f),
+      /has no record in the identity registry, so RefundRevoked cannot show its status\. The escrow contract refuses the same transaction on chain \(RefundRevoked: the record of the agent is a reference input\)\./);
   });
 });
 
@@ -297,8 +306,40 @@ describe('the legacy escrow keeps its rules', () => {
   });
   test('RefundRevoked of a legacy escrow is refused: it has no such redeemer', async () => {
     const { provider, k } = legacyWorld([{ txHash: '0a'.repeat(32), outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 100_000_000n } }]);
-    await assert.rejects(buildRefundRevoked(await lucidForAddress(provider, OWN_ADDRESS), provider, KOIOS, { changeAddress: OWN_ADDRESS, escrowRef: LEGACY_REF, deployment: DEPLOYMENT }, k.f), /RefundRevoked exists only for identity-marketplace escrows/);
+    await assert.rejects(buildRefundRevoked(await lucidForAddress(provider, OWN_ADDRESS), provider, KOIOS, { changeAddress: OWN_ADDRESS, escrowRef: LEGACY_REF, deployment: DEPLOYMENT }, k.f), /RefundRevoked exists only for identity-marketplace escrows .* The legacy escrow contract has no such redeemer, so the chain refuses it\./);
     assert.equal(provider.evaluations.length, 0);
+  });
+});
+
+describe('the refusals of the escrow plans name the contract and the rule, and say that the chain refuses the same transaction', () => {
+  const refuses = (redeemer: string, rule: string) => `The escrow contract refuses the same transaction on chain (${redeemer}: ${rule}).`;
+  const messageOf = (run: () => unknown): string => {
+    try { run(); } catch (err) { assert.ok(err instanceof Error); return err.message; }
+    return assert.fail('no refusal');
+  };
+  const opened = identityEscrow(NOW);
+  const afterSubmit = submitted(identityEscrow(NOW), NOW);
+  const range = windowAt(NOW);
+
+  test('Accept: the buyer key, the state, the window', () => {
+    assert.ok(messageOf(() => planAccept(afterSubmit, 'cc'.repeat(28), NOW)).endsWith(refuses('Accept', 'the buyer key signs')));
+    assert.ok(messageOf(() => planAccept(opened, OWN_PKH, NOW)).endsWith(refuses('Accept', 'the state is Submitted')));
+    assert.ok(messageOf(() => planAccept(afterSubmit, OWN_PKH, NOW + 600_001)).endsWith(refuses('Accept', 'the validity range ends at most 600 s after the Submit')));
+  });
+  test('Reclaim: the buyer key of an escrow without a refund address, the state, the first second', () => {
+    assert.ok(messageOf(() => planReclaim(opened, 'cc'.repeat(28), NOW)).endsWith(refuses('Reclaim', 'without a refund address, the buyer key signs')));
+    assert.ok(messageOf(() => planReclaim(afterSubmit, OWN_PKH, NOW + DAY)).endsWith(refuses('Reclaim', 'the state is Open or Claimed')));
+    assert.ok(messageOf(() => planReclaim(opened, OWN_PKH, opened.deliver_by - 5_000)).endsWith(refuses('Reclaim', 'the validity range starts at or after deliver_by')));
+  });
+  test('Release: the supplier key, the state, the end of the accept window', () => {
+    assert.ok(messageOf(() => planRelease(afterSubmit, OWN_PKH, NOW, range)).endsWith(refuses('Release', 'the supplier key signs')));
+    assert.ok(messageOf(() => planRelease(opened, SUPPLIER_PKH, NOW, range)).endsWith(refuses('Release', 'the state is Submitted')));
+    assert.ok(messageOf(() => planRelease(afterSubmit, SUPPLIER_PKH, NOW + 100, range)).endsWith(refuses('Release', 'the validity range starts at or after the end of the accept window')));
+  });
+  test('a plan that passes names no contract: the same escrows, with the right key and time', () => {
+    assert.ok(planAccept(afterSubmit, OWN_PKH, NOW + 1_000).secondsLeft > 0);
+    assert.ok(planReclaim(opened, OWN_PKH, opened.deliver_by + 5_000).validTo > opened.deliver_by);
+    assert.ok(planRelease(afterSubmit, SUPPLIER_PKH, NOW + 700_000, range).validFrom > NOW);
   });
 });
 

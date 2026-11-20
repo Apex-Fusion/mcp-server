@@ -458,11 +458,11 @@ describe('readVaults: an allowance only for an output that can pay', () => {
     assert.deepEqual([r.canPay, r.allowance, r.error], [false, null, null]);
     assert.ok(r.problems.some((p) => /the records that the use checks read cannot be read \(No record of the delegate for did:vector:/.test(p)), r.problems.join('; '));
   });
-  test('an output that holds a token besides AP3X cannot pay (vault decision 5)', async () => {
+  test('an output that holds a token besides AP3X cannot pay: the vault contract refuses a Pay from it', async () => {
     const w = ledgerWorld([vaultUtxo(live(), 9_000_000n, { assets: { lovelace: 9_000_000n, [`${'ab'.repeat(28)}01`]: 1n } }), delegationUtxo(D, delegation({ delegator: owner })), record()]);
     const r = (await readVaults(w.env, { delegation: D }, CAPTURE_MS)).items[0].live!;
     assert.deepEqual([r.canPay, r.allowance], [false, null]);
-    assert.ok(r.problems.some((p) => /holds assets other than AP3X, so it cannot pay/.test(p)), r.problems.join('; '));
+    assert.ok(r.problems.some((p) => /holds assets other than AP3X, so it cannot pay \(the vault contract refuses a Pay from it\); its owner can close it/.test(p)), r.problems.join('; '));
   });
   test('an output that was posted for the delegation of another owner is not read as the vault of this one: no allowance', async () => {
     const r = await read({}, [record()], live({ owner: { type: 'Agent', id: 'a7'.repeat(32) } }));

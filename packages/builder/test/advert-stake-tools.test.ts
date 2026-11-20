@@ -118,7 +118,7 @@ describe('vector_build_marketplace_post_advert', () => {
   test('from the escrow switch slot on, it refuses with the text that names vector_build_marketplace_advert_post, before it reads the wallet', async () => {
     assert.equal(LEGACY_ADVERT_REFUSAL, 'From the escrow switch (slot 37226741, 2026-11-03T13:25:41Z) on, new adverts use the identity layout only, so no new legacy-layout advert is built. ' +
       'Post an identity-layout advert with vector_build_marketplace_advert_post: it names the agent (did:vector) whose record lists your supplier key and the capability. ' +
-      'To take a legacy advert off the market and get its deposit back, use vector_build_marketplace_advert_retire.');
+      'To take a legacy advert off the market and get its deposit back, use vector_build_marketplace_advert_retire. The builder refuses this; no contract rule is involved.');
     for (const slot of [ESCROW_SWITCH_SLOT, ESCROW_SWITCH_SLOT + 86_400]) {
       // Nothing but the tip may be read: the parameters and the wallet throw.
       node = Object.assign(new FixtureProvider(supplierWallet), {

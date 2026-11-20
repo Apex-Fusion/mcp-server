@@ -4,6 +4,38 @@
 
 ### Added
 
+- **`ledger_decides` on `vector_build_vault_pay`**: the node judges the payment. 86 tools, no new tool. With
+  `ledger_decides: true` the tool passes `ledgerDecides` to `buildVaultPay`. The builder then skips its own checks of
+  per_tx, total, the use checks of the delegation, the delegator, the other assets of the vault, the value cap, the
+  indexer listing and the listing rule, and the node runs the vault script on the draft transaction. Without the input,
+  or with `false`, the answer does not change.
+  - A build has one more line, `Ledger verdict`: the node ran the scripts of the draft and none failed. Its JSON block
+    has `ledger_decides: true`.
+  - `VaultPayRefused` is shown as a section that says that the LEDGER refused. For each failed validator it shows the
+    purpose, the index, the input and the script that the index names in the draft (the vault output, and the vault
+    script), the redeemer Pay, and the code and the message of the node. The node gives no trace, because the deployed
+    scripts carry no trace messages, so it does not name the rule. The answer says so. A trace list that the builder
+    cannot read is not called empty (`ValidatorError.traces` is null then). Then it shows, as the reading of
+    the builder and not as the verdict of the node, the amount (price + buyer bond + supplier bond), per_tx, the
+    spending of the period, total and the period. The draft transaction is not printed. Text from the node goes through
+    the same escaping as other text from the chain.
+  - `VaultPayNotEvaluated` is shown as an evaluation that did not happen: it is no refusal. When the provider cut or
+    dropped the data of the error, the answer says that the builder cannot tell whether a validator failed.
+    `VaultPayImpossible` is shown with its reason: the builder cannot build the payment, and it did not ask the node to
+    evaluate it.
+  - The flag skips the indexer listing and the listing rule. A payment to an advert that no supplier can claim locks the
+    vault funds until `deliver_by`. Then Reclaim and a vault Close return them. The tool text says so.
+- **A missing ancestor delegation with `ledgerDecides`.** When the delegation of the vault exists and one of its
+  ancestors was undelegated, `buildVaultPay` with `ledgerDecides` no longer throws `VaultPayImpossible('no_delegation')`.
+  It builds the draft with the chain up to the gap, without a reference input for the missing parent, and the node
+  judges it. The vault script needs every ancestor, so it cannot pass with this chain: it fails at the gap, or at an
+  earlier check of the links below it. The result is `VaultPayRefused`, and `attempt.missingParent` names the parent. A
+  missing delegation of the vault itself stays impossible. Without the option the error is the plain error of old (now
+  of the type `ChainGapError`, with the same message).
+- **The endpoint in the answers of `vector_build_identity_register`, `vector_build_identity_adopt` and
+  `vector_build_identity_update`.** Each answer shows the endpoint of the record (and has `endpoint` in its JSON). When a
+  record that is not a subagent has no endpoint, the answer has a `Warning` line: the catalogs, the agent card and
+  protocol detection stay empty for the agent.
 - **Reputation stake tools on the deployment for the identity registry** (`Module-3/reputation-staking` of
   vector-agent-modules; reputation validator `fad945ab20f61a58fbdf6a33a8f491899b7dd4167fb64200bc060424`, on Vector
   mainnet since 2026-11-03): 4 new tools, 78 in all.
@@ -94,17 +126,20 @@
   to build from) and when the wallet key is not the claimer credential. The claim is named as for the challenge tool, by
   token name or by output reference. Module-1 checks no identity record for a withdrawal. The build pays the fee of the
   claim script, which the spend and the burn both use. 79 tools in all.
-- **`ledgerDecides` option of the vault payment builder** (`buildVaultPay` in `vault-build.ts`, library only: the hosted
-  tool `vector_build_vault_pay` takes no new input and does not change). With the option, the builder makes no refusal of
-  its own for the per-transaction limit, the period total, the use checks of the delegation, the delegator, the other
-  assets of the vault, the value cap, the indexer listing and the listing rule. The refusal of a fleet capability stays.
+- **`ledgerDecides` option of the vault payment builder** (`buildVaultPay` in `vault-build.ts`; the hosted tool
+  `vector_build_vault_pay` takes it as the input `ledger_decides`: see the first entry of this list). With the option,
+  the builder makes no refusal of its own for the per-transaction limit, the period total, the use checks of the
+  delegation, the delegator, the other assets of the vault, the value cap, the indexer listing and the listing rule.
+  The refusal of a fleet capability stays.
   The builder reads the advert from the node (`readAdvertFromNode`), and the node evaluates the scripts
   (`localUPLCEval: false`). The result has four kinds, told apart by type. A build. `VaultPayRefused`: a validator of the
   transaction ran and failed (the node answered `evaluateTransaction` with the code 3010 and a validator error 3012 in its
   data). It holds the code and the message of the node (`evaluationError`), the error of each validator (`validators`:
-  purpose, index, code, message, detail, traces) and the draft transaction that the node evaluated. `VaultPayNotEvaluated`:
-  the node answered with an error and no validator failed, for example a validity range beyond the end of the era that the
-  node can foresee (the code 3004 inside 3010). The scripts were not evaluated, so it is no refusal. `VaultPayImpossible`
+  purpose, index, code, message, detail, traces; `traces` is null when the node gave no list of texts) and the draft
+  transaction that the node evaluated. `VaultPayNotEvaluated`: the node answered with an error and the builder read no
+  failed validator, for example a validity range beyond the end of the era that the node can foresee (the code 3004
+  inside 3010). The scripts were not evaluated, so it is no refusal. When the provider cut or dropped the data of the
+  error, the builder cannot tell whether a validator failed, and the message says so. `VaultPayImpossible`
   with a `reason`: no vault output, a vault that is not Live, no delegation output or record to read, no advert output or a
   retired one, a delegate key that is the supplier key (`buyer_is_supplier`), advert terms that no escrow can carry or an
   advert of a fleet capability (`advert_terms`), and a rest below the ledger minimum of the vault output. Any other error is
@@ -225,9 +260,85 @@
     the host when it is a plain name. Any other host shows as "a host with unusual characters".
   - The result gives the co-signed CBOR, the validity window, the keys that have signed, the keys that are still missing
     and the next step. The tool holds no key, adds no signature of its own and submits nothing.
+- **Signature check at a time** (`vector_verify_signature_at`): 1 tool, 87 in all. The tool tells whether an Ed25519
+  signature of a `did:vector` agent was valid at a time that the caller names. It reads the identity gateway. It also
+  reads the tip of the node, to see that the gateway is current. It builds, signs and submits nothing.
+  - The tool asks the gateway for the DID at that time (`versionTime`) and decides from that one answer.
+  - The result is VALID only when all of these are true:
+    - The time is at least 10 minutes before now, and at least 10 minutes before the tip block of the node.
+    - The DID has a version at that time.
+    - The version has a DID document, so the DID is not deactivated or invalidated at that time.
+    - The gateway is current: its ledger tip is at most 30 blocks behind the tip of the node.
+    - The tip of the node is at most 10 minutes old. The node is the reference for the tip of the chain.
+    - The time lies inside the version. The version started at or before the time. Its `nextUpdate`, when there is one,
+      is after the time.
+    - The effective status of the version is active, and the status of the record agrees with it.
+    - No invalid-from time lies at or before the time.
+    - The version lists the key for `assertionMethod` or `authentication` (`purpose`, default `assertionMethod`). The
+      listed method is a `Multikey` method, and its controller is the DID.
+    - The listed key is the key that the caller gives. The controller key counts only when the DID lists it for the
+      purpose.
+    - The signature verifies over the message.
+  - A check that fails gives INVALID, with the reason:
+    - `did_not_found`: the DID did not exist at that time.
+    - `deactivated`: the DID was deactivated or invalidated at that time.
+    - `version_not_started` or `version_superseded`: the time is not inside the version.
+    - `ambiguous_second`: the signature is in the exact second of an update. A request at the time of an update gets
+      the version before it, and the tool cannot tell on which side of the update the signature was made. The tool
+      sees an update only when the gateway gives `nextUpdate`.
+    - `status_not_active`, `invalid_from`, `key_not_listed`, `purpose_missing`, `key_differs` or `signature_mismatch`.
+  - When the tool cannot decide, the result is NOT CHECKED, with the reason:
+    - `too_recent`: the time is less than 10 minutes before now, less than 10 minutes before the tip block of the node,
+      or in the future. A change after the time can still have fewer than 30 confirmations, and the gateway does not
+      show it. The tip block of the node can be old (the node lags, or the chain stops for a short time), so the age of
+      the time is measured on the chain as well as on the clock of the server. The tool asks nobody when the clock of
+      the server makes the time too recent.
+    - `gateway_behind`: the ledger tip of the gateway is more than 30 blocks behind the tip of the node.
+    - `tip_stale`: the tip block of the node is more than 10 minutes old. A node that is behind is no reference for the
+      tip of the chain, and a gateway that is as far behind as the node would pass the check of the lag.
+    - `tip_unreadable`: the tool cannot read the tip of the node, or the answer of the gateway has no ledger tip.
+    - `next_update_missing`: the DID has a later version, and the gateway does not give its time (`nextUpdate`). When
+      the gateway gives no `nextUpdate`, a signature at a time before the latest version of a DID gives NOT CHECKED.
+    - `gateway_error`: the gateway gives an error.
+    - `answer_unreadable`: the answer is not complete or not well formed. For example, the version id is not a whole
+      number, the listed method is not a `Multikey` method of the DID, the record status and the effective status do
+      not agree, an object names a member twice, or the answer nests deeper than 64 levels.
+    - `key_type_unsupported`: the listed key is a P-256 key. The tool checks Ed25519 only.
+  - A check that fails and a check that cannot decide can happen together. The result is then INVALID. An error never
+    gives VALID.
+  - The inputs are `did` (the canonical DID), the message (`message` as UTF-8 text or `message_hex`, at most 16,384
+    bytes), `signature_hex` (64 bytes), `key` (a verification method id, a key hash or an Ed25519 public key),
+    `purpose` and `at` (`YYYY-MM-DDThh:mm:ssZ`, UTC, whole seconds, at least 10 minutes before now and before the tip
+    block of the node). The signature is the raw Ed25519 signature over the exact bytes of the message, with no COSE
+    or JWS wrapper.
+  - The answer names the version that it used (`versionId`, and `updated` and `nextUpdate` when the gateway gives
+    them). It shows the status of that version and both ledger tips. It lists the keys of that version with their
+    purposes, and it shows the state of the DID now. When the DID is deactivated now but had a document at that time,
+    the tool reads the gateway a second time, without a time, to show the reason, the time and the invalid-from time
+    of the revocation. A signature that was made before the invalid-from time stays valid. The second read never
+    changes the result.
+  - The time is the claim of the caller. The tool cannot prove when the signature was made, and each answer says so:
+    an auditor needs a time anchor, for example a transaction.
+  - The shared Ogmios provider has a new method, `getBlockHeight`. It reads the block height of the node, and it
+    refuses an answer that is not a whole number. The tool reads the block height and the tip of the node. It converts
+    the slot of the tip to a time with the chain clock of the server, the clock that the builders use. It gives up the
+    read of the node after 10 seconds.
+  - Each text of the gateway is cleaned in the answer (one line, no pipe or backtick, no invisible or
+    direction-changing character, a length limit). An answer that is larger than 1 MiB, or that is not a DID
+    resolution result, gives a failure text and no result.
 
 ### Changed
 
+- **Refusal texts say who refuses.** The text of a contract rule names the contract, the redeemer and the rule, and says
+  that the chain refuses the same transaction (vault Pay, Delegate, Undelegate, escrow spends). A rule of the builder
+  alone says that the builder refuses. A Post above the value cap is refused by the builder; the identity escrow
+  refuses the Claim, and the legacy escrow has no cap. New amounts are in AP3X; Delegate value-limit problems still
+  show lovelace.
+- `vector_build_vault_pay` without `ledger_decides` shows the tip to pass it only when the refusal is of a check that the
+  flag skips, or of a gap in the delegation chain. The library marks these errors by type (`VaultRuleRefusal`,
+  `EscrowPlanRefusal` with the fault `value_cap`, `ChainGapError`; `skippedByLedgerDecides` tells them), never by the
+  text of the message. The text of `vector_get_vault` for an output that holds other assets than AP3X now says that the
+  vault contract refuses a Pay from it.
 - Refuse CBOR that is nested deeper than 64 levels before it is decoded. The builder checks CBOR that it did not build itself
   before a decoder reads it. It refuses a transaction, Plutus data or transaction metadata that is nested deeper than 64
   levels, that is not well-formed CBOR, that declares a length past its end, or that holds a float or a simple value where

@@ -35,6 +35,7 @@ import { startServer, stopServer, ServerContext } from '../setup.ts';
 // The reads and checks of attestations, delegations and vaults took it to 85: 3 attestation reads (get, list, check), 2 delegation reads
 // (get, check use) and 1 vault read.
 // The delegation co-signature tool (vector_delegation_request_cosign) took it to 86.
+// The signature check at a time (vector_verify_signature_at) took it to 87.
 const EXPECTED_TOOLS = [
   'vector_await_transaction',
   'vector_build_attestation_attest',
@@ -122,6 +123,7 @@ const EXPECTED_TOOLS = [
   'vector_self_improvement_analyze_metrics',
   'vector_self_improvement_browse',
   'vector_submit_transaction',
+  'vector_verify_signature_at',
 ];
 
 /**

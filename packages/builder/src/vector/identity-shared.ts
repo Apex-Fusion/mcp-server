@@ -6,8 +6,8 @@ import { z } from 'zod/v4';
 import { lovelaceToAda } from '@apexfusion/vector-mcp-shared/tx';
 import { withJson } from './marketplace-indexer.js';
 import { cell, isoOrRaw } from './marketplace-shared.js';
-import { ROLES, utf8Hex } from './identity-codec.js';
-import type { Key, Role, Signer } from './identity-codec.js';
+import { ROLES, textOf, utf8Hex } from './identity-codec.js';
+import type { IdentityDatum, Key, Role, Signer } from './identity-codec.js';
 import type { PartySpec } from './identity-build.js';
 import { DEFAULT_VALID_MINUTES, MAX_VALID_MINUTES } from './identity-chain.js';
 import type { SignedByBuild } from './identity-chain.js';
@@ -90,6 +90,23 @@ export function profileFromInput(p: { name: string; description?: string; framew
     name: utf8Hex(p.name), description: utf8Hex(p.description ?? ''), framework: utf8Hex(p.framework ?? ''),
     endpoint: utf8Hex(p.endpoint ?? ''), capabilities: (p.capabilities ?? []).map(utf8Hex),
   };
+}
+
+/** The endpoint of a record as text (hex with 0x when it is not UTF-8), or null when it has none. */
+export const endpointOf = (record: IdentityDatum): string | null => (record.endpoint === '' ? null : (textOf(record.endpoint) ?? `0x${record.endpoint}`));
+
+/**
+ * The facts about the endpoint of the record that a build writes: the endpoint (escaped), and a warning when a record that is not a
+ * subagent has none. Without an endpoint the catalogs do not list the agent, its agent card stays empty and no protocol is detected for
+ * it. A subagent has no endpoint by rule (Part 2 Section 3.3), so it gets no warning.
+ */
+export function endpointFacts(record: IdentityDatum): Array<[string, string]> {
+  const endpoint = endpointOf(record);
+  const facts: Array<[string, string]> = [['Endpoint', endpoint === null ? 'none' : cell(endpoint, 256)]];
+  if (endpoint === null && record.lineage.type !== 'Subagent') {
+    facts.push(['Warning', 'no endpoint, so the catalogs, the agent card and protocol detection stay empty for this agent. Add one with the endpoint input of vector_build_identity_update']);
+  }
+  return facts;
 }
 
 // ─── Build text ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────

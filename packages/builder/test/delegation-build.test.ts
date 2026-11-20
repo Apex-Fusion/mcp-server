@@ -291,11 +291,67 @@ describe('buildDelegate (real delegation script, offline)', () => {
     await assert.rejects(child({ notAfter: NOW + 61 * DAY }), /must be inside the parent's/);
     await assert.rejects(child({ remaining: 2 }), /remaining \(2\) must be at most the parent's minus one \(1\)/);
     await assert.rejects(child({ value: undefined }), /the child needs one within it/);
-    await assert.rejects(child({ value: { perTx: 100_000_001n, total: 100_000_001n, periodMs: DAY } }), /per_tx \(100000001\) must be at most the parent's/);
-    await assert.rejects(child({ value: { perTx: 1n, total: 1_000_000_001n, periodMs: DAY } }), /total \(1000000001\) must be at most the parent's/);
+    await assert.rejects(child({ value: { perTx: 100_000_001n, total: 100_000_001n, periodMs: DAY } }), /per_tx 100\.000001 AP3X \(100000001 lovelace\) must be at most the parent's 100 AP3X \(100000000 lovelace\)/);
+    await assert.rejects(child({ value: { perTx: 1n, total: 1_000_000_001n, periodMs: DAY } }), /total 1000\.000001 AP3X \(1000000001 lovelace\) must be at most the parent's 1000 AP3X \(1000000000 lovelace\)/);
     await assert.rejects(child({ value: { perTx: 1n, total: 1n, periodMs: DAY - 1 } }), /period_ms \(86399999\) must be at least the parent's/);
     const narrow = await child({ actions: ['ocr.*'], resources: [ESCROW] }, parentWith({ actions: [utf8Hex('ocr.*')], value: null }));
     assert.deepEqual(narrow.delegation.actions, [utf8Hex('ocr.*')]);
+  });
+
+  test('each refusal of a rule of the delegation contract says that the chain refuses the same transaction; the fresh-key refusal says that the builder refuses', async () => {
+    const refusedWith = async (run: Promise<unknown>): Promise<string> => {
+      try { await run; } catch (err) { assert.ok(err instanceof Error); return err.message; }
+      return assert.fail('the build completed');
+    };
+    const contract = (rule: string) => `The delegation contract refuses the same transaction on chain (Delegate: ${rule}).`;
+    const cases: Array<[string, Promise<unknown>, string]> = [
+      ['the delegator of a sub-delegation', child({ delegator: { type: 'Agent', id: AGENT_B_ID } }), contract('the delegator of a sub-delegation is the delegate of its parent')],
+      ['hops left', child({}, parentWith({ remaining: 0 })), contract('the parent has remaining of at least 1')],
+      ['the key of the parent', child({}, PARENT, [recordUtxo(AGENT_A_ID, rootRecord({ keys: [] })), DELEGATE]), contract('active_key: the delegator lists the delegate key of the parent')],
+      ['an agent that is not Active', delegate({}, [recordUtxo(DELEGATE_ID, held(delegateRecord()))]), contract('the delegator and the delegate are Active')],
+      ['the signer of an agent delegator', delegate({ delegator: { type: 'Agent', id: DELEGATE_ID, signer: AUTH_ONLY.keyHash }, delegateKey: DKEY2.keyHash }),
+        contract('the controller of the delegator, or a key that it lists with the delegation purpose, signs')],
+      ['the delegate key', delegate({ delegateKey: AUTH_ONLY.keyHash }), contract('active_key: the delegate lists the delegate key')],
+      ['the datum rules', delegate({ actions: [] }), contract('valid_delegation')],
+      ['the narrowing', child({ actions: ['*'] }), contract('sub_authorised: the child is inside its parent')],
+    ];
+    for (const [why, run, sentence] of cases) assert.ok((await refusedWith(run)).includes(sentence), why);
+    const used = delegationUtxo(DELEGATION_ID, delegationDatum({ delegate: DELEGATE_ID, delegateKey: DKEY1.keyHash }));
+    const fresh = await refusedWith(delegate({}, [...BASE, used]));
+    assert.match(fresh, /each delegation needs a fresh key \(Part 2 Section 5\.2\)\. The builder refuses this\. The delegation contract does not enforce fresh keys; the builder, the gateway and the SDKs do\./);
+    assert.doesNotMatch(fresh, /contract refuses/);
+  });
+
+  test('a refusal that lists delegation keys says who refuses before the list, and stays under the cut of the tool when a record lists 8 keys', async () => {
+    const refusedWith = async (run: Promise<unknown>): Promise<string> => {
+      try { await run; } catch (err) { assert.ok(err instanceof Error); return err.message; }
+      return assert.fail('the build completed');
+    };
+    const CUT = 800; // The message that fail() in marketplace-shared.ts keeps: it cuts the rest.
+    const eight = Array.from({ length: 8 }, (_, i) => testKey(40 + i));
+    const hashes = eight.map((k) => k.keyHash);
+    const world = [AGENT_A, AGENT_B, recordUtxo(DELEGATE_ID, delegateRecord({ keys: eight.map((k) => key(k, 16)) }))];
+    const contract = (rule: string) => `The delegation contract refuses the same transaction on chain (Delegate: ${rule}).`;
+    const used = delegationUtxo(DELEGATION_ID, delegationDatum({ delegate: DELEGATE_ID, delegateKey: hashes[0] }));
+    const cases: Array<[string, string, string, string]> = [
+      ['the signer of an agent delegator',
+        await refusedWith(delegate({ delegator: { type: 'Agent', id: DELEGATE_ID, signer: AUTH_ONLY.keyHash }, delegateKey: hashes[0] }, world)),
+        contract('the controller of the delegator, or a key that it lists with the delegation purpose, signs'),
+        `Its delegation keys: ${hashes.slice(0, 4).join(', ')} and 4 more.`],
+      ['the delegate key', await refusedWith(delegate({ delegateKey: AUTH_ONLY.keyHash }, world)), contract('active_key: the delegate lists the delegate key'),
+        `Its delegation keys: ${hashes.slice(0, 4).join(', ')} and 4 more.`],
+    ];
+    for (const [why, message, rule, list] of cases) {
+      assert.ok(message.length <= CUT, `${why}: ${message.length} characters`);
+      assert.ok(message.includes(rule), `${why}: the sentence about who refuses is whole`);
+      assert.ok(message.indexOf(rule) < message.indexOf('Its delegation keys:'), `${why}: it comes before the list of keys`);
+      assert.ok(message.endsWith(list), `${why}: ${message}`);
+    }
+    const fresh = await refusedWith(delegate({ delegateKey: hashes[0] }, [...world, used]));
+    assert.ok(fresh.length <= CUT, `the fresh key: ${fresh.length} characters`);
+    assert.ok(fresh.endsWith(`Free delegation keys of did:vector:${DELEGATE_ID}: ${hashes.slice(1, 5).join(', ')} and 3 more.`), fresh);
+    const few = await refusedWith(delegate({ delegateKey: AUTH_ONLY.keyHash }, [AGENT_A, AGENT_B, recordUtxo(DELEGATE_ID, delegateRecord({ keys: eight.slice(0, 2).map((k) => key(k, 16)) }))]));
+    assert.ok(few.endsWith(`Its delegation keys: ${hashes[0]}, ${hashes[1]}.`), 'a record with few keys lists them all');
   });
 });
 
@@ -378,6 +434,11 @@ describe('buildUndelegate (real delegation script, offline)', () => {
     const target = delegationUtxo(DELEGATION_ID, delegationDatum({ delegator: { type: 'Agent', id: DELEGATE_ID }, delegate: AGENT_A_ID }));
     await assert.rejects(undelegate(DELEGATION_ID, [...BASE, target], testKey(30).keyHash), new RegExp(`is not a delegator's key of ${DELEGATION_ID}.*Who can sign: the controller ${DELEGATE_CONTROLLER.keyHash} or a delegation key \\(${DKEY1.keyHash}, ${DKEY2.keyHash}\\)`));
     await assert.rejects(undelegate(DELEGATION_ID, [...BASE, target], AUTH_ONLY.keyHash), /is not a delegator's key/);
+    const noSigner = await undelegate(DELEGATION_ID, [...BASE, target], testKey(30).keyHash).then(() => assert.fail('the build completed'), (err: Error) => err.message);
+    assert.ok(noSigner.includes('The delegation contract refuses the same transaction on chain (Undelegate: the delegator of the delegation, or of an ancestor, signs).'));
+    const noRecord = delegationUtxo(DELEGATION_ID, delegationDatum({ delegator: { type: 'Agent', id: 'f8'.repeat(32) }, delegate: AGENT_A_ID }));
+    const nobody = await undelegate(DELEGATION_ID, [...BASE, noRecord]).then(() => assert.fail('the build completed'), (err: Error) => err.message);
+    assert.match(nobody, /^Nobody can sign for the delegator of 9c9c.*\. The delegation contract refuses the same transaction on chain \(Undelegate: the delegator of the delegation, or of an ancestor, signs\)\. Who can sign: nobody for did:vector:f8f8/);
     await assert.rejects(undelegate(DELEGATION_ID, BASE), /No live delegation 9c9c/);
   });
 });

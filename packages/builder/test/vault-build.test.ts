@@ -2,32 +2,34 @@
 // The vault builders (Part 2 Section 5.3) offline: open, Pay and Close against the real applied vault script (identity-world's
 // deployment, local evaluation), with the delegation chain and records as reference inputs; and the Pay that the ledger judges
 // (`ledgerDecides`: the node evaluates the scripts, here the evaluating fixture provider that runs the deployed scripts).
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CML } from '@lucid-evolution/lucid';
-import type { UTxO } from '@lucid-evolution/lucid';
-import { OGMIOS_ERROR_DATA_DEPTH_LIMIT, OGMIOS_ERROR_DATA_INPUT_LIMIT, OgmiosProvider, OgmiosRpcError } from '@apexfusion/vector-mcp-shared/provider';
+import type { LucidEvolution, UTxO } from '@lucid-evolution/lucid';
+import { OGMIOS_ERROR_DATA_DEPTH_LIMIT, OGMIOS_ERROR_DATA_INPUT_LIMIT, OgmiosRpcError } from '@apexfusion/vector-mcp-shared/provider';
 import { CONTROLLER, DEPLOYMENT, NOW, DAY, OWN_ADDRESS, REF_UTXOS, identityWorld, lucidOn } from './fixtures/identity-world.ts';
-import { FIXTURE_UTXOS } from './fixtures/fixture-provider.ts';
-import { uplcEvaluatingProvider } from './fixtures/uplc-node.fixture.ts';
+import { FixtureProvider } from './fixtures/fixture-provider.ts';
+import {
+  MIDDLE_ID, MIDDLE_OWNER, OGMIOS_ERRORS, PARENT_ID, answerOf, evaluatingNode, leafDelegationUtxo, ogmiosRaised, parentDelegationUtxo, twoHopWorld, validatorsOf,
+} from './fixtures/ledger-node.fixture.ts';
+import type { ErrorBody, ValidatorBody } from './fixtures/ledger-node.fixture.ts';
 import {
   ADVERT_REF, AGENT_ID, DELEGATE_ID, DELEGATE_KEY, DELEGATION_ID, IDENTITY_ADVERT, OWN_PKH, PAYLOAD, advertUtxo, agentRecord, chainFake, delegateRecord, delegation,
-  delegationUtxo, listedRow, liveVault, vaultUtxo,
+  delegationUtxo, keyAddress, listedRow, liveVault, vaultUtxo,
 } from './fixtures/escrow-identity.fixture.ts';
+import type { ChainFake } from './fixtures/escrow-identity.fixture.ts';
 import {
   VaultPayEvaluationError, VaultPayImpossible, VaultPayNotEvaluated, VaultPayRefused, buildVaultOpen, buildVaultPay, buildVaultClose, isLedgerRefusal,
-  judgeEvaluation,
+  judgeEvaluation, skippedByLedgerDecides, VaultRuleRefusal,
 } from '../src/vector/vault-build.ts';
 import type { VaultPayAttempt } from '../src/vector/vault-build.ts';
 import { decodeVaultDatum, encodeVaultDatum, encodeVaultSpend, plutusAddressFromBech32, utf8Hex } from '../src/vector/identity-codec.ts';
-import { decodeIdentityEscrowDatum, encodeIdentityEscrowDatum } from '../src/vector/marketplace-datum.ts';
+import { decodeIdentityEscrowDatum, encodeAdvertDatum, encodeIdentityEscrowDatum } from '../src/vector/marketplace-datum.ts';
 import type { IdentityEscrowDatum } from '../src/vector/marketplace-datum.ts';
 import { EscrowPlanRefusal, planVaultEscrow, readAdvertFromNode } from '../src/vector/marketplace-build.ts';
-import { MAX_ESCROW_LOVELACE } from '../src/vector/marketplace-constants.ts';
+import { ADVERT_ADDRESS, MAX_ESCROW_LOVELACE } from '../src/vector/marketplace-constants.ts';
 import type { PostEscrowPlan } from '../src/vector/marketplace-build.ts';
-import { chainClock, windowAt } from '../src/vector/identity-chain.ts';
+import { ChainGapError, LEDGER_DECIDES_HINT, chainClock, chainRecords, delegationChain, delegationChainToGap, windowAt } from '../src/vector/identity-chain.ts';
 
 const outputs = (txCbor: string) => {
   const outs = CML.Transaction.from_cbor_hex(txCbor).body().outputs();
@@ -53,6 +55,15 @@ describe('buildVaultOpen', () => {
     await assert.rejects(open([delegationUtxo(delegation({ actions: [utf8Hex('ocr.*')] }))]), /does not cover the action marketplace\.hire\.v1/);
     await assert.rejects(open([delegationUtxo(delegation({ resources: [] }))]), /does not cover the resource script:/);
     await assert.rejects(open([delegationUtxo()], { amountLovelace: 100_000n }), /ledger minimum/);
+  });
+  test('a wallet that is not bound to changeAddress, or that has no collateral, is refused as a rule of the builder, not of a contract', async () => {
+    const close = (context: { lucid: LucidEvolution; provider: FixtureProvider; deployment: typeof DEPLOYMENT }, changeAddress: string) =>
+      buildVaultClose(context, { changeAddress, nowMs: NOW, vaultRefs: [`${'fa'.repeat(32)}#0`] });
+    await assert.rejects(close(await ctx([vaultUtxo(liveVault())]), keyAddress('cc'.repeat(28))),
+      (err: Error) => err.message === 'changeAddress is not the address this wallet is bound to; nothing was built. This is a check of the builder, not of a contract.');
+    const poor = new FixtureProvider([...REF_UTXOS, vaultUtxo(liveVault()), { txHash: 'd3'.repeat(32), outputIndex: 0, address: OWN_ADDRESS, assets: { lovelace: 4_000_000n } }]);
+    await assert.rejects(close({ lucid: await lucidOn(poor), provider: poor, deployment: DEPLOYMENT }, OWN_ADDRESS),
+      (err: Error) => err.message === 'Collateral required: the wallet must hold one pure AP3X output of at least 5 AP3X. The builder refuses to build without it: the ledger needs collateral for a transaction that runs a script.');
   });
 });
 
@@ -95,13 +106,119 @@ describe('buildVaultPay (the real vault script)', () => {
     assert.equal(datum.buyer_bond_lovelace, escrow.lovelace - 200_000n);
     assert.equal(escrow.lovelace, datum.payment_lovelace + datum.buyer_bond_lovelace + datum.supplier_bond_lovelace);
   });
-  test('refuses what the vault and the delegation do not allow', async () => {
-    await assert.rejects(pay(world(liveVault(), { delegationUtxo: delegationUtxo(delegation({ value: { perTx: 1_000_000n, total: 100_000_000n, periodMs: DAY } })) })), /above the per-transaction limit/);
-    await assert.rejects(pay(world(liveVault({ spent: 99_000_000n, periodStart: NOW - 3_600_000 }))), /above the total limit/);
+  /** The error of a build that the builder refuses; the test fails when the build completes. */
+  const refusal = async (utxos: UTxO[], k?: ChainFake): Promise<Error> => {
+    try { await pay(utxos, k); } catch (err) { assert.ok(err instanceof Error); return err; }
+    return assert.fail('the build completed');
+  };
+  const VAULT = `${'fa'.repeat(32)}#0`;
+  const PAYMENT = 'The payment is what the hire takes from the vault: price + buyer bond + supplier bond.';
+  const tight = delegationUtxo(delegation({ value: { perTx: 1_000_000n, total: 100_000_000n, periodMs: DAY } }));
+  const spentUp = liveVault({ spent: 99_000_000n, periodStart: NOW - 3_600_000 });
+  const stranger = delegationUtxo(delegation({ delegator: { type: 'PrincipalKey', hash: '99'.repeat(28), organisation: null } }));
+  const tokens = vaultUtxo(liveVault(), 100_000_000n, 0, { assets: { lovelace: 100_000_000n, ['ab'.repeat(28) + '01']: 1n } });
+
+  test('the refusal of a rule that the vault contract enforces names the rule, says that the chain refuses the same payment, and gives amounts in AP3X', async () => {
+    const cases: Array<[string, UTxO[], string]> = [
+      ['per_tx', world(liveVault(), { delegationUtxo: tight }),
+        `The payment of 4 AP3X (4000000 lovelace) is above the per-transaction limit of delegation ${DELEGATION_ID}: per_tx is 1 AP3X (1000000 lovelace). ${PAYMENT} `
+        + `The vault contract refuses the same payment on chain (Pay: amount <= per_tx). ${LEDGER_DECIDES_HINT}`],
+      ['total', world(spentUp),
+        `The payment would bring this period's spending to 103 AP3X (103000000 lovelace), above the total limit of delegation ${DELEGATION_ID}: total is 100 AP3X (100000000 lovelace). `
+        + `The payment of 4 AP3X (4000000 lovelace) is what the hire takes from the vault: price + buyer bond + supplier bond. `
+        + `The vault contract refuses the same payment on chain (Pay: spent in the period <= total). ${LEDGER_DECIDES_HINT}`],
+      ['the delegator', world(liveVault(), { delegationUtxo: stranger }),
+        `The delegator of delegation ${DELEGATION_ID} is not the owner of vault ${VAULT}. `
+        + `The vault contract refuses the same payment on chain (Pay: the delegator of the delegation is the owner of the vault). ${LEDGER_DECIDES_HINT}`],
+      ['the other assets of the vault', [tokens, ...world().slice(1)],
+        `Vault ${VAULT} holds assets other than AP3X, so it cannot pay; its owner can close it. `
+        + `The vault contract refuses the same payment on chain (Pay: the vault input holds AP3X only). ${LEDGER_DECIDES_HINT}`],
+    ];
+    for (const [rule, utxos, expected] of cases) {
+      const error = await refusal(utxos);
+      assert.equal(error.message, expected, rule);
+      assert.ok(error instanceof VaultRuleRefusal && skippedByLedgerDecides(error), `${rule}: the refusal of a check that the flag skips has the type that says so`);
+    }
+  });
+  test('the use checks of the delegation name the contract and give the way to let the node judge; the problems follow', async () => {
+    const problems: Array<[string, UTxO[], RegExp]> = [
+      ['a delegate that lists no key', world(liveVault(), { delegate: delegateRecord({ keys: [] }) }), /no longer lists the delegate key/],
+      ['a delegation that ends inside the window', world(liveVault(), { delegationUtxo: delegationUtxo(delegation({ notAfter: NOW })) }), /ends at .* before the end of the validity window/],
+    ];
+    for (const [why, utxos, problem] of problems) {
+      const error = await refusal(utxos);
+      const { message } = error;
+      assert.ok(message.startsWith(`The delegation ${DELEGATION_ID} cannot be used for this payment (Part 2 Section 5.2). The vault contract refuses the same payment on chain (Pay: the use checks of the delegation). ${LEDGER_DECIDES_HINT} The builder found: `), `${why}: ${message}`);
+      assert.match(message, problem, why);
+      assert.ok(error instanceof VaultRuleRefusal && skippedByLedgerDecides(error), `${why}: the refusal of a check that the flag skips has the type that says so`);
+    }
+  });
+  test('a rule that stays with ledger_decides names the contract but gives no way to skip it: a Returned output, a delegation without a value limit', async () => {
+    assert.equal((await refusal(world({ type: 'Returned', owner }))).message,
+      `Vault ${VAULT} holds an escrow refund (Returned): only its owner can close it, and it cannot pay. The vault contract refuses the same payment on chain (Pay: a Returned output cannot pay).`);
+    assert.equal((await refusal(world(liveVault(), { delegationUtxo: delegationUtxo(delegation({ value: null })) }))).message,
+      `Delegation ${DELEGATION_ID} has no value limit, and a vault pays only under one (Part 2 Section 5.3). The vault contract refuses the same payment on chain (Pay: the delegation has a value limit).`);
+    for (const utxos of [world({ type: 'Returned', owner }), world(liveVault(), { delegationUtxo: delegationUtxo(delegation({ value: null })) })]) {
+      assert.equal(skippedByLedgerDecides(await refusal(utxos)), false, 'the flag changes nothing here');
+    }
+  });
+  test('the rest below the ledger minimum is said in AP3X, and as a ledger rule', async () => {
+    assert.equal((await refusal(world(liveVault(), { vaultLovelace: 5_000_000n }))).message,
+      `Vault ${VAULT} holds 5 AP3X (5000000 lovelace): after the payment of 4 AP3X (4000000 lovelace) it would keep 1 AP3X (1000000 lovelace), below the 1.27145 AP3X (1271450 lovelace) its output needs. `
+      + 'The ledger refuses an output below its minimum. Pay less, or have the owner add to a new vault.');
+    assert.equal(skippedByLedgerDecides(await refusal(world(liveVault(), { vaultLovelace: 5_000_000n }))), false, 'the flag changes nothing here');
+  });
+  test('a rule of the builder alone says that the builder refuses: the indexer listing, the listing rule, a fleet capability', async () => {
+    const notAContractRule = (message: string, why: string) => {
+      assert.match(message, /The builder refuses/, why);
+      assert.doesNotMatch(message, /contract refuses|ledger_decides/, `${why}: it names no contract and no way to skip the check`);
+    };
+    notAContractRule((await refusal(world(), chainFake({ live: [advertUtxo()], listed: [] }))).message, 'the indexer does not list the advert');
+    const noAgent = world().filter((u) => u.assets[`${DEPLOYMENT.identity.hash}${AGENT_ID}`] === undefined);
+    const missing = (await refusal(noAgent)).message;
+    assert.match(missing, /has no record in the identity registry, so the advert is not listed \(Part 2 Section 6\.2\)\. The builder refuses this\. No contract checks it when the payment lands/);
+    notAContractRule(missing, 'the agent has no record');
+    const revokedAgent = world(liveVault()).map((u) => (u.assets[`${DEPLOYMENT.identity.hash}${AGENT_ID}`] === undefined ? u : agentRecord({ status: { type: 'Revoked', by: { type: 'ControllerSet' }, reason: 1, at: NOW - DAY, invalidFrom: null, successor: null } })));
+    const revoked = (await refusal(revokedAgent)).message;
+    assert.match(revoked, /is Revoked; only an Active agent can take work \(listing rule, Part 2 Section 6\.2\)\. The builder refuses this\./);
+    notAContractRule(revoked, 'the agent is revoked');
+    const fleet = advertUtxo({ ...IDENTITY_ADVERT, capability_id: 'llm.chat.v1' });
+    const fleetRefusal = (await refusal(world(liveVault(), {}), chainFake({ live: [fleet], listed: [listedRow()] }))).message;
+    assert.match(fleetRefusal, /a fleet capability .* Pick a template-contract supplier\. The builder refuses this advert; no contract rule is involved\.$/);
+    assert.doesNotMatch(fleetRefusal, /contract refuses|ledger_decides/);
+  });
+  test('a legacy advert in a vault payment is refused by the vault contract too: a vault pays only escrows at the identity escrow address', async () => {
+    const { agent_id: _agentId, ...legacyAdvert } = IDENTITY_ADVERT;
+    const legacy = advertUtxo(IDENTITY_ADVERT, { address: ADVERT_ADDRESS, datum: encodeAdvertDatum(legacyAdvert) });
+    const message = (await refusal(world(), chainFake({ live: [legacy], listed: [listedRow()] }))).message;
+    assert.equal(message, `Advert ${ADVERT_REF} is a legacy advert; a vault pays only identity-marketplace escrows. The vault contract refuses the same payment on chain (Pay: the escrow outputs at the identity escrow address hold at least the amount that leaves the vault).`);
+    assert.doesNotMatch(message, /ledger_decides|The builder refuses/, 'the flag does not change this rule, and the builder is not the only one that refuses');
+  });
+  test('the mark of a refusal that the flag skips is its type, never its message: text of a supplier that holds the hint sentence marks nothing', async () => {
+    // A fleet capability whose id holds the sentence: the refusal shows the id, and the flag does not change this refusal.
+    const fleet = advertUtxo({ ...IDENTITY_ADVERT, capability_id: `llm.chat.${LEDGER_DECIDES_HINT}` });
+    const fleetError = await refusal(world(), chainFake({ live: [fleet], listed: [listedRow()] }));
+    assert.ok(fleetError.message.includes(LEDGER_DECIDES_HINT), 'the message carries the sentence');
+    assert.equal(skippedByLedgerDecides(fleetError), false, 'a fleet capability');
+    // A capability that the record of the agent does not list: the listing rule refuses, and its message shows the id.
+    const unlisted = advertUtxo({ ...IDENTITY_ADVERT, capability_id: `demo.${LEDGER_DECIDES_HINT}` });
+    const listingError = await refusal(world(), chainFake({ live: [unlisted], listed: [listedRow()] }));
+    assert.ok(listingError.message.includes(LEDGER_DECIDES_HINT) && /does not list the capability/.test(listingError.message), 'the message carries the sentence');
+    assert.equal(skippedByLedgerDecides(listingError), false, 'the listing rule');
+    // The function reads the type and the fault only.
+    assert.equal(skippedByLedgerDecides(new Error(LEDGER_DECIDES_HINT)), false);
+    assert.equal(skippedByLedgerDecides(new EscrowPlanRefusal('advert_terms', LEDGER_DECIDES_HINT)), false);
+    assert.equal(skippedByLedgerDecides(new EscrowPlanRefusal('value_cap', 'x')), true);
+    assert.equal(skippedByLedgerDecides(new VaultRuleRefusal('x')), true);
+    assert.equal(skippedByLedgerDecides(new ChainGapError({ missing: PARENT_ID, child: DELEGATION_ID })), true);
+    for (const value of [undefined, null, 'x', LEDGER_DECIDES_HINT, { message: LEDGER_DECIDES_HINT }]) assert.equal(skippedByLedgerDecides(value), false, String(value));
+  });
+  test('refuses what the vault and the delegation do not allow, the words of old', async () => {
+    await assert.rejects(pay(world(liveVault(), { delegationUtxo: tight })), /above the per-transaction limit/);
+    await assert.rejects(pay(world(spentUp)), /above the total limit/);
     await assert.rejects(pay(world(liveVault(), { delegate: delegateRecord({ keys: [] }) })), /no longer lists the delegate key/);
-    await assert.rejects(pay(world(liveVault(), { delegationUtxo: delegationUtxo(delegation({ notAfter: NOW })) })), /ends at .* before the end of the validity window/);
     await assert.rejects(pay(world({ type: 'Returned', owner })), /holds an escrow refund \(Returned\)/);
-    await assert.rejects(pay(world(liveVault(), { vaultLovelace: 5_000_000n })), /below the \d+ its output needs/);
+    await assert.rejects(pay(world(liveVault(), { vaultLovelace: 5_000_000n })), /below the [\d.]+ AP3X \(\d+ lovelace\) its output needs/);
     await assert.rejects(pay(world(), chainFake({ live: [advertUtxo()], listed: [] })), /is not listed by the marketplace indexer/);
   });
 });
@@ -168,43 +285,10 @@ describe('buildVaultClose (the real vault script)', () => {
 
 // ─── Pay, with the ledger as the judge ──────────────────────────────────────────────────────────────────────────────────────────
 
-/** The tip of the fixtures' chain at NOW: it starts at 1756485600000 and has a slot each second. */
-const TIP_SLOT = (NOW - 1_756_485_600_000) / 1000;
 const VAULT_REF = `${'fa'.repeat(32)}#0`;
 /** The fetch of a build that the ledger decides: it must not be called, because the advert comes from the node and no listing is asked. */
 const noFetch = (async () => { throw new Error('the network was touched'); }) as typeof fetch;
 const payParams = { changeAddress: OWN_ADDRESS, nowMs: NOW, vaultRef: VAULT_REF, advertRef: ADVERT_REF, payload: PAYLOAD };
-
-/** The shape of the error bodies of Ogmios that these tests read and change. */
-interface ValidatorBody { validator: { index: number; purpose: string }; error: { code: number; message: string; data: { validationError?: string; reason?: string; traces: unknown[] } } }
-interface ErrorBody { error: { code: number; message: string; data?: ValidatorBody[] | Record<string, unknown> } }
-const validatorsOf = (body: ErrorBody): ValidatorBody[] => body.error.data as ValidatorBody[];
-/** The real error bodies that mainnet Ogmios answered with (capture-ogmios-evaluation-errors.mjs): the HTTP status and the body of each case. */
-const OGMIOS_ERRORS: Record<string, { httpStatus: number; body: ErrorBody }> =
-  JSON.parse(readFileSync(resolve(import.meta.dirname!, 'fixtures/ogmios-evaluation-errors-mainnet.json'), 'utf8')).cases;
-/** The answer of the node for a case of the fixture, as a Response; `patch` changes a copy of the body first. */
-function answerOf(name: string, patch: (body: ErrorBody) => void = () => {}): Response {
-  const body = structuredClone(OGMIOS_ERRORS[name].body);
-  patch(body);
-  return new Response(JSON.stringify(body), { status: OGMIOS_ERRORS[name].httpStatus, statusText: 'Bad Request' });
-}
-
-/** The error that `OgmiosProvider.evaluateTx` raises when its node answers with `answer`, or does not answer: the real provider, with the answer in place of the network. */
-async function ogmiosRaised(answer: Response | Error): Promise<unknown> {
-  const realFetch = globalThis.fetch;
-  const realError = console.error;
-  globalThis.fetch = (async () => { if (answer instanceof Error) throw answer; return answer; }) as typeof fetch;
-  console.error = () => {};
-  try {
-    await new OgmiosProvider({ ogmiosUrl: 'http://ogmios.test', submitUrl: 'http://submit.test' }).evaluateTx('00');
-  } catch (err) {
-    return err;
-  } finally {
-    globalThis.fetch = realFetch;
-    console.error = realError;
-  }
-  return assert.fail('evaluateTx did not throw');
-}
 
 describe('buildVaultPay with ledgerDecides (the node evaluates the scripts)', () => {
   /** What the node holds for a payment: the vault, its delegation, the delegate, the agent of the advert and the advert. */
@@ -212,28 +296,7 @@ describe('buildVaultPay with ledgerDecides (the node evaluates the scripts)', ()
     vaultUtxo(vault, over.vaultLovelace), over.delegationUtxo ?? delegationUtxo(), over.delegate ?? delegateRecord(), agentRecord(), over.advert ?? advertUtxo(),
   ];
   const without = (utxos: UTxO[], keep: (u: UTxO) => boolean): UTxO[] => utxos.filter(keep);
-  /**
-   * A node that evaluates the scripts for real, and answers a validator that failed as Ogmios does: the 3010 with a 3012 of the real
-   * fixture (above_per_tx), with the text of the evaluator as the detail of the validator.
-   */
-  const node = (utxos: UTxO[]) => {
-    const provider = uplcEvaluatingProvider([...FIXTURE_UTXOS, ...REF_UTXOS, ...utxos], TIP_SLOT);
-    const evaluate = provider.evaluateTx;
-    return Object.assign(provider, {
-      evaluateTx: async (tx: string, additional?: UTxO[]) => {
-        try { return await evaluate(tx, additional); } catch (err) {
-          const text = err instanceof Error ? err.message : String(err);
-          const place = /\b(Spend|Mint|Publish|Withdraw|Vote|Propose)\[(\d+)\]/.exec(text);
-          throw await ogmiosRaised(answerOf('above_per_tx', (body) => {
-            const [validator] = validatorsOf(body);
-            validator.error.data.validationError = text;
-            if (place) { validator.validator.purpose = place[1].toLowerCase(); validator.validator.index = Number(place[2]); }
-          }));
-        }
-      },
-    });
-  };
-  const decide = async (utxos: UTxO[], over: Record<string, unknown> = {}, provider = node(utxos)) => {
+  const decide = async (utxos: UTxO[], over: Record<string, unknown> = {}, provider = evaluatingNode(utxos)) => {
     const lucid = await lucidOn(provider);
     return { provider, run: () => buildVaultPay({ lucid, provider, deployment: DEPLOYMENT }, { ...payParams, ledgerDecides: true, ...over }, noFetch) };
   };
@@ -338,7 +401,7 @@ describe('buildVaultPay with ledgerDecides (the node evaluates the scripts)', ()
       ['a delegate key that is the supplier key of the advert', held(liveVault(), { advert: advertUtxo({ ...IDENTITY_ADVERT, supplier_pkh: DELEGATE_KEY.keyHash }) }), 'buyer_is_supplier', /cannot be the supplier of the same advert/],
       ['a processing window above 24 h', held(liveVault(), { advert: advertUtxo({ ...IDENTITY_ADVERT, max_processing_ms: 90_000_000 }) }), 'advert_terms', /processing window of 90000000 ms/],
       ['an endpoint without a host', held(liveVault(), { advert: advertUtxo({ ...IDENTITY_ADVERT, endpoint_url: 'not a url' }) }), 'advert_terms', /not a usable URL with a host/],
-      ['a rest below the ledger minimum of the vault output', held(liveVault(), { vaultLovelace: 5_000_000n }), 'below_minimum', /below the \d+ its output needs/],
+      ['a rest below the ledger minimum of the vault output', held(liveVault(), { vaultLovelace: 5_000_000n }), 'below_minimum', /below the [\d.]+ AP3X \(\d+ lovelace\) its output needs/],
     ];
     for (const [why, utxos, reason, words] of cases) {
       const { provider, run } = await decide(utxos);
@@ -396,8 +459,29 @@ describe('buildVaultPay with ledgerDecides (the node evaluates the scripts)', ()
       assert.deepEqual([validator.purpose, validator.index, validator.code], ['spend', 1, refused ? 3012 : 3004], name);
       assert.match(validator.message, refused ? /failed to evaluate to a positive outcome/ : /Unable to create the evaluation context/, name);
       assert.match(validator.detail!, refused ? /The machine terminated because of an error/ : /PastHorizon/, name);
-      assert.deepEqual(validator.traces, [], name);
+      assert.deepEqual(validator.traces, refused ? [] : null, `${name}: the node lists no trace of a validator that ran, and gives no list for an evaluation context that it could not make`);
     }
+  });
+
+  test('an error that the provider cut or dropped is no proof of a failed validator, and its message does not say that none failed', async () => {
+    const cut = (b: ErrorBody) => { validatorsOf(b)[0].error.data.traces = ['x'.repeat(40_000)]; };
+    const dropped = (b: ErrorBody) => { validatorsOf(b)[0].error.data.traces = ['x'.repeat(OGMIOS_ERROR_DATA_INPUT_LIMIT)]; };
+    const raising = async (patch: (b: ErrorBody) => void) => {
+      const { provider, run } = await decide(held());
+      Object.assign(provider, { evaluateTx: async (tx: string) => { provider.evaluations.push(tx); throw await ogmiosRaised(answerOf('above_per_tx', patch)); } });
+      return rejection(run());
+    };
+    for (const [why, patch] of [['cut', cut], ['dropped', dropped]] as const) {
+      const error = await raising(patch);
+      assert.ok(error instanceof VaultPayNotEvaluated, `${why}: ${String(error)}`);
+      assert.match(error.message, /could not read its data in full \(the provider cut it or dropped it\), so it cannot tell whether a validator failed \(3010 /, why);
+      assert.doesNotMatch(error.message, /no validator failed/, why);
+    }
+    const { provider, run } = await decide(held());
+    Object.assign(provider, { evaluateTx: async (tx: string) => { provider.evaluations.push(tx); throw await ogmiosRaised(answerOf('past_horizon')); } });
+    const plain = await rejection(run());
+    assert.ok(plain instanceof VaultPayNotEvaluated);
+    assert.match(plain.message, /The node did not evaluate the scripts of the payment of \d+ lovelace from the vault, and no validator failed \(3010 /, 'the 3004 of the era horizon is read in full');
   });
 
   test('an answer that is no verdict of the node is neither: no answer, a timeout, an answer that is no JSON-RPC error, a body that is null, a node that is down', async () => {
@@ -443,6 +527,87 @@ describe('buildVaultPay with ledgerDecides (the node evaluates the scripts)', ()
     const refused = assertEvidence(await rejection(run()), provider);
     assert.ok(refused.attempt.amountLovelace > MAX_ESCROW_LOVELACE, 'the lock is above the cap');
     await assert.rejects(byDefault(utxos, chainFake({ live: [advertUtxo(rich)], listed: [listedRow()] })), /value cap of an escrow \(F-29\)/);
+    const byDefaultError = await rejection(byDefault(utxos, chainFake({ live: [advertUtxo(rich)], listed: [listedRow()] })));
+    assert.equal((byDefaultError as Error).message,
+      `Advert ${ADVERT_REF} asks for price + both bonds of 10003 AP3X (10003000000 lovelace), above the 10000 AP3X (10000000000 lovelace) value cap of an escrow (F-29): such an escrow cannot be claimed, so it is not built. `
+      + `The vault contract refuses the same payment on chain (Pay: payment + both bonds of an escrow output is at most 10,000 AP3X). ${LEDGER_DECIDES_HINT}`);
+    assert.ok(byDefaultError instanceof EscrowPlanRefusal && byDefaultError.fault === 'value_cap' && skippedByLedgerDecides(byDefaultError), 'the refusal is the value_cap of the planner, which the flag skips');
+  });
+
+  describe('an ancestor delegation that was undelegated: the node judges the draft that lacks it', () => {
+    const referenceInputs = (txCbor: string): string[] => {
+      const refs = CML.Transaction.from_cbor_hex(txCbor).body().reference_inputs()!;
+      return Array.from({ length: refs.len() }, (_, i) => refs.get(i).transaction_id().to_hex());
+    };
+
+    test('the twin with every hop present builds, and the node ran the scripts on it', async () => {
+      const { provider, run } = await decide(twoHopWorld());
+      const built = await run();
+      assert.ok(built.txCbor);
+      assert.ok(provider.evaluations.length >= 1, 'the node evaluated the scripts');
+      assert.ok(referenceInputs(built.txCbor).includes(parentDelegationUtxo().txHash), 'the parent is a reference input');
+    });
+    test('without the parent output: VaultPayRefused by the node, not VaultPayImpossible; the draft holds the chain up to the gap and names the missing parent', async () => {
+      const { provider, run } = await decide(twoHopWorld({ parent: false }));
+      const refused = await rejection(run());
+      assert.ok(refused instanceof VaultPayRefused, `a refusal by the node, not ${String(refused)}`);
+      assert.ok(!(refused instanceof VaultPayImpossible));
+      assert.ok(isLedgerRefusal(refused));
+      assert.deepEqual(refused.attempt.missingParent, { missing: PARENT_ID, child: DELEGATION_ID });
+      assert.equal(provider.evaluations[provider.evaluations.length - 1], refused.draftTx, 'the draft is what the node evaluated');
+      const refs = referenceInputs(refused.draftTx);
+      assert.ok(refs.includes(leafDelegationUtxo().txHash), 'the leaf is a reference input');
+      assert.ok(!refs.includes(parentDelegationUtxo().txHash), 'the missing parent is not');
+    });
+    test('a refusal for another reason does not blame a parent: the chain is whole, and the leaf passes only per_tx', async () => {
+      const tightLeaf = delegationUtxo(delegation({ delegator: MIDDLE_OWNER, parent: PARENT_ID, depth: 2, value: { perTx: 1_000_000n, total: 100_000_000n, periodMs: DAY } }));
+      const world = twoHopWorld().map((u) => (u.txHash === leafDelegationUtxo().txHash ? tightLeaf : u));
+      const { provider, run } = await decide(world);
+      const refused = assertEvidence(await rejection(run()), provider);
+      assert.equal(refused.attempt.missingParent, undefined);
+      assert.ok(refused.attempt.amountLovelace > refused.attempt.limit.perTx);
+    });
+    test('at a gap the record of the delegator of the last link is not read: the node still judges the draft; the same world with the parent needs that record', async () => {
+      const withoutMiddleRecord = (utxos: UTxO[]): UTxO[] => utxos.filter((u) => u.assets[`${DEPLOYMENT.identity.hash}${MIDDLE_ID}`] === undefined);
+      const gap = await decide(withoutMiddleRecord(twoHopWorld({ parent: false })));
+      const refused = await rejection(gap.run());
+      assert.ok(refused instanceof VaultPayRefused, `a refusal by the node, not ${String(refused)}`);
+      assert.deepEqual(refused.attempt.missingParent, { missing: PARENT_ID, child: DELEGATION_ID });
+      const whole = await decide(withoutMiddleRecord(twoHopWorld()));
+      const impossible = await rejection(whole.run());
+      assert.ok(impossible instanceof VaultPayImpossible && impossible.reason === 'no_delegation', String(impossible));
+      assert.match(impossible.message, /No record of the delegate for did:vector:a1a1/);
+      assert.equal(whole.provider.evaluations.length, 0);
+    });
+    test('without the option a gap is an error of old: the plain message, no VaultPayImpossible, nothing asked of the node', async () => {
+      const error = await rejection(byDefault(twoHopWorld({ parent: false })));
+      assert.ok(error instanceof ChainGapError && !(error instanceof VaultPayImpossible) && !(error instanceof VaultPayEvaluationError), 'the typed error of the gap');
+      assert.deepEqual(error.gap, { missing: PARENT_ID, child: DELEGATION_ID });
+      assert.equal(error.message, `The parent delegation ${PARENT_ID} of ${DELEGATION_ID} no longer exists (undelegated), so the chain cannot be used.`);
+    });
+    test('a missing delegation of the vault itself stays impossible: nothing says which delegate key it names', async () => {
+      const { provider, run } = await decide(twoHopWorld().filter((u) => u.txHash !== leafDelegationUtxo().txHash && u.txHash !== parentDelegationUtxo().txHash));
+      const error = await rejection(run());
+      assert.ok(error instanceof VaultPayImpossible && error.reason === 'no_delegation', String(error));
+      assert.match(error.message, /No live delegation/);
+      assert.equal(provider.evaluations.length, 0);
+    });
+    test('the chain lookup: a gap ends the chain and is named; a whole chain has none; a missing delegation of the id is an error', async () => {
+      const provider = identityWorld(twoHopWorld({ parent: false }));
+      const gap = await delegationChainToGap(provider, DEPLOYMENT, DELEGATION_ID);
+      assert.deepEqual([gap.chain.map((link) => link.id), gap.gap], [[DELEGATION_ID], { missing: PARENT_ID, child: DELEGATION_ID }]);
+      const whole = await delegationChainToGap(identityWorld(twoHopWorld()), DEPLOYMENT, DELEGATION_ID);
+      assert.deepEqual([whole.chain.map((link) => link.id), whole.gap], [[DELEGATION_ID, PARENT_ID], null]);
+      await assert.rejects(delegationChainToGap(provider, DEPLOYMENT, 'ee'.repeat(32)), (err: Error) => err.message === `No live delegation ${'ee'.repeat(32)}: it does not exist or has been undelegated.`);
+      await assert.rejects(delegationChain(provider, DEPLOYMENT, DELEGATION_ID), (err: Error) => err instanceof ChainGapError && err.message === `The parent delegation ${PARENT_ID} of ${DELEGATION_ID} no longer exists (undelegated), so the chain cannot be used.`);
+    });
+    test('at a gap the last link is no root: the record of its delegator agent is not read, and it is read at a root', async () => {
+      const ghost = 'cc'.repeat(32);
+      const provider = identityWorld([delegationUtxo(delegation({ delegator: { type: 'Agent', id: ghost }, parent: PARENT_ID, depth: 2 })), delegateRecord()]);
+      const { chain } = await delegationChainToGap(provider, DEPLOYMENT, DELEGATION_ID);
+      await assert.rejects(chainRecords(provider, DEPLOYMENT, chain), /No record of the delegator for did:vector:cccc/);
+      assert.deepEqual((await chainRecords(provider, DEPLOYMENT, chain, false)).map((r) => r.id), [DELEGATE_ID]);
+    });
   });
 
   test('the payload is an input, not a fact about the advert: an empty one is an ordinary error', async () => {
@@ -493,13 +658,13 @@ describe('judgeEvaluation and isLedgerRefusal, against the errors that OgmiosPro
     assert.equal(await kindOf(rpc(3003, 'The node is too far behind.', 200, 'OK')), 'not_evaluated');
     assert.equal(await kindOf(rpc(-32602, 'Invalid transaction', 400, 'Bad Request')), 'not_evaluated');
   });
-  test('an entry that is not in the shape of Ogmios is left out, a text that is not JSON is no validator, and the traces keep only their texts', async () => {
+  test('an entry that is not in the shape of Ogmios is left out, and a text that is not JSON is no validator', async () => {
     const entry = (patch: (e: ValidatorBody) => void) => (b: ErrorBody) => {
       const good = validatorsOf(b)[0];
       const bad = structuredClone(good);
       patch(bad);
       b.error.data = [bad, good, structuredClone(good)];
-      validatorsOf(b)[2].error.data.traces = ['first', 7, 'second'];
+      validatorsOf(b)[2].error.data.traces = ['first', 'second'];
     };
     const wrong: Array<[string, (e: ValidatorBody) => void]> = [
       ['no purpose', (e) => { delete (e.validator as Partial<ValidatorBody['validator']>).purpose; }],
@@ -514,6 +679,17 @@ describe('judgeEvaluation and isLedgerRefusal, against the errors that OgmiosPro
     }
     const text = judgeEvaluation(await ogmiosRaised(new Response(JSON.stringify({ error: { code: 3010, message: 'm', data: 'not a list' } }), { status: 400 })));
     assert.deepEqual([text.kind, text.validators], ['not_evaluated', []]);
+  });
+  test('the traces are null unless the node gave a list of texts: no list, a text, a list of other values, a list with more than texts; an empty list stays empty', async () => {
+    const tracesOf = async (set: (data: { traces?: unknown }) => void) =>
+      judgeEvaluation(await ogmiosRaised(answerOf('above_per_tx', (b) => { set(validatorsOf(b)[0].error.data); }))).validators[0].traces;
+    assert.deepEqual(await tracesOf((data) => { data.traces = []; }), []);
+    assert.deepEqual(await tracesOf((data) => { data.traces = ['a', 'b']; }), ['a', 'b']);
+    assert.equal(await tracesOf((data) => { delete data.traces; }), null, 'no list');
+    assert.equal(await tracesOf((data) => { data.traces = 'one trace'; }), null, 'a text');
+    assert.equal(await tracesOf((data) => { data.traces = [{ x: 1 }, 42]; }), null, 'a list of other values');
+    assert.equal(await tracesOf((data) => { data.traces = ['first', 7, 'second']; }), null, 'a list with more than texts');
+    assert.equal(await tracesOf((data) => { data.traces = null; }), null, 'null');
   });
   test('no answer, an answer that is unreadable, and a status without a JSON-RPC error are no answer of the node', async () => {
     assert.equal(await kindOf(new Error('fetch failed')), 'no_answer');

@@ -36,7 +36,7 @@ import { plutusAddressFromBech32, plutusAddressToBech32, utf8Hex } from './ident
 import type { Status } from './identity-codec.js';
 import { readRefScript } from './identity-deployment.js';
 import type { IdentityDeployment } from './identity-deployment.js';
-import { didOf, findRecord, signedByResult, windowAt, SignerList } from './identity-chain.js';
+import { ap3xText, chainRefuses, didOf, findRecord, LEDGER_DECIDES_HINT, signedByResult, windowAt, SignerList } from './identity-chain.js';
 import type { RecordUtxo, SignedByBuild, Window } from './identity-chain.js';
 import { MAX_RANGE_MS, PURPOSE, activeKey, effectiveStatus, hasCapability } from './identity-rules.js';
 
@@ -53,8 +53,12 @@ const errorText = (err: unknown) => (err instanceof Error ? err.message : String
 const ErrorWithCause = Error as new (message?: string, options?: { cause?: unknown }) => Error;
 /** ISO text for error messages; a datum can hold a time no Date can represent, and that must not replace the real message with a RangeError. */
 const iso = (ms: number) => { const d = new Date(ms); return Number.isNaN(d.getTime()) ? String(ms) : d.toISOString(); };
-/** AP3X text of a lovelace amount, for refusals. */
-const ap3x = (lovelace: bigint): string => `${lovelace / 1_000_000n}.${(lovelace % 1_000_000n).toString().padStart(6, '0')}`;
+/** The sentence that says that the escrow contract refuses the same spend on chain, and by which rule of which redeemer. */
+const escrowRefuses = (redeemer: string, rule: string): string => chainRefuses('escrow', redeemer, rule);
+/** The words that end each refusal of the listing rule on chain: the builder refuses, no contract does, and what the payment would cost. */
+const LISTING_RULE_NOTE = 'The builder refuses this. No contract checks it when the payment lands, but the agent could not claim the job as things stand, so the funds could stay locked until deliver_by.';
+/** The words that end the refusal of an advert that the indexer does not list: the builder refuses, no contract does, and what the payment could cost. */
+const INDEXER_NOTE = 'The builder refuses this. No contract checks the listing when the payment lands. A supplier may not serve the job of an advert that is not listed, and then the funds stay locked until deliver_by.';
 
 // ─── Post ───────────────────────────────────────────────────────────────────
 
@@ -129,15 +133,26 @@ function endpointHostOf(endpointUrl: string, advertRef: string): string {
   return host;
 }
 
+/** Who enforces the value cap of an escrow in the plan that is refused: the vault Pay, the identity escrow at its Claim, or no contract (the legacy escrow). */
+type CapLayout = 'vault' | 'identity' | 'legacy';
+
 /**
  * The value cap F-29 (Part 2 Sections 6.1 and 6.5): payment + buyer bond + supplier bond of an escrow is at most 10,000 AP3X. An
  * identity-marketplace escrow above it cannot be claimed and returns to the buyer only by Reclaim after deliver_by, and the indexer
- * does not list such an advert; a Post builder refuses to build one in either layout.
+ * does not list such an advert; a Post builder refuses to build one in either layout. The text says who refuses, by `layout`. The vault
+ * contract enforces the cap on each escrow output of a Pay (`vault`): the text says so, and says how to let the node judge it. The
+ * identity escrow contract enforces it when it claims an escrow (`identity`, a direct Post): the chain does not refuse the Post itself,
+ * and the text says that the Claim is refused. The legacy escrow contract has no value cap (`legacy`): only the builder refuses.
  */
-function assertWithinCap(advertRef: string, economic: bigint): void {
-  if (economic > MAX_ESCROW_LOVELACE) {
-    throw new EscrowPlanRefusal('value_cap', `Advert ${advertRef} asks for price + both bonds of ${ap3x(economic)} AP3X, above the ${ap3x(MAX_ESCROW_LOVELACE)} AP3X value cap of an escrow (F-29): such an escrow cannot be claimed, so it is not built.`);
-  }
+function assertWithinCap(advertRef: string, economic: bigint, layout: CapLayout): void {
+  if (economic <= MAX_ESCROW_LOVELACE) return;
+  const asks = `Advert ${advertRef} asks for price + both bonds of ${ap3xText(economic)}, above the ${ap3xText(MAX_ESCROW_LOVELACE)} value cap of an escrow (F-29)`;
+  const refusal: Record<CapLayout, string> = {
+    vault: `${asks}: such an escrow cannot be claimed, so it is not built. ${chainRefuses('vault', 'Pay', 'payment + both bonds of an escrow output is at most 10,000 AP3X', 'payment')} ${LEDGER_DECIDES_HINT}`,
+    identity: `${asks}: such an escrow cannot be claimed, so it is not built. The escrow contract refuses to claim an escrow above the cap on chain (Claim: payment + both bonds is at most 10,000 AP3X).`,
+    legacy: `${asks}. The builder refuses to build it. The legacy escrow contract has no value cap.`,
+  };
+  throw new EscrowPlanRefusal('value_cap', refusal[layout]);
 }
 
 /**
@@ -225,7 +240,7 @@ function escrowPlanAt(
     } catch (err) { throw unfit(errorText(err)); }
     datum = identityDatum;
   }
-  if (capped) assertWithinCap(advertRef, economic);
+  if (capped) assertWithinCap(advertRef, economic, identity === undefined ? 'legacy' : exactLock ? 'vault' : 'identity');
   return {
     datum, datumHex, layout: identity === undefined ? 'legacy' : 'identity', lockLovelace, deliverBy: times.deliverBy, validTo: times.validTo,
     supplierPkh: advert.supplier_pkh, endpointHost: times.endpointHost, capabilityId: advert.capability_id,
@@ -270,7 +285,7 @@ export function assertEscrowIsOutputZero(txCbor: string, expected: { datumHex: s
 async function assertAdvertAuthor(advertRef: string, creatingTxHash: string, supplierPkh: string, fetchImpl: typeof fetch): Promise<void> {
   let creds: string[];
   try { creds = await koiosTxInputCreds(VECTOR_KOIOS_URL, creatingTxHash, fetchImpl); } catch (err) { throw new Error(`Could not check who created advert ${advertRef}: ${errorText(err)}`); }
-  if (!creds.includes(supplierPkh)) throw new Error(`Advert ${advertRef} was not created by its supplier key: no input of the transaction that created it belongs to ${supplierPkh}. Refusing to hire it.`);
+  if (!creds.includes(supplierPkh)) throw new Error(`Advert ${advertRef} was not created by its supplier key: no input of the transaction that created it belongs to ${supplierPkh}. Refusing to hire it. This is a rule of the builder, not of a contract.`);
 }
 
 /** An advert that a Post (or a vault payment) may hire: read from Koios, unspent, with text fields that round-trip, of a template-contract capability. */
@@ -283,7 +298,7 @@ export type HireableAdvert = Exclude<AdvertRead, { error: string }> & { ref: str
  */
 export function fleetAdvertRefusal(ref: string, capabilityId: string): string | null {
   return isFleetCapability(capabilityId)
-    ? `Advert ${ref} serves ${cell(capabilityId)}, a fleet capability (llm.text.generate.*, llm.chat.*, ocr.page.extract.* or audio.synthesize.*). vector_marketplace_send_job serves template-contract suppliers only in this release, so the job could never be sent and the lock would wait for a Reclaim after deliver_by. Pick a template-contract supplier.`
+    ? `Advert ${ref} serves ${cell(capabilityId)}, a fleet capability (llm.text.generate.*, llm.chat.*, ocr.page.extract.* or audio.synthesize.*). vector_marketplace_send_job serves template-contract suppliers only in this release, so the job could never be sent and the lock would wait for a Reclaim after deliver_by. Pick a template-contract supplier. The builder refuses this advert; no contract rule is involved.`
     : null;
 }
 
@@ -337,8 +352,8 @@ export async function readAdvertFromNode(
 export async function assertIndexerLists(advertRef: string, agentId: string, fetchImpl: typeof fetch): Promise<void> {
   let row: SupplierRow | null;
   try { row = await listedAdvertRow(advertRef, { fetchImpl }); } catch (err) { throw new Error(`Could not ask the marketplace indexer whether advert ${advertRef} is listed: ${errorText(err)}`); }
-  if (row === null) throw new Error(`Advert ${advertRef} is not listed by the marketplace indexer: an identity-marketplace advert is listed only when its supplier key signed it and its agent passes the listing rule (Part 2 Section 6.2). Refusing to hire it.`);
-  if (rowAgentId(row) !== agentId) throw new Error(`The marketplace indexer lists advert ${advertRef} with another agent than the one its datum names; refusing to hire it.`);
+  if (row === null) throw new Error(`Advert ${advertRef} is not listed by the marketplace indexer: an identity-marketplace advert is listed only when its supplier key signed it and its agent passes the listing rule (Part 2 Section 6.2). Refusing to hire it. ${INDEXER_NOTE}`);
+  if (rowAgentId(row) !== agentId) throw new Error(`The marketplace indexer lists advert ${advertRef} with another agent than the one its datum names; refusing to hire it. The builder refuses this: it is a rule of the builder, not of a contract.`);
 }
 
 /**
@@ -349,13 +364,13 @@ export async function assertIndexerLists(advertRef: string, agentId: string, fet
 export async function checkListingRule(provider: Provider, deployment: IdentityDeployment, advert: IdentityAdvertDatum, advertRef: string, window: Window): Promise<RecordUtxo> {
   const agent = didOf(advert.agent_id);
   const found = await findRecord(provider, deployment, advert.agent_id);
-  if (!found) throw new Error(`The agent ${agent} of advert ${advertRef} has no record in the identity registry, so the advert is not listed (Part 2 Section 6.2).`);
+  if (!found) throw new Error(`The agent ${agent} of advert ${advertRef} has no record in the identity registry, so the advert is not listed (Part 2 Section 6.2). ${LISTING_RULE_NOTE}`);
   const record = found.record;
-  if (record.lineage.type !== 'Root') throw new Error(`The agent ${agent} of advert ${advertRef} is a subagent; only an independent agent can take work (listing rule, Part 2 Section 6.2).`);
+  if (record.lineage.type !== 'Root') throw new Error(`The agent ${agent} of advert ${advertRef} is a subagent; only an independent agent can take work (listing rule, Part 2 Section 6.2). ${LISTING_RULE_NOTE}`);
   const status = effectiveStatus(record, new Map(), window.lo, window.hi);
-  if (status !== 'Active') throw new Error(`The agent ${agent} of advert ${advertRef} is ${status}; only an Active agent can take work (listing rule, Part 2 Section 6.2).`);
-  if (!activeKey(record, advert.supplier_pkh, PURPOSE.transaction)) throw new Error(`The record of ${agent} does not list the supplier key ${advert.supplier_pkh} of advert ${advertRef} with the transaction purpose, so the agent could not claim the job (listing rule, Part 2 Section 6.2).`);
-  if (!hasCapability(record, utf8Hex(advert.capability_id))) throw new Error(`The record of ${agent} does not list the capability ${cell(advert.capability_id)} of advert ${advertRef}, so the agent could not claim the job (listing rule, Part 2 Section 6.2).`);
+  if (status !== 'Active') throw new Error(`The agent ${agent} of advert ${advertRef} is ${status}; only an Active agent can take work (listing rule, Part 2 Section 6.2). ${LISTING_RULE_NOTE}`);
+  if (!activeKey(record, advert.supplier_pkh, PURPOSE.transaction)) throw new Error(`The record of ${agent} does not list the supplier key ${advert.supplier_pkh} of advert ${advertRef} with the transaction purpose, so the agent could not claim the job (listing rule, Part 2 Section 6.2). ${LISTING_RULE_NOTE}`);
+  if (!hasCapability(record, utf8Hex(advert.capability_id))) throw new Error(`The record of ${agent} does not list the capability ${cell(advert.capability_id)} of advert ${advertRef}, so the agent could not claim the job (listing rule, Part 2 Section 6.2). ${LISTING_RULE_NOTE}`);
   return found;
 }
 
@@ -364,9 +379,9 @@ export async function checkListingRule(provider: Provider, deployment: IdentityD
 /** The escrow switch as the tool texts and the refusals name it. */
 export const ESCROW_SWITCH_NAME = `the escrow switch (slot ${ESCROW_SWITCH_SLOT}, ${ESCROW_SWITCH_AT})`;
 /** The refusal of a new legacy-layout advert from the escrow switch on (buildPostAdvert, vector_build_marketplace_post_advert). */
-export const LEGACY_ADVERT_REFUSAL = `From ${ESCROW_SWITCH_NAME} on, new adverts use the identity layout only, so no new legacy-layout advert is built. Post an identity-layout advert with vector_build_marketplace_advert_post: it names the agent (did:vector) whose record lists your supplier key and the capability. To take a legacy advert off the market and get its deposit back, use vector_build_marketplace_advert_retire.`;
+export const LEGACY_ADVERT_REFUSAL = `From ${ESCROW_SWITCH_NAME} on, new adverts use the identity layout only, so no new legacy-layout advert is built. Post an identity-layout advert with vector_build_marketplace_advert_post: it names the agent (did:vector) whose record lists your supplier key and the capability. To take a legacy advert off the market and get its deposit back, use vector_build_marketplace_advert_retire. The builder refuses this; no contract rule is involved.`;
 /** The refusal of a new escrow on the legacy-layout advert `advertRef` from the escrow switch on (buildPostEscrow). */
-export const legacyEscrowRefusal = (advertRef: string): string => `Advert ${advertRef} has the legacy layout (it names no agent DID). From ${ESCROW_SWITCH_NAME} on, new escrows go to identity-layout adverts only, so no new escrow is built for it. Hire an advert that names an agent (vector_marketplace_list_suppliers shows its DID) with vector_build_marketplace_post_escrow, or ask the supplier to post one with vector_build_marketplace_advert_post. Escrows posted before the switch keep their Accept, Reclaim and Release.`;
+export const legacyEscrowRefusal = (advertRef: string): string => `Advert ${advertRef} has the legacy layout (it names no agent DID). From ${ESCROW_SWITCH_NAME} on, new escrows go to identity-layout adverts only, so no new escrow is built for it. Hire an advert that names an agent (vector_marketplace_list_suppliers shows its DID) with vector_build_marketplace_post_escrow, or ask the supplier to post one with vector_build_marketplace_advert_post. Escrows posted before the switch keep their Accept, Reclaim and Release. The builder refuses this; no contract rule is involved.`;
 
 /**
  * Whether the node's tip has reached the escrow switch, decided as the agents-marketplace gateway decides it: the slot of the tip is at
@@ -476,10 +491,10 @@ export function supplierPayoutRaised(priceLovelace: bigint, supplierBondLovelace
 // A payout below the minimum output cannot exist, so it is raised to MIN_UTXO_LOVELACE and the plan says so (`...Raised`): the
 // signer is shown more than the datum owes, and the difference is not free. `supplierPkh` is the key the datum names.
 export function planAccept(datum: EscrowDatum, callerPkh: string, nowMs: number) {
-  if (datum.buyer_pkh !== callerPkh) throw new Error('This escrow was posted by another key; you are not the buyer.');
-  if (datum.state !== 'Submitted' || datum.submitted_at === null) throw new Error(`Escrow state is ${datum.state}; Accept needs Submitted.`);
+  if (datum.buyer_pkh !== callerPkh) throw new Error(`This escrow was posted by another key; you are not the buyer. ${escrowRefuses('Accept', 'the buyer key signs')}`);
+  if (datum.state !== 'Submitted' || datum.submitted_at === null) throw new Error(`Escrow state is ${datum.state}; Accept needs Submitted. ${escrowRefuses('Accept', 'the state is Submitted')}`);
   const validTo = datum.submitted_at + ACCEPT_WINDOW_MS;
-  if (nowMs > validTo) throw new Error(`Accept window closed at ${iso(validTo)}; the supplier may now Release.`);
+  if (nowMs > validTo) throw new Error(`Accept window closed at ${iso(validTo)}; the supplier may now Release. ${escrowRefuses('Accept', 'the validity range ends at most 600 s after the Submit')}`);
   const supplierDue = datum.payment_lovelace + datum.supplier_bond_lovelace;
   const supplierRaised = supplierPayoutRaised(datum.payment_lovelace, datum.supplier_bond_lovelace);
   const buyerRaised = datum.buyer_bond_lovelace < MIN_UTXO_LOVELACE;
@@ -503,7 +518,7 @@ const opensAfter = (threshold: number): number => Math.ceil((threshold + 1) / 10
  * is no closing deadline in the validator, so the upper bound leaves ten minutes for a person to sign.
  */
 export function planReclaim(datum: EscrowDatum, callerPkh: string, nowMs: number) {
-  if (datum.buyer_pkh !== callerPkh) throw new Error('This escrow was posted by another key; you are not the buyer.');
+  if (datum.buyer_pkh !== callerPkh) throw new Error(`This escrow was posted by another key; you are not the buyer. ${escrowRefuses('Reclaim', 'without a refund address, the buyer key signs')}`);
   return reclaimTiming(datum, nowMs, (due) => {
     const buyerRaised = due < MIN_UTXO_LOVELACE;
     return { buyerLovelace: buyerRaised ? MIN_UTXO_LOVELACE : due, buyerRaised };
@@ -512,9 +527,9 @@ export function planReclaim(datum: EscrowDatum, callerPkh: string, nowMs: number
 
 /** The state and timing rules of Reclaim, shared by the buyer's Reclaim and anybody's Reclaim of an escrow with a refund address. */
 function reclaimTiming<T>(datum: EscrowDatum, nowMs: number, payout: (due: bigint) => T) {
-  if (datum.state !== 'Open' && datum.state !== 'Claimed') throw new Error(`Escrow state is ${datum.state}; Reclaim needs Open or Claimed.`);
+  if (datum.state !== 'Open' && datum.state !== 'Claimed') throw new Error(`Escrow state is ${datum.state}; Reclaim needs Open or Claimed. ${escrowRefuses('Reclaim', 'the state is Open or Claimed')}`);
   const opens = opensAfter(datum.deliver_by);
-  if (nowMs < opens) throw new Error(`Reclaim opens at ${iso(opens)}: deliver_by is ${iso(datum.deliver_by)}, and the validity range may start only on a whole second after it.`);
+  if (nowMs < opens) throw new Error(`Reclaim opens at ${iso(opens)}: deliver_by is ${iso(datum.deliver_by)}, and the validity range may start only on a whole second after it. ${escrowRefuses('Reclaim', 'the validity range starts at or after deliver_by')}`);
   const due = datum.payment_lovelace + datum.buyer_bond_lovelace + datum.supplier_bond_lovelace;
   return {
     supplierPkh: datum.supplier_pkh, ...payout(due),
@@ -529,11 +544,11 @@ function reclaimTiming<T>(datum: EscrowDatum, nowMs: number, payout: (due: bigin
  * after deliver_by) and closes at `window.hi`.
  */
 export function planRelease(datum: EscrowDatum, callerPkh: string, nowMs: number, window: Window) {
-  if (datum.supplier_pkh !== callerPkh) throw new Error('This escrow was posted for another supplier key; you are not its supplier.');
-  if (datum.state !== 'Submitted' || datum.submitted_at === null) throw new Error(`Escrow state is ${datum.state}; Release needs Submitted.`);
+  if (datum.supplier_pkh !== callerPkh) throw new Error(`This escrow was posted for another supplier key; you are not its supplier. ${escrowRefuses('Release', 'the supplier key signs')}`);
+  if (datum.state !== 'Submitted' || datum.submitted_at === null) throw new Error(`Escrow state is ${datum.state}; Release needs Submitted. ${escrowRefuses('Release', 'the state is Submitted')}`);
   const windowEnds = datum.submitted_at + ACCEPT_WINDOW_MS;
   const opens = opensAfter(windowEnds);
-  if (nowMs < opens) throw new Error(`Release opens at ${iso(opens)}: the buyer may accept until ${iso(windowEnds)}, 600 s after the Submit, and the validity range may start only on a whole second after that.`);
+  if (nowMs < opens) throw new Error(`Release opens at ${iso(opens)}: the buyer may accept until ${iso(windowEnds)}, 600 s after the Submit, and the validity range may start only on a whole second after that. ${escrowRefuses('Release', 'the validity range starts at or after the end of the accept window')}`);
   const due = datum.payment_lovelace + datum.supplier_bond_lovelace + datum.buyer_bond_lovelace;
   const supplierRaised = due < MIN_UTXO_LOVELACE;
   return {
@@ -585,14 +600,14 @@ async function escrowRefScript(provider: Provider): Promise<UTxO> {
 /** Lucid picks the collateral itself. This only turns a wallet with nothing suitable into a readable refusal instead of a ledger error. */
 export function assertCollateral(utxos: UTxO[]) {
   if (!utxos.some((u) => Object.keys(u.assets).every((k) => k === 'lovelace') && u.assets.lovelace >= COLLATERAL_MIN_LOVELACE)) {
-    throw new Error('Collateral required: the wallet must hold one pure output of at least 5 units.');
+    throw new Error('Collateral required: the wallet must hold one pure output of at least 5 units. The builder refuses to build without it: the ledger needs collateral for a transaction that runs a script.');
   }
 }
 
 /** The payout goes to changeAddress but Lucid sends its own change to the wallet it is bound to: the two must be one address, or the buyer's money would be paid out to two places. */
 export async function assertWalletIs(lucid: LucidEvolution, changeAddress: string): Promise<void> {
   if ((await lucid.wallet().address()) !== changeAddress) {
-    throw new Error('changeAddress is not the address this wallet is bound to: the payout would go to changeAddress but Lucid\'s change to the wallet\'s own address, so nothing was built. Bind the wallet to changeAddress.');
+    throw new Error('changeAddress is not the address this wallet is bound to: the payout would go to changeAddress but Lucid\'s change to the wallet\'s own address, so nothing was built. Bind the wallet to changeAddress. This is a check of the builder, not of a contract.');
   }
 }
 
@@ -686,7 +701,7 @@ async function buildEscrowSpend<T>(
   };
   let decision: SpendDecision<T>;
   try { decision = await decide(live); } catch (err) { throw new Error(`${errorText(err)} (escrow ${escrow})`); }
-  if (layout === 'identity' && decision.validTo - decision.validFrom > MAX_RANGE_MS) throw new Error(`The validity range would be longer than one hour, which the escrow refuses (Part 2 Section 6.1); nothing was built. (escrow ${escrow})`);
+  if (layout === 'identity' && decision.validTo - decision.validFrom > MAX_RANGE_MS) throw new Error(`The validity range would be longer than one hour (Part 2 Section 6.1); nothing was built. ${escrowRefuses('every redeemer', 'the validity range is at most one hour')} (escrow ${escrow})`);
   let zeroTime: number;
   // A clock that is not a number is said as what it is (ChainClockError carries nothing the node said); any other failure is a node failure.
   try { zeroTime = await ensureSlotConfig(provider as unknown as SlotClockProvider); } catch (err) {
@@ -837,11 +852,11 @@ export async function buildRefundRevoked(lucid: LucidEvolution, provider: Provid
   : Promise<EscrowSpendBuild & RefundTerms> {
   const { build, terms } = await buildEscrowSpend(lucid, provider, koiosUrl, p, fetchImpl, async (live) => {
     const { datum } = live;
-    if (!isIdentityEscrow(datum) || live.deployment === null) throw new Error('RefundRevoked exists only for identity-marketplace escrows (Part 2 Section 6.1); a legacy escrow returns its funds by Reclaim after deliver_by.');
+    if (!isIdentityEscrow(datum) || live.deployment === null) throw new Error('RefundRevoked exists only for identity-marketplace escrows (Part 2 Section 6.1); a legacy escrow returns its funds by Reclaim after deliver_by. The legacy escrow contract has no such redeemer, so the chain refuses it.');
     const found = await findRecord(provider, live.deployment, datum.agent_id);
-    if (!found) throw new Error(`The agent ${didOf(datum.agent_id)} of the escrow has no record in the identity registry, so RefundRevoked cannot show its status.`);
+    if (!found) throw new Error(`The agent ${didOf(datum.agent_id)} of the escrow has no record in the identity registry, so RefundRevoked cannot show its status. ${escrowRefuses('RefundRevoked', 'the record of the agent is a reference input')}`);
     const why = refundRevokedRefusal(datum, found.record.status);
-    if (why !== null) throw new Error(`RefundRevoked is not allowed: ${why}.`);
+    if (why !== null) throw new Error(`RefundRevoked is not allowed: ${why}. ${escrowRefuses('RefundRevoked', 'refund_allowed')}`);
     const window = windowAt(live.nowMs, live.validMinutes);
     const refund = payoutOf(live, buyerPayoutTo(datum, enterpriseAddressOf(datum.buyer_pkh)), live.utxo.assets.lovelace, otherAssetsOf(live.utxo));
     return {

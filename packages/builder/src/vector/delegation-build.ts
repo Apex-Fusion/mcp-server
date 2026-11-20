@@ -12,7 +12,7 @@ import type { DelegationDatum, Delegator, IdentityDatum, ValueLimit } from './id
 import { readRefScript } from './identity-deployment.js';
 import type { IdentityDeployment } from './identity-deployment.js';
 import {
-  chainClock, chainRecords, delegationChain, didOf, findDelegation, findRecord, identifierFromSeed, recordWithAncestors, recordsById,
+  ap3xText, chainClock, chainRecords, chainRefuses, delegationChain, didOf, findDelegation, findRecord, identifierFromSeed, recordWithAncestors, recordsById,
   seedFrom, signedByResult, uniqueUtxos, walletOf, windowAt, SignerList,
 } from './identity-chain.js';
 import type { DelegationUtxo, RecordUtxo, SignedByBuild, Window } from './identity-chain.js';
@@ -24,6 +24,8 @@ import { ledgerMinLovelace } from './attestation-build.js';
 
 const byteLength = (hex: string): number => hex.length / 2;
 const validTime = (t: number): boolean => Number.isSafeInteger(t) && t >= 0 && t <= MAX_TIME_MS;
+/** The sentence that says that the delegation contract refuses the same Delegate on chain, and by which rule. */
+const delegateRefuses = (rule: string): string => chainRefuses('delegation', 'Delegate', rule);
 
 // ─── Patterns (Part 2 Section 5.1; port of delegation/pattern.ak) ──────────────────────────────────────────────────────────────
 // The functions take UTF-8 text and work on its bytes, as the contract does. A datum holds the patterns as hex: patternsOf decodes them.
@@ -188,10 +190,10 @@ export function narrowingProblems(child: DelegationDatum, parent: DelegationDatu
   if (parent.value !== null) {
     const p = parent.value;
     const c = child.value;
-    if (c === null) problems.push(`the parent has a value limit (per_tx ${p.perTx}, total ${p.total}, period_ms ${p.periodMs}), so the child needs one within it`);
+    if (c === null) problems.push(`the parent has a value limit (per_tx ${ap3xText(p.perTx)}, total ${ap3xText(p.total)}, period_ms ${p.periodMs}), so the child needs one within it`);
     else {
-      if (c.perTx > p.perTx) problems.push(`per_tx (${c.perTx}) must be at most the parent's (${p.perTx})`);
-      if (c.total > p.total) problems.push(`total (${c.total}) must be at most the parent's (${p.total})`);
+      if (c.perTx > p.perTx) problems.push(`per_tx ${ap3xText(c.perTx)} must be at most the parent's ${ap3xText(p.perTx)}`);
+      if (c.total > p.total) problems.push(`total ${ap3xText(c.total)} must be at most the parent's ${ap3xText(p.total)}`);
       if (c.periodMs < p.periodMs) problems.push(`period_ms (${c.periodMs}) must be at least the parent's (${p.periodMs})`);
     }
   }
@@ -268,9 +270,16 @@ export async function liveDelegations(provider: Provider, deployment: IdentityDe
 /** The key hashes that `record` lists with the delegation purpose. */
 const delegationKeysOf = (record: IdentityDatum): string[] => record.keys.filter((k) => keyHasPurpose(k, PURPOSE.delegation)).map((k) => keyHashOf(k.key));
 
+/** The most delegation keys that a refusal lists. A record holds up to 8. The tool cuts a message at 800 characters, and the sentence about who refuses must stay whole. */
+const MOST_KEYS_LISTED = 4;
+
+/** The key hashes for a refusal: at most MOST_KEYS_LISTED, then how many more there are. An empty string for no key. */
+const keysText = (keys: string[]): string =>
+  keys.length <= MOST_KEYS_LISTED ? keys.join(', ') : `${keys.slice(0, MOST_KEYS_LISTED).join(', ')} and ${keys.length - MOST_KEYS_LISTED} more`;
+
 function requireActive(record: IdentityDatum, byId: ReadonlyMap<string, IdentityDatum>, window: Window, who: string): void {
   const status = effectiveStatus(record, byId, window.lo, window.hi);
-  if (status !== 'Active') throw new Error(`${who} is ${status}; it must be Active (Part 2 Section 5.2).`);
+  if (status !== 'Active') throw new Error(`${who} is ${status}; it must be Active (Part 2 Section 5.2). ${delegateRefuses('the delegator and the delegate are Active')}`);
 }
 
 // ─── Delegate (Part 2 Section 5.2) ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -341,16 +350,16 @@ export async function buildDelegate(ctx: IdentityContext, p: DelegateParams): Pr
     parent = chain[0];
     const agentId = parent.delegation.delegate;
     if (p.delegator !== undefined && !(p.delegator.type === 'Agent' && p.delegator.id.toLowerCase() === agentId)) {
-      throw new Error(`The delegator of a sub-delegation is the delegate of its parent: ${didOf(agentId)} for the parent ${parent.id} (Part 2 Section 5.2).`);
+      throw new Error(`The delegator of a sub-delegation is the delegate of its parent: ${didOf(agentId)} for the parent ${parent.id} (Part 2 Section 5.2). ${delegateRefuses('the delegator of a sub-delegation is the delegate of its parent')}`);
     }
-    if (parent.delegation.remaining < 1) throw new Error(`The parent delegation ${parent.id} allows no further hop (remaining 0), so it cannot have a sub-delegation.`);
+    if (parent.delegation.remaining < 1) throw new Error(`The parent delegation ${parent.id} allows no further hop (remaining 0), so it cannot have a sub-delegation. ${delegateRefuses('the parent has remaining of at least 1')}`);
     const records = await chainRecords(provider, deployment, chain);
     const byId = recordsById(records);
     const agent = byId.get(agentId);
     if (!agent) throw new Error(`The record of the delegator ${didOf(agentId)} is missing.`);
     requireActive(agent, byId, window, `The delegator ${didOf(agentId)}`);
     if (!activeKey(agent, parent.delegation.delegateKey, PURPOSE.delegation)) {
-      throw new Error(`${didOf(agentId)} no longer lists the delegate key ${parent.delegation.delegateKey} of the parent delegation ${parent.id} with the delegation purpose, so that key cannot sign a sub-delegation (Part 2 Section 5.2).`);
+      throw new Error(`${didOf(agentId)} no longer lists the delegate key ${parent.delegation.delegateKey} of the parent delegation ${parent.id} with the delegation purpose, so that key cannot sign a sub-delegation (Part 2 Section 5.2). ${delegateRefuses('active_key: the delegator lists the delegate key of the parent')}`);
     }
     delegator = { type: 'Agent', id: agentId };
     signers.add(parent.delegation.delegateKey, `delegate key of the parent delegation ${parent.id} (${didOf(agentId)})`);
@@ -370,7 +379,7 @@ export async function buildDelegate(ctx: IdentityContext, p: DelegateParams): Pr
     } else if (activeKey(agent.record, signer, PURPOSE.delegation)) {
       signers.add(signer, `delegation key of the delegator ${didOf(agent.id)}`);
     } else {
-      throw new Error(`${signer} is neither the controller of ${didOf(agent.id)} nor a key that it lists with the delegation purpose (its delegation keys: ${delegationKeysOf(agent.record).join(', ') || 'none'}). One of them signs for an agent delegator (Part 2 Section 5.2).`);
+      throw new Error(`${signer} is neither the controller of ${didOf(agent.id)} nor a key that it lists with the delegation purpose. One of them signs for an agent delegator (Part 2 Section 5.2). ${delegateRefuses('the controller of the delegator, or a key that it lists with the delegation purpose, signs')} Its delegation keys: ${keysText(delegationKeysOf(agent.record)) || 'none'}.`);
     }
     delegator = { type: 'Agent', id: agent.id };
     refs.push(...records.map((r) => r.utxo));
@@ -385,24 +394,24 @@ export async function buildDelegate(ctx: IdentityContext, p: DelegateParams): Pr
     purpose: p.purpose?.toLowerCase() ?? null, value: p.value ?? null,
   };
   const problems = delegationProblems(delegation);
-  if (problems.length > 0) throw new Error(`The delegation breaks the rules of Part 2 Sections 5.1 and 5.2: ${problems.join('; ')}.`);
+  if (problems.length > 0) throw new Error(`The delegation breaks the rules of Part 2 Sections 5.1 and 5.2. ${delegateRefuses('valid_delegation')} The builder found: ${problems.join('; ')}.`);
   if (parent !== null) {
     const wider = narrowingProblems(delegation, parent.delegation);
-    if (wider.length > 0) throw new Error(`The sub-delegation is wider than its parent ${parent.id} (Part 2 Section 5.2): ${wider.join('; ')}.`);
+    if (wider.length > 0) throw new Error(`The sub-delegation is wider than its parent ${parent.id} (Part 2 Section 5.2). ${delegateRefuses('sub_authorised: the child is inside its parent')} The builder found: ${wider.join('; ')}.`);
   }
 
   const delegateRecords = await recordWithAncestors(provider, deployment, delegation.delegate, 'record of the delegate');
   const delegate = delegateRecords[0].record;
   requireActive(delegate, recordsById(delegateRecords), window, `The delegate ${didOf(delegation.delegate)}`);
   if (!activeKey(delegate, delegateKey, PURPOSE.delegation)) {
-    throw new Error(`${didOf(delegation.delegate)} does not list the key ${delegateKey} with the delegation purpose (active_key, Part 2 Section 5.2). Its delegation keys: ${delegationKeysOf(delegate).join(', ') || 'none'}.`);
+    throw new Error(`${didOf(delegation.delegate)} does not list the key ${delegateKey} with the delegation purpose (active_key, Part 2 Section 5.2). ${delegateRefuses('active_key: the delegate lists the delegate key')} Its delegation keys: ${keysText(delegationKeysOf(delegate)) || 'none'}.`);
   }
   const live = await liveDelegations(provider, deployment);
   const reused = live.find((d) => d.delegation.delegateKey === delegateKey);
   if (reused) {
     const used = new Set(live.map((d) => d.delegation.delegateKey));
     const free = delegationKeysOf(delegate).filter((k) => !used.has(k));
-    throw new Error(`The live delegation ${reused.id} already uses the delegate key ${delegateKey}: each delegation needs a fresh key (Part 2 Section 5.2). Free delegation keys of ${didOf(delegation.delegate)}: ${free.join(', ') || 'none; list another key with the delegation purpose, or undelegate first'}.`);
+    throw new Error(`The live delegation ${reused.id} already uses the delegate key ${delegateKey}: each delegation needs a fresh key (Part 2 Section 5.2). The builder refuses this. The delegation contract does not enforce fresh keys; the builder, the gateway and the SDKs do. Free delegation keys of ${didOf(delegation.delegate)}: ${keysText(free) || 'none; list another key with the delegation purpose, or undelegate first'}.`);
   }
   refs.push(...delegateRecords.map((r) => r.utxo));
   signers.add(delegateKey, `delegate key (${didOf(delegation.delegate)})`);
@@ -502,8 +511,8 @@ export async function buildUndelegate(ctx: IdentityContext, p: UndelegateParams)
   }
   if (!found) {
     throw new Error(signer === undefined
-      ? `Nobody can sign for the delegator of ${target.id}: ${who.join('; ')}.`
-      : `The key ${signer} is not a delegator's key of ${target.id} or of an ancestor, so it cannot undelegate (Part 2 Section 5.2). Who can sign: ${who.join('; ')}.`);
+      ? `Nobody can sign for the delegator of ${target.id}. ${chainRefuses('delegation', 'Undelegate', 'the delegator of the delegation, or of an ancestor, signs')} Who can sign: ${who.join('; ')}.`
+      : `The key ${signer} is not a delegator's key of ${target.id} or of an ancestor, so it cannot undelegate (Part 2 Section 5.2). ${chainRefuses('delegation', 'Undelegate', 'the delegator of the delegation, or of an ancestor, signs')} Who can sign: ${who.join('; ')}.`);
   }
 
   const signers = new SignerList().add(found.keyHash, found.role);

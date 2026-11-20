@@ -27,7 +27,7 @@ import {
 import type { ActorSpec, DroppedHold, IdentityContext, ProfilePatch, RecordSpendBuild } from './identity-build.js';
 import {
   zChangeAddress, zDid, zKeyHash, zTime, zValidMinutes, zPublicKey, zKey, zParty, zProfile, zSignerRef, isModule1Ref, keyFromInput,
-  partyFromInput, profileFromInput, signerFromInput, buildText,
+  partyFromInput, profileFromInput, signerFromInput, buildText, endpointFacts, endpointOf,
 } from './identity-shared.js';
 
 /** The deployment a tool builds against: the server's, unless a test hands in another. */
@@ -158,12 +158,13 @@ export function registerIdentityRegistryTools(server: McpServer, checkRateLimit:
         const facts: Array<[string, string]> = [
           ['DID', `${r.did} (from the seed ${r.seed}: if that output is spent first, build again for a new DID)`],
           ['Name', cell(args.name, 64)],
+          ...endpointFacts(r.record),
           ['Kind', r.record.lineage.type === 'Subagent' ? `subagent of did:vector:${r.record.lineage.parent} at depth ${r.record.lineage.depth}` : 'independent agent'],
           ['Record output', `#${r.recordOutputIndex} at ${deployment.identity.address}, deposit ${lovelaceToAda(r.depositLovelace)} AP3X`],
           ['Created at', new Date(r.createdAt).toISOString()],
         ];
         return text(buildText('Identity Registration Built', facts, r, {
-          did: r.did, id: r.id, seed: r.seed, record_output_index: r.recordOutputIndex, deposit_lovelace: r.depositLovelace, created_at: r.createdAt,
+          did: r.did, id: r.id, seed: r.seed, record_output_index: r.recordOutputIndex, deposit_lovelace: r.depositLovelace, created_at: r.createdAt, endpoint: endpointOf(r.record),
         }));
       } catch (err) {
         return fail('build identity registration', err, [
@@ -250,6 +251,7 @@ export function registerIdentityRegistryTools(server: McpServer, checkRateLimit:
         ['DID', `${r.did} (adopted from ${r.legacyDid}; the identifier stays)`],
         ['Legacy record', `${r.legacyInput}, owner key hash ${r.legacyOwner}, ${lovelaceToAda(r.legacyLovelace)} AP3X: the legacy Deregister spends it and the legacy Burn burns its token`],
         ['Name', cell(textOf(r.record.name) ?? r.record.name, 64)],
+        ...endpointFacts(r.record),
         ['Profile', `copied from the legacy record: ${copied.join(', ') || 'none'}; given: ${given.join(', ') || 'none'}`],
         ['Allowlist proof', `${r.proof.length} nodes, ${r.proofFrom === 'given' ? 'as given' : 'computed from the published allowlist'}; it leads to the deployment's root`],
         ['Record output', `#${r.recordOutputIndex} at ${ctx.deployment.identity.address}, deposit ${lovelaceToAda(r.depositLovelace)} AP3X`],
@@ -259,7 +261,7 @@ export function registerIdentityRegistryTools(server: McpServer, checkRateLimit:
       return buildText('Identity Adoption Built', facts, r, {
         did: r.did, id: r.id, legacy_did: r.legacyDid, legacy_utxo: r.legacyInput, legacy_owner: r.legacyOwner, proof: r.proof, proof_from: r.proofFrom,
         profile_from: r.profileFrom, record_output_index: r.recordOutputIndex, deposit_lovelace: r.depositLovelace,
-        owner_output_index: r.ownerOutputIndex, owner_address: r.ownerAddress, created_at: r.createdAt,
+        owner_output_index: r.ownerOutputIndex, owner_address: r.ownerAddress, created_at: r.createdAt, endpoint: endpointOf(r.record),
       });
     }),
   );
@@ -316,10 +318,11 @@ export function registerIdentityRegistryTools(server: McpServer, checkRateLimit:
       });
       const facts: Array<[string, string]> = [
         ...spendFacts(r, ctx.deployment),
+        ...endpointFacts(r.record),
         ...r.changes.map((change): [string, string] => ['Change', cell(change, 400)]),
         ...r.notes.map((note): [string, string] => ['Note', cell(note, 400)]),
       ];
-      return buildText('Identity Update Built', facts, r, { ...spendJson(r), changes: r.changes, notes: r.notes });
+      return buildText('Identity Update Built', facts, r, { ...spendJson(r), changes: r.changes, notes: r.notes, endpoint: endpointOf(r.record) });
     }),
   );
 

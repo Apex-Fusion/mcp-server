@@ -201,6 +201,7 @@ const WRAPPER_SITES: Record<string, Record<string, string>> = {
     'builder/src/vector/marketplace-build.ts': 'the transaction that Lucid has just built: the output that holds the escrow',
     'builder/src/vector/module1-build.ts': 'the transaction that Lucid has just built: the payout of a withdrawal',
     'builder/src/vector/reputation-build.ts': 'the transaction that Lucid has just built: the output that holds the stake',
+    'builder/src/vector/vault-pay-text.ts': 'the draft transaction that Lucid has just built for the node to evaluate: the order of its inputs',
     'builder/src/vector/wallet-build-text.ts': 'the transaction that Lucid has just built: the text of a build answer',
   },
   decodePlutusData: {
