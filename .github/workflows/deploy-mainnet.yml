@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   deploy-mainnet:
-    runs-on: nixos
+    runs-on: self-hosted
     timeout-minutes: 10
     environment: mainnet
     permissions:

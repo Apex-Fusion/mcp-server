@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: nixos
+    runs-on: self-hosted
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -52,7 +52,7 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=12288
 
   typecheck:
-    runs-on: nixos
+    runs-on: self-hosted
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build-and-deploy:
-    runs-on: nixos
+    runs-on: self-hosted
     timeout-minutes: 10
     permissions:
       contents: read
