@@ -85,10 +85,6 @@ const agentText = (id: string): string => (id.length === 64 ? didOf(id) : id || 
 const uriText = (hex: string): string => cell(textOf(hex) ?? `0x${hex}`, 200);
 const days = (ms: number): string => `${(ms / 86_400_000).toFixed(1)} days`;
 
-async function utxosAt(provider: Provider, address: string): Promise<UTxO[]> {
-  try { return await provider.getUtxos(address); } catch { return []; } // an address without outputs can fail the query
-}
-
 /** The decoded datum of each output that decodes; for the current deployment only outputs that hold a token with `prefix`. */
 function positions<T>(utxos: UTxO[], decode: (hex: string) => T, d: ReadDeployment, policy: string, prefix: string): Array<{ utxo: UTxO; datum: T }> {
   const found: Array<{ utxo: UTxO; datum: T }> = [];
@@ -143,15 +139,16 @@ export function registerSelfImprovementTools(server: McpServer, identity: string
       try {
         const d = readDeployment(deployment ?? 'current', govFor);
         const provider = providerFor();
+        // A read that fails is an error that fail() below reports, never an empty list. The node answers [] for an address with no outputs.
         if (entity === "treasury") {
-          const utxos = await utxosAt(provider, d.treasuryAddress);
+          const utxos = await provider.getUtxos(d.treasuryAddress);
           const total = utxos.reduce((sum, u) => sum + BigInt(u.assets?.lovelace ?? 0n), 0n);
           return text(`# Treasury Balance (${d.label})\n\n**Total:** ${lovelaceToAda(total)} AP3X\n**UTxO Count:** ${utxos.length}\n**Address:** ${d.treasuryAddress}\n\nEach batch UTxO holds ~30 AP3X for adoption rewards.`);
         }
 
         if (entity === "proposals") {
           const proposer = proposerDid === undefined ? undefined : identifierOf(proposerDid);
-          const items = proposalsAt(await utxosAt(provider, d.proposalAddress), d).filter(({ datum }) =>
+          const items = proposalsAt(await provider.getUtxos(d.proposalAddress), d).filter(({ datum }) =>
             (!state || datum.state.type === state) && (!proposalType || datum.proposalType.type === proposalType) && (!proposer || datum.proposerDid === proposer));
           if (items.length === 0) return text(`No proposals found on-chain (${d.label}).`);
           const lines = items.map(({ utxo, datum: p }, i) => `## ${i + 1}. ${p.proposalType.type} Proposal (${p.state.type})
@@ -171,11 +168,11 @@ export function registerSelfImprovementTools(server: McpServer, identity: string
         let matches: (seedRef: { txHash: string; outputIndex: number }) => boolean = () => true;
         if (proposalTxHash) {
           const hash = proposalTxHash.trim().toLowerCase();
-          const tokens = new Set((await utxosAt(provider, d.proposalAddress)).filter((u) => u.txHash === hash).map((u) => proposalTokenOf(u, d)).filter((t): t is string => t !== null));
+          const tokens = new Set((await provider.getUtxos(d.proposalAddress)).filter((u) => u.txHash === hash).map((u) => proposalTokenOf(u, d)).filter((t): t is string => t !== null));
           matches = (r) => r.txHash === hash || tokens.has(deriveProposalTokenName(r.txHash, r.outputIndex));
         }
         if (entity === "critiques") {
-          const items = positions(await utxosAt(provider, d.critiqueAddress), decodeCritiqueDatum, d, d.critiqueMint, TOKEN_PREFIX.critique)
+          const items = positions(await provider.getUtxos(d.critiqueAddress), decodeCritiqueDatum, d, d.critiqueMint, TOKEN_PREFIX.critique)
             .filter(({ datum }) => matches(datum.proposalRef));
           if (items.length === 0) return text(`No critiques found on-chain (${d.label}).`);
           const lines = items.map(({ utxo, datum: c }: { utxo: UTxO; datum: CritiqueDatum }, i) => `## ${i + 1}. ${c.critiqueType.type} Critique
@@ -187,7 +184,7 @@ export function registerSelfImprovementTools(server: McpServer, identity: string
 - **UTxO:** ${ref(utxo)}`);
           return text(`# Critiques (${items.length} found, ${d.label})\n\n${lines.join('\n\n')}`);
         }
-        const items = positions(await utxosAt(provider, d.endorsementAddress), decodeEndorsementDatum, d, d.critiqueMint, TOKEN_PREFIX.endorsement)
+        const items = positions(await provider.getUtxos(d.endorsementAddress), decodeEndorsementDatum, d, d.critiqueMint, TOKEN_PREFIX.endorsement)
           .filter(({ datum }) => matches(datum.proposalRef));
         if (items.length === 0) return text(`No endorsements found on-chain (${d.label}).`);
         const lines = items.map(({ utxo, datum: e }: { utxo: UTxO; datum: EndorsementDatum }, i) => `## ${i + 1}. Endorsement
@@ -200,7 +197,6 @@ export function registerSelfImprovementTools(server: McpServer, identity: string
         return fail('browse proposal data', err, [
           "The current deployment needs the GOV_* settings of this server; deployment: 'previous' reads the deployment before the identity registry",
           'Verify the configured Ogmios endpoint is reachable',
-          'The script addresses may not have any UTxOs yet',
         ]);
       }
     }
@@ -220,13 +216,13 @@ export function registerSelfImprovementTools(server: McpServer, identity: string
       try {
         const d = readDeployment(deployment ?? 'current', govFor);
         const provider = providerFor();
-        const treasuryUtxos = await utxosAt(provider, d.treasuryAddress);
+        const treasuryUtxos = await provider.getUtxos(d.treasuryAddress);
         const treasuryTotal = treasuryUtxos.reduce((sum, u) => sum + BigInt(u.assets?.lovelace ?? 0n), 0n);
         const lowTreasury = treasuryTotal < 2_500_000_000n;
         if (focus === "treasury") {
           return text(`# Treasury Health (${d.label})\n\n**Balance:** ${lovelaceToAda(treasuryTotal)} AP3X\n**Batch UTxOs:** ${treasuryUtxos.length}\n**Address:** ${d.treasuryAddress}\n\n${lowTreasury ? '**WARNING:** Treasury below 2,500 AP3X threshold' : 'Treasury health: OK'}`);
         }
-        const proposals = proposalsAt(await utxosAt(provider, d.proposalAddress), d).map((p) => p.datum);
+        const proposals = proposalsAt(await provider.getUtxos(d.proposalAddress), d).map((p) => p.datum);
         const byState: Record<string, number> = {};
         const byType: Record<string, number> = {};
         let totalStake = 0n;

@@ -112,11 +112,11 @@ export function koiosFailure(err: unknown): string {
 
 /**
  * What a failed node call may tell a caller: the provider's own wording up to the status or code ("Ogmios request failed
- * (queryLedgerState/utxo): 503"), without the status text or a JSON-RPC message that may echo the request; anything else
- * becomes a fixed phrase.
+ * (queryLedgerState/utxo): 503"), or up to the fault that it names (network error, invalid response, the node gave no list),
+ * without the status text or a JSON-RPC message that may echo the request; anything else becomes a fixed phrase.
  */
 export function nodeFailure(err: unknown): string {
-  const known = /^Ogmios request failed \([\w/]+\): (?:network error|invalid response|-?\d+|error)/.exec(errorText(err));
+  const known = /^Ogmios request failed \([\w/]+\): (?:network error|invalid response|the node gave no list|-?\d+|error)/.exec(errorText(err));
   return known ? known[0] : 'node request failed (network error or timeout)';
 }
 

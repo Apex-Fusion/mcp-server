@@ -470,6 +470,20 @@ export class OgmiosProvider implements Provider {
     return json.result;
   }
 
+  /**
+   * Send a JSON-RPC request to Ogmios for a method whose answer is a list: the outputs of an address or of some output references, and
+   * the budgets of the scripts of a transaction. An answer with no list (`"result": null`, no `result`, or a `result` that is not an
+   * array) is an error. It is never an empty list: a list that the node did not give is not "no outputs", and a caller that reads "no
+   * outputs" says "not found" where "cannot read" is right. An empty array is a list, and stays empty. The error is sanitised as rpc()'s
+   * are: it names the method and nothing else. The log has the node and the kind of the answer, never its content.
+   */
+  private async rpcList(method: string, params?: unknown): Promise<unknown[]> {
+    const result = await this.rpc(method, params);
+    if (Array.isArray(result)) return result;
+    console.error(`[OgmiosProvider] Ogmios ${method} at ${this.ogmiosUrl}: the node gave no list (${result === undefined ? 'no result' : result === null ? 'null' : typeof result})`);
+    throw new Error(formatServiceError('Ogmios', method, 'the node gave no list'));
+  }
+
   async getProtocolParameters(): Promise<ProtocolParameters> {
     const result = await this.rpc('queryLedgerState/protocolParameters');
 
@@ -543,8 +557,7 @@ export class OgmiosProvider implements Provider {
       );
     }
 
-    const result = await this.rpc('queryLedgerState/utxo', { addresses: [addressOrCredential] });
-    return this.ogmiosUtxosToLucid(result);
+    return this.ogmiosUtxosToLucid(await this.rpcList('queryLedgerState/utxo', { addresses: [addressOrCredential] }));
   }
 
   async getUtxosWithUnit(addressOrCredential: string | Credential, unit: string): Promise<UTxO[]> {
@@ -625,8 +638,7 @@ export class OgmiosProvider implements Provider {
       index: ref.outputIndex,
     }));
 
-    const result = await this.rpc('queryLedgerState/utxo', { outputReferences });
-    return this.ogmiosUtxosToLucid(result);
+    return this.ogmiosUtxosToLucid(await this.rpcList('queryLedgerState/utxo', { outputReferences }));
   }
 
   async getDelegation(rewardAddress: string): Promise<Delegation> {
@@ -851,32 +863,30 @@ export class OgmiosProvider implements Provider {
 
   /**
    * Evaluate a transaction (lucid-evolution Provider interface).
-   * Returns execution units for script validation as EvalRedeemer[].
+   * Returns execution units for script validation as EvalRedeemer[]. A transaction without scripts gives an empty list. An answer of
+   * the node with no list is an error (rpcList): it is not read as a transaction without scripts.
    */
   async evaluateTx(tx: string, additionalUTxOs?: UTxO[]): Promise<EvalRedeemer[]> {
-    const result = await this.rpc('evaluateTransaction', {
+    const result = await this.rpcList('evaluateTransaction', {
       transaction: { cbor: tx },
     });
     // Parse result to EvalRedeemer[] format
-    if (Array.isArray(result)) {
-      return result.map((item: any) => ({
-        ex_units: {
-          mem: item.budget?.memory ?? 0,
-          steps: item.budget?.cpu ?? 0,
-        },
-        redeemer_index: item.validator?.index ?? 0,
-        redeemer_tag: item.validator?.purpose ?? 'spend',
-      }));
-    }
-    return [];
+    return result.map((item: any) => ({
+      ex_units: {
+        mem: item.budget?.memory ?? 0,
+        steps: item.budget?.cpu ?? 0,
+      },
+      redeemer_index: item.validator?.index ?? 0,
+      redeemer_tag: item.validator?.purpose ?? 'spend',
+    }));
   }
 
   /**
    * Evaluate a transaction without submitting (dry run).
-   * Backward-compatible alias - returns raw Ogmios response.
+   * Backward-compatible alias - returns the raw Ogmios list. An answer of the node with no list is an error (rpcList).
    */
   async evaluateTransaction(txCborHex: string): Promise<any> {
-    return this.rpc('evaluateTransaction', {
+    return this.rpcList('evaluateTransaction', {
       transaction: { cbor: txCborHex },
     });
   }
@@ -1044,11 +1054,9 @@ export class OgmiosProvider implements Provider {
   }
 
   /**
-   * Convert Ogmios UTxO response format to Lucid UTxO format
+   * Convert the list of outputs that Ogmios gave to Lucid UTxO format. The caller has a list: rpcList refuses an answer without one.
    */
   private ogmiosUtxosToLucid(ogmiosUtxos: any[]): UTxO[] {
-    if (!Array.isArray(ogmiosUtxos)) return [];
-
     const withheld: string[] = [];
     const utxos = ogmiosUtxos.map((utxo) => {
       const txHash = utxo.transaction?.id ?? utxo.txId;

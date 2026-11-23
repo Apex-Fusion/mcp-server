@@ -4,7 +4,7 @@
 // transaction, lets Lucid run the applied attestation script on it (local evaluation through the reference script), and returns the
 // unsigned CBOR with every key hash that must sign. Attest also returns the COSE Sig_structure of Section 4.2: the issuer signs it to
 // add an envelope signature. Nothing is signed or submitted.
-import { CML, calculateMinLovelaceFromUTxO } from '@lucid-evolution/lucid';
+import { calculateMinLovelaceFromUTxO } from '@lucid-evolution/lucid';
 import type { LucidEvolution, Provider, UTxO } from '@lucid-evolution/lucid';
 import {
   MAX_TIME_MS, decodeAttestationDatum, encodeAttestationDatum, encodeAttestationMint, encodeAttestationSpend,
@@ -24,6 +24,7 @@ import {
 import { outputIndexOf } from './identity-build.js';
 import type { BuildCommon, IdentityContext } from './identity-build.js';
 import { isoOrRaw } from './marketplace-shared.js';
+import { signatureVerifies } from './ed25519-rules.js';
 
 const byteLength = (hex: string): number => hex.length / 2;
 const validTime = (t: number): boolean => Number.isSafeInteger(t) && t >= 0 && t <= MAX_TIME_MS;
@@ -228,11 +229,14 @@ export function envelopeSigStructure(e: EnvelopeFields): string {
   ]).toString('hex');
 }
 
-/** Does `signatureHex` (64 bytes) verify with the issuer key over the Sig_structure of `e`? */
+/**
+ * Does `signatureHex` (64 bytes) verify with the issuer key over the Sig_structure of `e`, by the rules of the ledger (signatureVerifies)?
+ * A public key of a small order, a signature whose R has a small order and a signature whose S is not below the group order do not verify.
+ * A key or a signature that cannot be read does not verify either.
+ */
 export function envelopeVerifies(e: EnvelopeFields, signatureHex: string): boolean {
   try {
-    const key = CML.PublicKey.from_bytes(Buffer.from(e.issuer, 'hex'));
-    return key.verify(Buffer.from(envelopeSigStructure(e), 'hex'), CML.Ed25519Signature.from_raw_bytes(Buffer.from(signatureHex, 'hex')));
+    return signatureVerifies(Buffer.from(e.issuer, 'hex'), Buffer.from(signatureHex, 'hex'), Buffer.from(envelopeSigStructure(e), 'hex'));
   } catch { return false; }
 }
 

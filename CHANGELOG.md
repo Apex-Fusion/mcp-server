@@ -424,6 +424,27 @@
 
 ### Fixed
 
+- An answer of the node with no list is an error, not an empty list. The provider reads outputs and script budgets from Ogmios. An
+  answer with `"result": null`, with no `result`, or with a `result` that is not an array was read as an empty list. A check then read
+  "not found" where "cannot read" is right. Now `getUtxos`, `getUtxosWithUnit`, `getUtxosByOutRef`, `evaluateTx` and
+  `evaluateTransaction` throw `Ogmios request failed (<method>): the node gave no list`. An empty array is still an empty list. The
+  other readers (the tip, the block height, the start time, the parameters, the reward account) do not change. The marketplace and
+  reputation builders that say "Could not read ... from the node" show these words, and not the fixed phrase for an unknown failure.
+  No tool description and no tool schema changes.
+- `vector_self_improvement_browse` and `vector_self_improvement_analyze_metrics` say that they cannot read the node when a read of
+  outputs fails. They turned every failure into an empty list. With a node that failed or gave no list, browse said "No proposals
+  found on-chain" (or "No critiques found", or a treasury of 0), and the metrics said that the treasury balance is 0 and below the
+  threshold. Now the answer is the error of the read (`Failed to browse proposal data: ...`). A node answers an empty list for an
+  address with no outputs, and that is still read as no outputs. The tip "The script addresses may not have any UTxOs yet" is gone
+  from the failure of browse: a failure no longer means that an address has no outputs.
+- The check of an attestation envelope and the check of a receipt apply the signature rules of the ledger. The envelope is checked by
+  `vector_check_attestation` and by the `envelope_sig` of `vector_build_attestation_attest`. The receipt is checked by
+  `vector_marketplace_verify_receipt`. Both took a signature that the node refuses: the check of CML does not refuse a public key of a
+  small order or a signature whose R has a small order. For a key of a small order, the signature with R = the identity point and
+  S = 0 verifies over some messages, and over every message when the key is the identity point. Now both checks refuse a public key
+  of a small order and a signature whose R has a small order. A signature whose S is not below the group order is refused as before. A
+  normal key and a normal signature give the same result as before. The rules moved to `ed25519-rules.ts`. `delegation-cosign.ts`
+  exports them under the same names.
 - `cell`, which cleans the text of a datum or an advert for one line of a tool answer, handles more characters. A C1 control (U+0080 to
   U+009F) becomes a space, as a C0 control does. The zero-width characters and direction marks (U+200B to U+200F), the embedding and
   override controls (U+202A to U+202E) and the isolate controls (U+2066 to U+2069) are removed. They could hide a word or reorder

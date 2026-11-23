@@ -4,6 +4,7 @@
 // reads only as required signers). Each refusal has a negative test.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createPublicKey, verify as opensslVerify } from 'node:crypto';
 import { CML } from '@lucid-evolution/lucid';
 import type { UTxO } from '@lucid-evolution/lucid';
 import {
@@ -11,12 +12,14 @@ import {
 } from './fixtures/identity-world.ts';
 import { FIXTURE_UTXOS } from './fixtures/fixture-provider.ts';
 import {
-  buildAttest, buildContestAttestation, buildRevokeAttestation, buildWithdrawAttestation, didKeyOf, envelopeSigStructure, withdrawableFrom,
+  buildAttest, buildContestAttestation, buildRevokeAttestation, buildWithdrawAttestation, didKeyOf, envelopeSigStructure, envelopeVerifies, withdrawableFrom,
 } from '../src/vector/attestation-build.ts';
-import type { AttestParams } from '../src/vector/attestation-build.ts';
+import type { AttestParams, EnvelopeFields } from '../src/vector/attestation-build.ts';
 import { decodeAttestationDatum, encodeAttestationDatum, encodeAttestationMint, encodeAttestationSpend, utf8Hex } from '../src/vector/identity-codec.ts';
 import type { AttestationDatum, IdentityDatum } from '../src/vector/identity-codec.ts';
 import { identifierFromSeed } from '../src/vector/identity-chain.ts';
+import { hasSmallOrder } from '../src/vector/ed25519-rules.ts';
+import { BASE_POINT_SIGNATURE_HEX, IDENTITY_POINT_HEX, SMALL_ORDER_KEYS, UNIVERSAL_SIGNATURE_HEX, forgedIndex, signatureWithIdentityR, withScalarRaised } from './fixtures/small-order.ts';
 
 const OWN_KEY_HASH = CML.Address.from_bech32(OWN_ADDRESS).payment_cred()!.as_pub_key()!.to_hex();
 /** The issuer key: the deterministic test key 8 of identity-world.ts (its private key signs the envelope in one test). */
@@ -186,6 +189,17 @@ describe('buildAttest (real attestation script, offline)', () => {
     await assert.rejects(attest({ issuerId: ISSUER_ID, format: 51, issuedAt, envelopeSig: signature }), /envelope_sig does not verify/);
     await assert.rejects(attest({ issuedAt, envelopeSig: signature }), /envelope_sig does not verify/);
     await assert.rejects(attest({ envelopeSig: signature }), /envelope_sig needs issued_at/);
+  });
+
+  test('an envelope_sig for an issuer key of a small order is refused, where CML alone takes the forged signature', async () => {
+    const issuedAt = NOW + 20 * 60_000;
+    const forged = await attest({ issuer: IDENTITY_POINT_HEX, issuedAt });
+    assert.ok(CML.PublicKey.from_bytes(Buffer.from(IDENTITY_POINT_HEX, 'hex')).verify(Buffer.from(forged.sigStructure, 'hex'), CML.Ed25519Signature.from_hex(UNIVERSAL_SIGNATURE_HEX)), 'CML alone takes it');
+    await assert.rejects(attest({ issuer: IDENTITY_POINT_HEX, issuedAt, envelopeSig: UNIVERSAL_SIGNATURE_HEX }), /envelope_sig does not verify/);
+    // The twin: the same call for the issuer key that signs is built.
+    const first = await attest({ issuedAt });
+    const signature = Buffer.from(CML.PrivateKey.from_normal_bytes(Buffer.alloc(32, 8)).sign(Buffer.from(first.sigStructure, 'hex')).to_raw_bytes()).toString('hex');
+    assert.equal((await attest({ issuedAt, envelopeSig: signature })).attestation.envelopeSig, signature);
   });
 
   test('the Sig_structure is ["Signature1", protected, h\'\', digest] with the protected header of Section 4.2 in deterministic CBOR', () => {
@@ -379,6 +393,116 @@ describe('buildWithdrawAttestation (real attestation script, offline)', () => {
     await assert.rejects(withdraw(attestation()), /Revoke it first/);
     await assert.rejects(withdraw(attestation({ status: { type: 'AttRevoked', at: NOW - 100 * DAY, reason: 0 } }), 'controller'), /only the issuer key can sign/);
     assert.equal(withdrawableFrom(attestation({ validUntil: 10, status: { type: 'AttRevoked', at: 5, reason: 0 } })), 5 + 90 * DAY);
+  });
+});
+
+// ─── The signature of the envelope ───────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Two envelopes that OpenSSL signed (node:crypto, with a key made for the purpose) over the Sig_structure that envelopeSigStructure gives:
+ * one for a registered issuer with a format, and one for a key without a record and without a format.
+ */
+const GOLDEN: Record<'registered' | 'unregistered', { fields: EnvelopeFields; signature: string }> = {
+  registered: {
+    fields: { issuer: '48075a597e721a156e2e0799de5cc0c5324dc6e7eaf1cdd46250868ec53215dd', issuerId: '5c'.repeat(32), subject: '7a'.repeat(32), issuedAt: 1_795_000_000_000, format: 50, digest: '3e'.repeat(32) },
+    signature: '1eaaf285ca048878e99b29fdbd7c5e7bef255616c22c434789bbbf69a8bd0bc1e8c329eee5d440d54eaa69f015f8e14afe138c711a39ab54d269a170be089107',
+  },
+  unregistered: {
+    fields: { issuer: '5e212c0980e4b39fc09721134aa02109374edfd260c0d3d03cb501c8d65457a9', issuerId: null, subject: '7b'.repeat(32), issuedAt: 1_795_000_060_000, format: null, digest: '4f'.repeat(32) },
+    signature: '11377c3e22ac7a958bc84a01aa7bb5b360baf7dc541a50882cf7da1278674810cefb480fe792690b4ee1c38ec8cc320c2bb2ee037d45f821a63e195022f9050d',
+  },
+};
+
+describe('envelopeVerifies: the signature rules of the ledger', () => {
+  const golden = GOLDEN.unregistered;
+  const structureOf = (fields: EnvelopeFields): Buffer => Buffer.from(envelopeSigStructure(fields), 'hex');
+
+  test('a golden envelope of each header shape verifies: CML alone and OpenSSL take it too, so the rules change nothing for it', () => {
+    const spki = Buffer.from('302a300506032b6570032100', 'hex');
+    for (const [name, { fields, signature }] of Object.entries(GOLDEN)) {
+      const structure = structureOf(fields);
+      assert.ok(envelopeVerifies(fields, signature), name);
+      assert.ok(CML.PublicKey.from_bytes(Buffer.from(fields.issuer, 'hex')).verify(structure, CML.Ed25519Signature.from_hex(signature)), `${name}: CML alone`);
+      const key = createPublicKey({ key: Buffer.concat([spki, Buffer.from(fields.issuer, 'hex')]), format: 'der', type: 'spki' });
+      assert.ok(opensslVerify(null, structure, key, Buffer.from(signature, 'hex')), `${name}: OpenSSL`);
+      assert.ok(envelopeVerifies(fields, signature.toUpperCase()), `${name}: the same signature in upper case`);
+    }
+  });
+
+  test('a change of a signed field, of the key or of the signature does not verify', () => {
+    for (const [name, { fields, signature }] of Object.entries(GOLDEN)) {
+      assert.ok(envelopeVerifies(fields, signature), `${name}: the twin`);
+      const changes: Array<[string, EnvelopeFields]> = [
+        ['subject', { ...fields, subject: 'aa'.repeat(32) }], ['digest', { ...fields, digest: 'aa'.repeat(32) }], ['issued_at', { ...fields, issuedAt: fields.issuedAt + 1000 }],
+        ['format', { ...fields, format: fields.format === null ? 51 : null }], ['issuer identity', { ...fields, issuerId: fields.issuerId === null ? 'aa'.repeat(32) : null }],
+        ['issuer key', { ...fields, issuer: ISSUER.publicKey }],
+      ];
+      for (const [what, changed] of changes) assert.ok(!envelopeVerifies(changed, signature), `${name}: ${what}`);
+      for (const index of [0, 31, 32, 63]) {
+        const flipped = Buffer.from(signature, 'hex');
+        flipped[index] ^= 1;
+        assert.ok(!envelopeVerifies(fields, flipped.toString('hex')), `${name}: byte ${index} of the signature`);
+      }
+    }
+  });
+
+  test('a public key of a small order does not verify an envelope, where CML alone takes a forged signature', () => {
+    let forged = 0;
+    for (const [what, keyHex] of SMALL_ORDER_KEYS) {
+      const fieldsAt = (i: number): EnvelopeFields => ({ ...golden.fields, issuer: keyHex, issuedAt: golden.fields.issuedAt + 1000 * i });
+      // Some envelope has a forged signature that CML takes for this key (every envelope for the identity point).
+      const found = forgedIndex(keyHex, (i) => structureOf(fieldsAt(i)));
+      if (found !== null) {
+        forged += 1;
+        assert.ok(!envelopeVerifies(fieldsAt(found), UNIVERSAL_SIGNATURE_HEX), `${what}: the forged envelope is refused`);
+      }
+      assert.ok(!envelopeVerifies(fieldsAt(0), UNIVERSAL_SIGNATURE_HEX), what);
+    }
+    assert.ok(forged >= 8, 'CML takes a forged signature for all but one of these keys');
+    assert.ok(envelopeVerifies(golden.fields, golden.signature), 'the twin');
+  });
+
+  test('a public key of a small order does not verify, also when R is an ordinary point', () => {
+    // For the identity point as the key, [S]B = R holds with R = the base point and S = 1, whatever the message is. Only the rule for the key refuses it.
+    const fields: EnvelopeFields = { ...golden.fields, issuer: IDENTITY_POINT_HEX };
+    assert.ok(!hasSmallOrder(Buffer.from(BASE_POINT_SIGNATURE_HEX, 'hex').subarray(0, 32)), 'R has no small order');
+    assert.ok(CML.PublicKey.from_bytes(Buffer.from(IDENTITY_POINT_HEX, 'hex')).verify(structureOf(fields), CML.Ed25519Signature.from_hex(BASE_POINT_SIGNATURE_HEX)), 'CML alone takes it');
+    assert.ok(!envelopeVerifies(fields, BASE_POINT_SIGNATURE_HEX));
+    assert.ok(envelopeVerifies(golden.fields, golden.signature), 'the twin');
+  });
+
+  test('a signature that starts with a point of a small order does not verify, also when the key holder made it', () => {
+    // With R = the identity point and S = k * a, the equation holds for the key of the holder: CML takes it, the node does not.
+    const seed = Buffer.alloc(32, 8);
+    const fields: EnvelopeFields = { ...golden.fields, issuer: ISSUER.publicKey };
+    const structure = structureOf(fields);
+    const odd = signatureWithIdentityR(seed, Buffer.from(ISSUER.publicKey, 'hex'), structure);
+    assert.ok(CML.PublicKey.from_bytes(Buffer.from(ISSUER.publicKey, 'hex')).verify(structure, CML.Ed25519Signature.from_raw_bytes(odd)), 'CML alone takes it');
+    assert.ok(!envelopeVerifies(fields, odd.toString('hex')));
+    const own = Buffer.from(CML.PrivateKey.from_normal_bytes(seed).sign(structure).to_raw_bytes()).toString('hex');
+    assert.ok(envelopeVerifies(fields, own), 'the twin: the signature of the key holder');
+  });
+
+  test('S at or above the group order does not verify', () => {
+    const good = Buffer.from(golden.signature, 'hex');
+    assert.ok(envelopeVerifies(golden.fields, golden.signature), 'the twin');
+    for (const times of [1n, 2n, 7n]) assert.ok(!envelopeVerifies(golden.fields, withScalarRaised(good, times).toString('hex')), `S + ${times} * L`);
+    const topBit = Buffer.from(good);
+    topBit[63] |= 0x80;
+    assert.ok(!envelopeVerifies(golden.fields, topBit.toString('hex')), 'the top bit of S');
+    assert.ok(!envelopeVerifies(golden.fields, Buffer.concat([good.subarray(0, 32), Buffer.alloc(32, 0xff)]).toString('hex')), 'S = 2^256 - 1');
+  });
+
+  test('a signature or a key that cannot be read does not verify, and nothing throws', () => {
+    const { fields, signature } = golden;
+    assert.ok(envelopeVerifies(fields, signature), 'the twin');
+    const signatures: Array<[string, string]> = [
+      ['empty', ''], ['63 bytes', signature.slice(0, 126)], ['65 bytes', `${signature}00`], ['an odd number of digits', signature.slice(0, 127)],
+      ['not hex', 'zz'.repeat(64)], ['a space before it', ` ${signature}`], ['a 0x prefix', `0x${signature}`],
+    ];
+    for (const [what, text] of signatures) assert.ok(!envelopeVerifies(fields, text), `a signature that is ${what}`);
+    const keys: Array<[string, string]> = [['empty', ''], ['31 bytes', fields.issuer.slice(0, 62)], ['33 bytes', `${fields.issuer}00`], ['not hex', 'zz'.repeat(32)]];
+    for (const [what, issuer] of keys) assert.ok(!envelopeVerifies({ ...fields, issuer }, signature), `a key that is ${what}`);
   });
 });
 

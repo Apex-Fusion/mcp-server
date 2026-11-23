@@ -5,10 +5,12 @@
 // of the signed receipt and the hash of the result to the bytes the template produced.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { CML } from '@lucid-evolution/lucid';
 import { canonicalize, sha256Utf8Hex } from '../src/vector/marketplace-datum.ts';
 import { verifyReceipt } from '../src/vector/marketplace-transport.ts';
-import type { ReceiptChecks, VerifyInput } from '../src/vector/marketplace-transport.ts';
+import type { ReceiptChecks, ReceiptVerdict, VerifyInput } from '../src/vector/marketplace-transport.ts';
 import { TEMPLATE_RECEIPT as T } from './fixtures/template-receipt.fixture.ts';
+import { BASE_POINT_SIGNATURE_HEX, IDENTITY_POINT_HEX, SMALL_ORDER_KEYS, UNIVERSAL_SIGNATURE_HEX, forgedIndex, signatureWithIdentityR, withScalarRaised } from './fixtures/small-order.ts';
 
 /** The vector as verifyReceipt is given it, with the escrow it was made for. */
 const input = (over: Partial<VerifyInput> = {}): VerifyInput => ({
@@ -115,5 +117,78 @@ describe('a receipt made by the template\'s own code', () => {
     const v = verifyReceipt(input({ escrowAgentId: 'ae'.repeat(32) }));
     assert.deepEqual(states(v.checks), { ...ALL_PASS, fields_match: 'fail' });
     assert.match(v.checks.fields_match.note, /identity-marketplace escrow has exactly the 9 receipt fields; it lacks agent_did/);
+  });
+});
+
+describe('a receipt and the signature rules of the ledger', () => {
+  /** A receipt of these tests: the fields of the template's receipt, each a text or a number. */
+  interface TestReceipt extends Record<string, string | number> { supplier_pkh: string }
+  const hashOf = (keyHex: string): string => CML.PublicKey.from_bytes(Buffer.from(keyHex, 'hex')).hash().to_hex();
+  /** The golden receipt for the supplier with the key `keyHex`. `wallclock` changes the bytes that are signed. For the golden key it is the golden receipt. */
+  const receiptFor = (keyHex: string, wallclock: number = T.receipt.wallclock_ms): TestReceipt => ({ ...T.receipt, supplier_pkh: hashOf(keyHex), wallclock_ms: wallclock });
+  /** The input for `receipt` with `signature` by `keyHex`. The hash on chain is the hash of what is given, so every row passes but the signature when it does not verify. */
+  const inputFor = (receipt: TestReceipt, keyHex: string, signature: string): VerifyInput => input({
+    receipt, signature, supplierPubKeyHex: keyHex, escrowSupplierPkh: receipt.supplier_pkh, resultReceiptHashOnChain: sha256Utf8Hex(canonicalize({ receipt, signature })),
+  });
+  const onlySignatureFails = (v: ReceiptVerdict, what: string) => {
+    assert.equal(v.verdict, 'failed', what);
+    assert.deepEqual(states(v.checks), { ...ALL_PASS, signature_valid: 'fail' }, what);
+  };
+
+  test('the golden receipt verifies: CML alone takes it too, so the rules change nothing for it', () => {
+    assert.deepEqual(receiptFor(T.publicKeyHex), T.receipt, 'the helper gives the golden receipt for the golden key');
+    assert.ok(CML.PublicKey.from_bytes(Buffer.from(T.publicKeyHex, 'hex')).verify(Buffer.from(canonicalize(T.receipt), 'utf8'), CML.Ed25519Signature.from_hex(T.signature)), 'CML alone');
+    const v = verifyReceipt(inputFor(receiptFor(T.publicKeyHex), T.publicKeyHex, T.signature));
+    assert.equal(v.checks.signature_valid.state, 'pass');
+    assert.deepEqual(states(v.checks), ALL_PASS);
+    assert.equal(v.verdict, 'verified');
+  });
+
+  test('a supplier key of a small order does not make a verified receipt, where CML alone takes a forged signature', () => {
+    let forged = 0;
+    for (const [what, keyHex] of SMALL_ORDER_KEYS) {
+      // Some receipt has a forged signature that CML takes for this key (every receipt for the identity point). The supplier is the key.
+      const found = forgedIndex(keyHex, (i) => Buffer.from(canonicalize(receiptFor(keyHex, i)), 'utf8'));
+      if (found === null) continue;
+      forged += 1;
+      onlySignatureFails(verifyReceipt(inputFor(receiptFor(keyHex, found), keyHex, UNIVERSAL_SIGNATURE_HEX)), `${what}: the forged receipt`);
+    }
+    assert.ok(forged >= 8, 'CML takes a forged signature for all but one of these keys');
+  });
+
+  test('a supplier key of a small order does not verify, also when R is an ordinary point', () => {
+    // For the identity point as the key, [S]B = R holds with R = the base point and S = 1, whatever the message is. Only the rule for the key refuses it.
+    const receipt = receiptFor(IDENTITY_POINT_HEX);
+    assert.ok(CML.PublicKey.from_bytes(Buffer.from(IDENTITY_POINT_HEX, 'hex')).verify(Buffer.from(canonicalize(receipt), 'utf8'), CML.Ed25519Signature.from_hex(BASE_POINT_SIGNATURE_HEX)), 'CML alone takes it');
+    onlySignatureFails(verifyReceipt(inputFor(receipt, IDENTITY_POINT_HEX, BASE_POINT_SIGNATURE_HEX)), 'the identity point as the key');
+    assert.equal(verifyReceipt(inputFor(receiptFor(T.publicKeyHex), T.publicKeyHex, T.signature)).verdict, 'verified', 'the twin');
+  });
+
+  test('a signature that starts with a point of a small order does not verify, also when the supplier made it', () => {
+    // With R = the identity point and S = k * a, the equation holds for the key of the holder: CML takes it, the node does not.
+    const seed = Buffer.alloc(32, 33);
+    const key = CML.PrivateKey.from_normal_bytes(seed);
+    const keyHex = Buffer.from(key.to_public().to_raw_bytes()).toString('hex');
+    const receipt = receiptFor(keyHex);
+    const message = Buffer.from(canonicalize(receipt), 'utf8');
+    const odd = signatureWithIdentityR(seed, Buffer.from(keyHex, 'hex'), message).toString('hex');
+    assert.ok(CML.PublicKey.from_bytes(Buffer.from(keyHex, 'hex')).verify(message, CML.Ed25519Signature.from_hex(odd)), 'CML alone takes it');
+    onlySignatureFails(verifyReceipt(inputFor(receipt, keyHex, odd)), 'R = the identity point');
+    const own = Buffer.from(key.sign(message).to_raw_bytes()).toString('hex');
+    assert.equal(verifyReceipt(inputFor(receipt, keyHex, own)).verdict, 'verified', 'the twin: the signature of the key holder');
+  });
+
+  test('S at or above the group order does not verify', () => {
+    const good = Buffer.from(T.signature, 'hex');
+    assert.equal(verifyReceipt(inputFor(receiptFor(T.publicKeyHex), T.publicKeyHex, T.signature)).verdict, 'verified', 'the twin');
+    for (const times of [1n, 2n, 7n]) {
+      onlySignatureFails(verifyReceipt(inputFor(receiptFor(T.publicKeyHex), T.publicKeyHex, withScalarRaised(good, times).toString('hex'))), `S + ${times} * L`);
+    }
+  });
+
+  test('a signature that is not 64 bytes of hex fails its row, and nothing throws', () => {
+    assert.equal(verifyReceipt(input()).checks.signature_valid.state, 'pass', 'the twin');
+    const signatures: Array<[string, string]> = [['63 bytes', T.signature.slice(0, 126)], ['65 bytes', `${T.signature}00`], ['an odd number of digits', T.signature.slice(0, 127)], ['not hex', 'zz'.repeat(64)], ['empty', '']];
+    for (const [what, signature] of signatures) assert.equal(verifyReceipt(input({ signature })).checks.signature_valid.state, 'fail', what);
   });
 });

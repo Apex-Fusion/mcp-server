@@ -429,6 +429,7 @@ describe('resolveEscrowLineage', () => {
       ['an HTTP error', new Error('Ogmios request failed (queryLedgerState/utxo): 503 Service Unavailable'), /from the node: Ogmios request failed \(queryLedgerState\/utxo\): 503$/],
       ['a JSON-RPC error with details', new Error('Ogmios request failed (queryLedgerState/utxo): -32602 Invalid params: {"password":"hunter2"} at https://ogmios.example'), /from the node: Ogmios request failed \(queryLedgerState\/utxo\): -32602$/],
       ['a network error', new Error('Ogmios request failed (queryLedgerState/utxo): network error'), /from the node: Ogmios request failed \(queryLedgerState\/utxo\): network error$/],
+      ['an answer with no list', new Error('Ogmios request failed (queryLedgerState/utxo): the node gave no list'), /from the node: Ogmios request failed \(queryLedgerState\/utxo\): the node gave no list$/],
       ['anything else, which may carry the endpoint', new TypeError('connect ECONNREFUSED https://ogmios.example:1337'), /from the node: node request failed \(network error or timeout\)$/],
     ];
     for (const [name, error, message] of cases) {

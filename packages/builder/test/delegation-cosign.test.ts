@@ -37,6 +37,7 @@ import { decodeDelegationDatum, encodeDelegationDatum, utf8Hex } from '../src/ve
 import type { IdentityDatum } from '../src/vector/identity-codec.ts';
 import { keyHashOf } from '../src/vector/identity-rules.ts';
 import { readTransactionBody } from '../src/vector/tx-body.ts';
+import * as rules from '../src/vector/ed25519-rules.ts';
 import { atOnce } from './fixtures/at-once.ts';
 
 const POLICY = DEPLOYMENT.delegation.hash;
@@ -184,6 +185,12 @@ describe('signatureVerifies: a signature as the ledger takes it', () => {
     }
     assert.deepEqual(SMALL_ORDER_ENCODINGS.map((hex) => fromLE(Buffer.from(hex, 'hex'))).filter((y) => y >= P).map((y) => y - P), [0n, 1n], 'p and p + 1 spell 0 and 1');
     assert.ok(!hasSmallOrder(publicKey), 'a real key has no small order');
+  });
+
+  test('the rules are those of ed25519-rules.ts: this file exports the same ones', () => {
+    assert.equal(signatureVerifies, rules.signatureVerifies);
+    assert.equal(hasSmallOrder, rules.hasSmallOrder);
+    assert.equal(SMALL_ORDER_ENCODINGS, rules.SMALL_ORDER_ENCODINGS);
   });
 });
 
