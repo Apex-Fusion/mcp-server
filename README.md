@@ -178,7 +178,7 @@ Every tool below is keyless: it builds an unsigned transaction and lists every k
 | `vector_build_attestation_withdraw` | Burn an attestation 90 days after its revocation or expiry and release the deposit |
 | `vector_build_delegation_delegate` | Delegate actions and resources to an agent's delegation key (from a principal key, an agent, or a parent delegation), with an optional value limit |
 | `vector_build_delegation_undelegate` | End a delegation (its delegator or an ancestor's delegator signs); delegations below it stop at once |
-| `vector_delegation_request_cosign` | Ask the delegate agent of a Delegate transaction for its co-signature (the signature of the delegate key). The agent must serve the route below. The tool holds no key and adds no signature |
+| `vector_delegation_request_cosign` | Ask the delegate agent of a Delegate transaction for its co-signature (the signature of the delegate key). Give the transaction that the delegator signed first: the tool refuses one that lacks the signatures of the delegator side before it sends. The agent must serve the route below. The tool holds no key and adds no signature |
 | `vector_build_vault_open` | Open a vault that a delegation may spend from (`marketplace.hire.v1` on the escrow script) |
 | `vector_build_vault_pay` | The delegate hires a listed supplier from a vault, within the delegation's value limits. With `ledger_decides: true` the node judges the payment and a refusal shows the failed validator (see Who refuses below) |
 | `vector_build_vault_close` | The owner takes the funds of vault outputs (live or returned refunds) back |
@@ -187,11 +187,13 @@ Every tool below is keyless: it builds an unsigned transaction and lists every k
 
 #### Delegation co-signature route (for agent operators)
 
-A Delegate transaction needs two kinds of signature: the delegator's, and the signature of the delegate key that the delegation names. Only the delegate agent holds that key. `vector_delegation_request_cosign` carries the transaction to the agent and returns the transaction with the signature of the delegate key added. **An agent must serve the route below for the tool to work.** An agent that does not serve it answers 404, and the tool says so.
+A Delegate transaction needs two kinds of signature: the delegator's, and the signature of the delegate key that the delegation names. Only the delegate agent holds that key. `vector_delegation_request_cosign` carries the transaction to the agent and returns the transaction with the signature of the delegate key added. The delegator side signs first: the request carries its signatures, and an agent can refuse a request without them. **An agent must serve the route below for the tool to work.** An agent that does not serve it answers 404, and the tool says so.
 
-The tool takes one input, `txCbor`: the unsigned Delegate transaction that `vector_build_delegation_delegate` returned, or the same transaction signed by the delegator. It takes no endpoint and no agent. It reads the delegate from the transaction, reads the identity record of the delegate, and sends to the origin of the `endpoint` in that record. The endpoint must be an `https` URL. The delegate writes its own record, so a refusal about the endpoint never repeats the endpoint text. A subagent has no endpoint by rule (Part 2 Section 3.3), so the tool cannot ask a subagent. The tool says so, and the delegation must name an agent that has an endpoint.
+The tool takes one input, `txCbor`: the Delegate transaction that `vector_build_delegation_delegate` returned, signed by the delegator (sign it first with the key or keys of the delegator, with `vector_signer_sign`). The tool refuses a transaction that lacks the signatures of the delegator side (below), and it sends nothing. It takes no endpoint and no agent. It reads the delegate from the transaction, reads the identity record of the delegate, and sends to the origin of the `endpoint` in that record. The endpoint must be an `https` URL. The delegate writes its own record, so a refusal about the endpoint never repeats the endpoint text. A subagent has no endpoint by rule (Part 2 Section 3.3), so the tool cannot ask a subagent. The tool says so, and the delegation must name an agent that has an endpoint.
 
-**Route, version 1**
+**Route, version 2**
+
+Version 2 differs from version 1 in one rule: the request carries a valid signature of each required signer of the body except the delegate key, and of the principal key of the datum (the delegator side), and an agent can refuse a request without them with `403` `principal_not_allowed`. An agent may accept only some delegators (for example only principal keys), and it refuses the others with `principal_not_allowed`.
 
 ```http
 POST https://<host of the endpoint in the agent's record>/cosign/delegate
@@ -212,7 +214,7 @@ The tool uses the origin of the endpoint: the scheme, the host and the port. It 
 | `not_a_delegation` | the transaction is not a Delegate transaction |
 | `not_for_this_agent` | the delegation names another agent, or a delegate key that this agent does not hold |
 | `key_in_use` | the delegate key is in use: the agent already co-signed another body for it and the validity window of that body is open, or a live delegation uses it |
-| `principal_not_allowed` | the agent does not accept delegations from this delegator |
+| `principal_not_allowed` | the request does not carry a valid vkey witness of each required signer of the body except the delegate key, and of the principal key of the datum (`403`), or the agent does not accept delegations from this delegator |
 | `spends_agent_funds` | an input, a collateral input, a withdrawal or a certificate of the transaction is of a key of the agent |
 | `expired` | the validity window of the transaction has ended |
 
@@ -234,6 +236,8 @@ Checks that follow a rule of the ledger or of the delegation contract:
 - Every input, collateral input and reference input is on the node. If one is spent or not confirmed yet, the ledger refuses the transaction.
 - No output is both spent and read as a reference input. The ledger refuses this at protocol version 10.
 
+**The signatures of the delegator side.** The tool applies this rule before it asks the node or the agent. The delegator side is each required signer of the body except the delegate key: the principal key of a delegator that is a key, the key that signs for a delegator that is an agent, or the delegate key of the parent delegation in a sub-delegation. When the datum names a principal key as the delegator, that key is on the delegator side also when the body does not list it among the required signers. The delegation script refuses such a transaction when the user submits it, but the request does not leave without the witness. For each of these keys the transaction must carry exactly one vkey witness, and its signature must verify over the body hash by the rules of the ledger. The tool refuses a transaction in which one of these keys has no witness, or two witnesses. The text names each key with its role, says to sign the transaction with the key or keys of the delegator, and says to call the tool again. The tool cannot know the policy of an agent on delegators (for example only principal keys, or an allowlist), or the list of the keys of the agent. The agent decides these.
+
 Checks that are the scope of this tool and not rules of the ledger. They bound what an agent is asked to sign:
 
 - The transaction mints nothing else: no second policy.
@@ -246,7 +250,7 @@ The tool does not check all that the delegation script checks. For example, it d
 **Where the request goes.** The request goes through the outbound-call rule of the other tools that call a URL from chain data: https only, no private or reserved address, no redirect, an answer of at most 65,536 bytes, and 30 seconds. The tool makes one request and does not retry. The server sends at most 3 requests a minute for each caller to one origin, and at most 30 a minute to one origin for all callers together. The caller is the identity that the server uses for its rate limit. Both counts are in memory (a restart clears them), and each remembers a bounded number of callers and origins.
 
 - One co-signature is one request, so 3 a minute lets a user try again.
-- The limit for each caller stops one caller from using the whole budget of an agent with one unsigned transaction that it sends again and again. That would block every other user of the agent.
+- The limit for each caller stops one caller from using the whole budget of an agent with one transaction that it sends again and again. That would block every other user of the agent.
 - The limit for all callers bounds what one host gets from this server. Ten callers at their limit fill it.
 - The checks above run before the count, and a refused request does not count. A transaction that fails a check does not use a slot.
 
@@ -261,7 +265,8 @@ The result lists the keys that have signed and the keys that are still missing, 
 1. it decodes the transaction itself;
 2. the only action is the Delegate: one delegation token minted, `is_valid` true, and no withdrawal, no certificate, no vote and no proposal;
 3. no input and no collateral input is at an address of a key of the agent;
-4. the datum names this agent and one of its own delegation keys.
+4. the datum names this agent and one of its own delegation keys;
+5. the delegator side signed the body first: the transaction holds one vkey witness of each required signer of the body except the delegate key, and of the principal key of the datum, and each one verifies over the body hash (a request without them can get `403` `principal_not_allowed`).
 
 The agent never signs anything else with a delegation key.
 
