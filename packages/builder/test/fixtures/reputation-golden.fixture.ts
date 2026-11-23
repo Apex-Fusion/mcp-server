@@ -2,7 +2,7 @@
 // Golden data for the reputation stake builders, read from Vector mainnet through Koios (utxo_info, script_info) by
 // capture-reputation-golden.mjs. Do not edit by hand. It holds the outputs of the identity-era Module-3 deployment (deploy_state.json of
 // vector-agent-modules Module-3/deploy/identity/mainnet, deployed 2026-11-03) and three identity records of the identity registry that
-// the reputation validator reads. The deployment has never held a stake output, so no stake is captured: the tests build the stakes.
+// the reputation validator reads. It also holds one stake output of the deployment: the tests of the codec and of the reader use it, and the builder tests build their stakes.
 import type { UTxO } from '@lucid-evolution/lucid';
 
 /** The compiled reputation validator (Plutus V3) as the reference script output holds it; its hash is REPUTATION_SCRIPT_HASH. */
@@ -15,6 +15,12 @@ export const REPUTATION_REF_UTXO: UTxO = { txHash: '0add1592bdf312fede7f66c48835
 export const PARAMS_UTXO: UTxO = { txHash: 'bcd480d70063e2c7be3c9df2447b67a764e180fc73a3cd3481000a62fcd713d3', outputIndex: 0, address: 'addr1wxaeuer7d65hgafupdsl7gesmnm6yacsa92v53strt4jf3guqevxp', assets: { lovelace: 3000000n, '8295dad015ecba3d5f7b346083d0c879794ab065b1c7ec1a533f2657706172616d73': 1n }, datum: 'd879961a009896801a004c4b401a017d78401a05265c001a0a4cb800186418b41901f41903e8031913881901f41a02932e001a05265c001a01499700186418321a05f5e1001b000001a23227a8a31b0000000134fd9000884b636f64655f7265766965774774657374696e674a6465706c6f796d656e744d646f63756d656e746174696f6e4e73656375726974795f61756469744c6172636869746563747572654d646174615f616e616c797369734b6d6c5f747261696e696e671a00dbba00' };
 /** The cross-validator references: the token `reputation_refs`, and a datum that names the reputation and the endorsement validators. */
 export const CROSS_REFS_UTXO: UTxO = { txHash: 'f194fa5a853e2a775fac5f8091b6d9d412adcfe6c5845512fa3304b00ebc7a44', outputIndex: 0, address: 'addr1wxaeuer7d65hgafupdsl7gesmnm6yacsa92v53strt4jf3guqevxp', assets: { lovelace: 3000000n, '78d0c5547001110c61bcafb143d1c332b7427d91b9ce3f9dbb8d364a72657075746174696f6e5f72656673': 1n }, datum: 'd87982581cfad945ab20f61a58fbdf6a33a8f491899b7dd4167fb64200bc060424581c21ac1502ba7bab74e98ef3ad256bba1622a1351934ac19d0432126fe' };
+
+/**
+ * A stake output of the deployment, as the chain holds it: the stake of a test record of the Foundation, made with the stake tools of this server.
+ * Its decrease of 2026-11-23 wrote this output. It holds 11 AP3X, the stake token of its agent, two capabilities and no challenge lock.
+ */
+export const LIVE_STAKE_UTXO: UTxO = { txHash: '48d4ce7bbd9141a0e5787af08a2cb14aa6c75b64134f874fa64bc8a4155eb6ad', outputIndex: 0, address: 'addr1w8adj3dtyrmp5k8mma4r8285jxyeklw5zelmvssqhsrqgfqc9uavs', assets: { lovelace: 11000000n, 'fad945ab20f61a58fbdf6a33a8f491899b7dd4167fb64200bc0604247273746b5f1b98065ee43002664ff55bc12bba527c45b233b80cd7a4517e1581': 1n }, datum: 'd8799f58204e1272ee30e5bdf5ad75be55553563a7056ab228295c70ffda988892da4a8fe9d8799f581c34267e928e17c77063ee4957b6932182b7d804ed1d3f77c3f4121682ff1a00a7d8c09f56736d6f6b652e7374616b652d636865636b2e612e763156736d6f6b652e7374616b652d636865636b2e622e7631ff1b000001a207b940d80080d8799f5820c4ec66206f6f917519f411f9fbab1d709c918b30acf6bc7951759a513fa22c8c00ffff' };
 
 /** The identity records, at the identity address with their record tokens. `id` is the identifier (the token name). */
 export const AGENT_RECORDS: Record<string, { id: string; utxo: UTxO }> = {

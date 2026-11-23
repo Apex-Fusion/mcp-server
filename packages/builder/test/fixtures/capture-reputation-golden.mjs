@@ -1,14 +1,15 @@
 // packages/builder/test/fixtures/capture-reputation-golden.mjs
 //
-// One-time capture: reads the outputs of the identity-era Module-3 deployment and three identity records from Vector mainnet Koios, and
-// writes reputation-golden.fixture.ts, which the reputation tests hold the builders against. Read-only: it posts queries to Koios and
-// nothing else. Run it manually when the deployment changes:
+// One-time capture: reads the outputs of the identity-era Module-3 deployment, three identity records and one stake output from Vector
+// mainnet Koios, and writes reputation-golden.fixture.ts, which the reputation tests hold the builders and the codec against. Read-only: it
+// posts queries to Koios and nothing else. Run it manually when the deployment changes:
 //
 //   node packages/builder/test/fixtures/capture-reputation-golden.mjs [output path]
 //
 // VECTOR_MAINNET_KOIOS_URL overrides the Koios base (default https://v2.koios.vector.mainnet.apexfusion.org). Never runs in CI: the unit
 // tests read the checked-in fixture. Koios serves spent outputs through utxo_info too, so a later capture writes the same file for the
-// deployment outputs (which nobody can spend: the records move only with the operator key, and the reference script has no key).
+// deployment outputs (which nobody can spend: the records move only with the operator key, and the reference script has no key), and for a
+// stake output or an identity record that a later action has spent.
 import { writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +36,16 @@ const RECORDS = [
     id: '3d7a86639db2e21ab5538058aaff2c45aa9b9c7b4354653575bb4f5ec05b7a1e', ref: 'acb1a1224ec0c89c52dbdd56d7b262fda27b5d0d33508871ed59974c38e812ec#0' },
 ];
 
+// A stake output of the deployment: the output that a decrease of 2026-11-23 wrote on the stake of a test record of the Foundation.
+// `comment` is its doc comment in the fixture.
+const STAKE = {
+  ref: '48d4ce7bbd9141a0e5787af08a2cb14aa6c75b64134f874fa64bc8a4155eb6ad#0',
+  comment: [
+    'A stake output of the deployment, as the chain holds it: the stake of a test record of the Foundation, made with the stake tools of this server.',
+    'Its decrease of 2026-11-23 wrote this output. It holds 11 AP3X, the stake token of its agent, two capabilities and no challenge lock.',
+  ],
+};
+
 // ─── Koios ───────────────────────────────────────────────────────────────────
 async function post(path, body) {
   const res = await fetch(`${KOIOS}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json', 'user-agent': 'vector-mcp-builder-capture' }, body: JSON.stringify(body) });
@@ -43,7 +54,7 @@ async function post(path, body) {
 }
 const keyOf = (u) => `${u.tx_hash}#${u.tx_index}`;
 
-const refs = [...Object.values(MODULE), ...RECORDS.map((r) => r.ref)];
+const refs = [...Object.values(MODULE), ...RECORDS.map((r) => r.ref), STAKE.ref];
 const utxos = new Map((await post('/utxo_info', { _utxo_refs: refs, _extended: true })).map((u) => [keyOf(u), u]));
 for (const ref of refs) if (!utxos.has(ref)) throw new Error(`utxo_info did not return ${ref}`);
 const scripts = await post('/script_info', { _script_hashes: [REPUTATION_HASH] });
@@ -56,6 +67,9 @@ for (const r of RECORDS) {
   const held = (u.asset_list ?? []).filter((a) => a.policy_id === IDENTITY_HASH);
   if (held.length !== 1 || held[0].asset_name !== r.id || held[0].quantity !== '1' || !u.inline_datum?.bytes) throw new Error(`${r.ref} is not the record of ${r.id}`);
 }
+const stake = utxos.get(STAKE.ref);
+const stakeTokens = (stake.asset_list ?? []).filter((a) => a.policy_id === REPUTATION_HASH);
+if (stake.payment_cred !== REPUTATION_HASH || stakeTokens.length !== 1 || stakeTokens[0].quantity !== '1' || !stake.inline_datum?.bytes) throw new Error(`${STAKE.ref} is not a stake output of the reputation validator`);
 
 // ─── Writing ─────────────────────────────────────────────────────────────────
 const ts = (ref, withScript = false) => {
@@ -74,7 +88,7 @@ w('// packages/builder/test/fixtures/reputation-golden.fixture.ts');
 w('// Golden data for the reputation stake builders, read from Vector mainnet through Koios (utxo_info, script_info) by');
 w('// capture-reputation-golden.mjs. Do not edit by hand. It holds the outputs of the identity-era Module-3 deployment (deploy_state.json of');
 w('// vector-agent-modules Module-3/deploy/identity/mainnet, deployed 2026-11-03) and three identity records of the identity registry that');
-w('// the reputation validator reads. The deployment has never held a stake output, so no stake is captured: the tests build the stakes.');
+w('// the reputation validator reads. It also holds one stake output of the deployment: the tests of the codec and of the reader use it, and the builder tests build their stakes.');
 w("import type { UTxO } from '@lucid-evolution/lucid';");
 w('');
 w('/** The compiled reputation validator (Plutus V3) as the reference script output holds it; its hash is REPUTATION_SCRIPT_HASH. */');
@@ -86,6 +100,11 @@ w('/** The module parameters record: at the params holder, with the one-shot tok
 w(`export const PARAMS_UTXO: UTxO = ${ts(MODULE.PARAMS_UTXO)};`);
 w('/** The cross-validator references: the token `reputation_refs`, and a datum that names the reputation and the endorsement validators. */');
 w(`export const CROSS_REFS_UTXO: UTxO = ${ts(MODULE.CROSS_REFS_UTXO)};`);
+w('');
+w('/**');
+for (const line of STAKE.comment) w(` * ${line}`);
+w(' */');
+w(`export const LIVE_STAKE_UTXO: UTxO = ${ts(STAKE.ref)};`);
 w('');
 w('/** The identity records, at the identity address with their record tokens. `id` is the identifier (the token name). */');
 w('export const AGENT_RECORDS: Record<string, { id: string; utxo: UTxO }> = {');

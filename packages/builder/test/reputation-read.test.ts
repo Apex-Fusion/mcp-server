@@ -1,17 +1,21 @@
 // packages/builder/test/reputation-read.test.ts
 // The read of stakes from Koios asset_utxos (reputation-read.ts): the sum over the stakes of an agent, the sum 0 for an agent with no stake,
 // the checks of each row, and the failures. The stake rows are written as the live Koios answers (the row shape was read from the earlier
-// deployment on 2026-11-18); the datums are the 8-field datums of the identity-era deployment. Koios is a stubbed fetch: no network is touched.
+// deployment on 2026-11-18); the datums are the 8-field datums of the identity-era deployment. One test reads the stake that the identity-era
+// deployment holds, with the reference, the address, the AP3X, the datum and the token of the chain (LIVE_STAKE_UTXO). Koios is a stubbed fetch: no network is touched.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Constr, Data } from '@lucid-evolution/lucid';
 import { REPUTATION_ADDRESS, REPUTATION_SCRIPT_HASH, encodeStakeDatum, stakeTokenName, stakeTokenUnit } from '../src/vector/reputation-datum.ts';
 import type { StakeDatum } from '../src/vector/reputation-datum.ts';
 import { MAX_AGENTS_PER_READ, capabilityText, readStakes } from '../src/vector/reputation-read.ts';
+import { LIVE_STAKE_UTXO } from './fixtures/reputation-golden.fixture.ts';
 
 const A = '5542837bc3a6ccd66cb75ac91a796cf5716d439f4a72594bbfc06db7231029db';
 const B = 'b2'.repeat(32);
 const C = 'a3'.repeat(32);
+/** The agent of LIVE_STAKE_UTXO, the stake that the chain holds: a test record of the Foundation. */
+const LIVE_AGENT = '4e1272ee30e5bdf5ad75be55553563a7056ab228295c70ffda988892da4a8fe9';
 const KOIOS = 'https://koios.example/';
 const OWNER = '401af418a7e6fb106277292881fcdeaa1cc15b5b112e9c8bdb2d46c9';
 const hex = (text: string) => Buffer.from(text).toString('hex');
@@ -60,6 +64,25 @@ describe('readStakes', () => {
     assert.equal(a.tokenUnit, stakeTokenUnit(A));
     assert.equal(a.total, 10_000_000n);
     assert.deepEqual(b, { agentId: B, tokenUnit: stakeTokenUnit(B), stakes: [], total: 0n }, 'an agent with no stake has the sum 0');
+  });
+
+  test('reads the stake that the chain holds as vector_get_reputation_stake reports it: 11 AP3X, the two capabilities, last_updated, no lock', async () => {
+    // LIVE_STAKE_UTXO is the stake of a test record of the Foundation. The row takes the reference, the address, the AP3X, the datum and the token from the chain data, so the
+    // address that the read accepts and the token that it asks for are held against the chain, not against the code.
+    const { txHash, outputIndex, address, assets, datum } = LIVE_STAKE_UTXO;
+    const unit = Object.keys(assets).find((u) => u !== 'lovelace')!;
+    const policy = unit.slice(0, 56);
+    const name = unit.slice(56);
+    const k = koios([row(LIVE_AGENT, `${txHash}#${outputIndex}`, datum!, { address, value: String(assets.lovelace), asset_list: [{ policy_id: policy, asset_name: name, quantity: String(assets[unit]) }] })]);
+    const [agent] = await readStakes(KOIOS, [LIVE_AGENT], k.fetchImpl);
+    assert.deepEqual(JSON.parse(k.calls[0].init.body as string), { _asset_list: [[policy, name]], _extended: true }, 'the read asks Koios for the token that the stake holds');
+    assert.deepEqual(agent, {
+      agentId: LIVE_AGENT, tokenUnit: unit, total: 11_000_000n,
+      stakes: [{
+        ref: '48d4ce7bbd9141a0e5787af08a2cb14aa6c75b64134f874fa64bc8a4155eb6ad#0', stakeAmount: 11_000_000n, lovelace: 11_000_000n, capabilities: ['smoke.stake-check.a.v1', 'smoke.stake-check.b.v1'],
+        lastUpdated: 1_795_425_911_000, challengeLocks: 0, stakeId: 'c4ec66206f6f917519f411f9fbab1d709c918b30acf6bc7951759a513fa22c8c#0', ownerKeyHash: '34267e928e17c77063ee4957b6932182b7d804ed1d3f77c3f4121682', historyPoints: 0n,
+      }],
+    });
   });
 
   test('an agent with more than one stake: each is listed (in the order of its reference) and the sum adds their stake_amount', async () => {
