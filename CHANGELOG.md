@@ -329,6 +329,26 @@
 
 ### Changed
 
+- **`vector_delegation_request_cosign` takes a Delegate transaction that the delegator side signed (route contract, version 2).** The
+  request now carries the signatures of the delegator side: for each required signer of the body except the delegate key, and for the
+  principal key of the datum, exactly one vkey witness that verifies over the body hash. An agent can refuse a request without them with
+  403 `principal_not_allowed`. An agent may also accept only some delegators, for example only principal keys, and refuse the others
+  with the same code. Before this change, the tool sent the transaction as the caller gave it, also with none of these signatures (route
+  contract, version 1). Now the tool applies the rule before it asks the node or the agent. No tool is added or removed.
+  - The delegator side is the principal key of a delegator that is a key, the key that signs for a delegator that is an agent, and the
+    delegate key of the parent delegation in a sub-delegation. The tool refuses a transaction in which one of these keys has no vkey
+    witness, or two witnesses. A witness of one of these keys whose signature does not verify over the body hash is refused too. The
+    text names each key with its role, says to sign the transaction with the key or keys of the delegator (`vector_signer_sign`), and
+    says to call the tool again. Nothing is sent.
+  - When the datum names a principal key as the delegator, the tool also asks for its witness when the body does not list that key as a
+    required signer. The delegation script refuses such a transaction at submit, but the request does not leave without the witness. The
+    same holds when that key is also the delegate key.
+  - The check needs the bytes of the transaction only. It runs before the tool reads the node or the record of the delegate, so a
+    refused call uses no slot of the two limits for each host (the server rate limit still counts the call).
+  - The tool cannot know the policy of an agent on delegators, so the agent decides it. An agent can still refuse with
+    `principal_not_allowed` for it.
+  - Texts: the description of the tool, the description of `txCbor`, the tips after a refusal, the README row of the tool, and the
+    README section "Delegation co-signature route" (its heading is now "Route, version 2", with one sentence on what changed).
 - **Refusal texts say who refuses.** The text of a contract rule names the contract, the redeemer and the rule, and says
   that the chain refuses the same transaction (vault Pay, Delegate, Undelegate, escrow spends). A rule of the builder
   alone says that the builder refuses. A Post above the value cap is refused by the builder; the identity escrow

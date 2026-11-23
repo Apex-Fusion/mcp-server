@@ -3,10 +3,13 @@
 // signature of the delegate key of the agent that receives the delegation, and only that agent holds the delegate key. This file
 // carries the transaction to the agent and takes one witness from its answer. It holds no key and adds no signature of its own.
 //
-// The route, version 1. An agent serves `POST <origin of its endpoint>/cosign/delegate` with `content-type: application/json` and the
-// body `{ "transaction": "<hex CBOR>" }`. It answers `200 { "transaction": "<hex CBOR>" }`: the same transaction body, every witness that
-// the request carried, and one more vkey witness, of the delegate key. It refuses with a 4xx and `{ "error": "<code>", "message": "<words>" }`.
-// The codes are COSIGN_CODES. The route is public: anybody can call it, not only this tool.
+// The route, version 2. An agent serves `POST <origin of its endpoint>/cosign/delegate` with `content-type: application/json` and the
+// body `{ "transaction": "<hex CBOR>" }`. The transaction carries the signatures of the delegator side: one vkey witness of each
+// required signer of the body except the delegate key, and of the principal key of the datum, each one verifying over the body hash
+// (version 1 had no such rule). An agent can refuse a request without them with 403 `principal_not_allowed`. It answers
+// `200 { "transaction": "<hex CBOR>" }`: the same transaction body, every witness that the request carried, and one more vkey witness, of
+// the delegate key. It refuses with a 4xx and `{ "error": "<code>", "message": "<words>" }`. The codes are COSIGN_CODES. The route is
+// public: anybody can call it, not only this tool.
 //
 // Where a request goes. The tool takes no URL and no agent from the caller. It reads the delegate from the transaction, reads the
 // identity record of the delegate from the chain, and sends to the origin of the `endpoint` in that record with the fixed path. The
@@ -31,6 +34,16 @@
 // value, and none of them empty or 0), has no witness of the delegate key yet, and has a period of less than 2^53 ms (the codec reads
 // whole numbers up to that). Otherwise nothing is sent.
 //
+// The signatures of the delegator side. A Delegate transaction needs the signatures of two sides: the delegator side, and the delegate
+// key of the agent that gets the delegation. The delegator side is each required signer of the body except the delegate key: the
+// principal key of a delegator that is a key, the key that signs for a delegator that is an agent, or the delegate key of the parent
+// delegation in a sub-delegation. The tool also asks for the principal key that the datum names as the delegator when the body does not
+// list it (delegatorSideOf), so that a Delegate that omits it still needs its witness before any send. The tool applies this rule
+// before it asks the node or the agent (delegatorProblem): for each of these keys the transaction has exactly ONE vkey witness, and its
+// signature verifies over the body hash by the rules of the ledger (delegatorSigned). An agent can refuse a request without these
+// signatures with 403 `principal_not_allowed`. An agent may also accept only some delegators, for example only principal keys, and
+// refuse the others with the same code. The tool cannot know that policy, so the agent decides it.
+//
 // The bytes of a transaction that another party wrote are read before a decoder library sees them. The keys of the body of the transaction
 // of the caller are read from the bytes (readBody), and a body that has the key of a part that a delegation does not use is refused. The
 // body of the answer of the agent must be, byte for byte, the body that was sent. The only place where this file decodes a transaction with
@@ -52,11 +65,11 @@ import { safeFetch } from './safe-fetch.js';
 import type { SafeFetchOpts } from './safe-fetch.js';
 import { readTransactionBody } from './tx-body.js';
 
-/** The version of the route that this file speaks. */
-export const COSIGN_ROUTE_VERSION = 1;
+/** The version of the route that this file speaks. Version 2 adds the signature of the delegator to the request. */
+export const COSIGN_ROUTE_VERSION = 2;
 /** The path of the route, on the origin of the endpoint in the record of the delegate. */
 export const COSIGN_PATH = '/cosign/delegate';
-/** The refusal codes of the route (version 1). */
+/** The refusal codes of the route (the same in version 1 and version 2). */
 export const COSIGN_CODES = ['not_a_delegation', 'not_for_this_agent', 'key_in_use', 'principal_not_allowed', 'spends_agent_funds', 'expired'] as const;
 export type CosignCode = typeof COSIGN_CODES[number];
 /** The tool's own words for each code. The words of the agent are never shown. */
@@ -381,15 +394,68 @@ export function readDelegateTransaction(txCbor: string, deployment: IdentityDepl
 
   const txHash = CML.hash_transaction(body).to_hex();
   const witnesses = witnessesOf(tx.witness_set());
+  const delegatorSide = delegatorSideOf(delegation, requiredSigners);
   for (const w of witnesses) {
     if (!signatureVerifies(Buffer.from(w.publicKey, 'hex'), Buffer.from(w.signature, 'hex'), Buffer.from(txHash, 'hex'))) {
-      throw new Error(`The transaction carries a vkey witness of key ${w.keyHash} whose signature does not verify over the body hash ${txHash}, so the ledger refuses it.`);
+      throw new Error(`The transaction carries a vkey witness of key ${w.keyHash} whose signature does not verify over the body hash ${txHash}, so the ledger refuses it.${delegatorSide.includes(w.keyHash) ? ` The role of this key: ${roleOf(w.keyHash, delegation)}. ${SIGN_WITH_DELEGATOR}` : ''}`);
     }
   }
   return {
     txCbor: hex, bodyHex: found.bodyHex, txHash, id: token.name, delegation, witnesses, requiredSigners, inputs: uniqueRefs([...spent, ...refsOf(body.collateral_inputs())]),
     references, validityStart: body.validity_interval_start(), ttl: body.ttl(), tx,
   };
+}
+
+// ─── The signatures of the delegator side: the rule of the route, applied before anything is asked ──────────────────────────────
+
+/** What to do when the delegator side has not signed a transaction, or has signed it in a way that the route does not take. */
+const SIGN_WITH_DELEGATOR = 'Sign the transaction with the key or keys of the delegator first (vector_signer_sign { txCbor }), then call this tool again with the signed transaction.';
+
+/**
+ * The keys of the delegator side: each required signer of the body except the delegate key, and the principal key that the datum names
+ * as the delegator when the body does not list it (the delegation script refuses such a transaction when the user submits it, and the
+ * request must not leave without that witness). Each key comes once: the required signers in the order of the body, then the principal key.
+ * The principal key stays in the set also when it is the delegate key (a self-delegation), because the delegate key leaves the set first.
+ * Such a transaction needs the witness of that key before any send. With the witness it carries a signature of the delegate key, and
+ * prepare refuses it for that reason: there is nothing to request.
+ */
+function delegatorSideOf(delegation: DelegationDatum, requiredSigners: readonly string[]): string[] {
+  const keys = new Set(requiredSigners);
+  keys.delete(delegation.delegateKey);
+  if (delegation.delegator.type === 'PrincipalKey') keys.add(delegation.delegator.hash);
+  return [...keys];
+}
+
+/**
+ * Did the key `keyHash` sign this body? The transaction holds ONE vkey witness whose key hashes to `keyHash`, and its signature verifies
+ * over the body hash by the rules of the ledger (signatureVerifies, which also needs a key of 32 bytes and a signature of 64 bytes). Two
+ * witnesses of the key are not one, also when their signatures are the same: a witness of the key that does not verify cannot hide
+ * behind one that does. This is the rule for one key of the delegator side; delegatorProblem asks it of each of them.
+ */
+export function delegatorSigned(sent: Pick<DelegateTransaction, 'witnesses' | 'txHash'>, keyHash: string): boolean {
+  const own = sent.witnesses.filter((w) => w.keyHash === keyHash);
+  return own.length === 1 && signatureVerifies(Buffer.from(own[0].publicKey, 'hex'), Buffer.from(own[0].signature, 'hex'), Buffer.from(sent.txHash, 'hex'));
+}
+
+/**
+ * The words of a refusal when `sent` does not carry the signatures of the delegator side, or null. The delegator side is each required
+ * signer of the body except the delegate key (the principal key of a delegator that is a key, the key that signs for a delegator that is
+ * an agent, or the delegate key of the parent delegation in a sub-delegation), and the principal key of the datum when the body does not
+ * list it (delegatorSideOf). Each of them must have signed (delegatorSigned). The words name each key that did not, with its role, and
+ * say what to do. An agent can refuse a request without these signatures with 403 principal_not_allowed, so the tool says so before it
+ * asks the node or the agent.
+ */
+export function delegatorProblem(sent: DelegateTransaction): string | null {
+  const faults: string[] = [];
+  for (const keyHash of delegatorSideOf(sent.delegation, sent.requiredSigners)) {
+    if (delegatorSigned(sent, keyHash)) continue;
+    const count = sent.witnesses.filter((w) => w.keyHash === keyHash).length;
+    const has = count === 0 ? 'no vkey witness' : count === 1 ? 'one vkey witness that does not verify over the body hash' : `${count} vkey witnesses`;
+    faults.push(`key ${keyHash}, ${roleOf(keyHash, sent.delegation)}, has ${has}`);
+  }
+  if (faults.length === 0) return null;
+  return `The transaction does not carry the signatures of the delegator side: ${faults.join('; ')}. ` +
+    `The route takes exactly one vkey witness of each key of the delegator side, and each one must verify over the body hash. ${SIGN_WITH_DELEGATOR}`;
 }
 
 // ─── The window, the delegate and the inputs: rules of the ledger that the tool mirrors without running the scripts ──────────────
@@ -455,12 +521,14 @@ async function walletKeys(provider: Provider, sent: DelegateTransaction): Promis
   return [...keyHashes];
 }
 
-/** The role of a required signer of the body, from what the datum says. */
+/**
+ * The role of a required signer of the body, from what the datum says. The check of the signatures of the delegator side runs before
+ * the tool reads any record or parent delegation, so a signer of an agent delegator is named by the delegator only.
+ */
 function roleOf(keyHash: string, delegation: DelegationDatum): string {
   if (keyHash === delegation.delegateKey) return `delegate key (${didOf(delegation.delegate)})`;
   if (delegation.delegator.type === 'PrincipalKey') return delegation.delegator.hash === keyHash ? 'principal key (delegator)' : 'required signer of the transaction';
-  if (delegation.parent !== null) return `delegate key of the parent delegation ${delegation.parent} (${didOf(delegation.delegator.id)})`;
-  return `signs for the delegator ${didOf(delegation.delegator.id)}`;
+  return `required signer for the delegator ${didOf(delegation.delegator.id)}`;
 }
 
 // ─── The answer of the agent ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -605,6 +673,9 @@ async function prepare(ctx: { provider: Provider; deployment: IdentityDeployment
   if (sent.witnesses.some((w) => w.keyHash === key)) {
     throw new Error(`The transaction already carries a signature of the delegate key ${key}: there is nothing to request. Sign it with the other required keys and submit it.`);
   }
+  // The signatures of the delegator side need the bytes of the transaction only, so the check comes before every read of the node.
+  const problem = delegatorProblem(sent);
+  if (problem !== null) throw new Error(problem);
   const window = await windowOf(provider, sent, now);
   const records = await recordWithAncestors(provider, deployment, sent.delegation.delegate, 'record of the delegate');
   const delegate = records[0].record;
@@ -623,8 +694,8 @@ async function prepare(ctx: { provider: Provider; deployment: IdentityDeployment
  * Asks the delegate of the Delegate transaction `txCbor` to co-sign it (the route above) and returns the transaction that the caller
  * gave with the witness of the delegate key added, the keys that have signed and the keys that are still missing. `ctx.caller` is the
  * identity of the caller, for the limit for each caller and origin. Refuses before the send what the tool can check without running
- * the scripts, and when the record of the delegate has no https endpoint; refuses after the answer when it breaks the route contract.
- * A refusal of the agent is an AgentRefusal.
+ * the scripts, a transaction that the delegator side did not sign (delegatorProblem), and a record of the delegate with no https
+ * endpoint; refuses after the answer when it breaks the route contract. A refusal of the agent is an AgentRefusal.
  */
 export async function requestDelegationCosign(ctx: { provider: Provider; deployment: IdentityDeployment; caller: string }, txCbor: string, access: CosignAccess = {}): Promise<CosignResult> {
   const { sent, endpoint, window, wallet } = await prepare(ctx, txCbor, (access.now ?? Date.now)()).catch((err: unknown) => { throw new Error(`${errorText(err)} Nothing was sent.`); });

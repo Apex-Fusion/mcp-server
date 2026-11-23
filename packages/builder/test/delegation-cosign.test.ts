@@ -1,10 +1,12 @@
 // packages/builder/test/delegation-cosign.test.ts
 // The co-signature of a Delegate transaction by the delegate agent: what the tool reads from the transaction and asks of the ledger
-// before it sends anything, where the request goes, what it takes from the answer, and what the result is. The keys of the body of a
-// transaction of another party are read from the bytes before a decoder library reads it, and the tests count the calls of the library.
-// The node is the offline identity world, the Delegate transaction comes from the real builder, and a transaction is built and co-signed
-// on the same world. The agent is a fake fetch that records every request. Each refusal has the good path as its twin in the same test.
-// No network.
+// before it sends anything, where the request goes, what it takes from the answer, and what the result is. The route (version 2) takes
+// the signatures of the delegator side with the request, so the tool refuses a transaction that lacks them before it reads the node. The
+// tests of that rule give the transaction as it is (cosignAsGiven); the other tests sign it first with the keys of the delegator side, as
+// a member does (cosign). The keys of the body of a transaction of another party are read from the bytes before a decoder library reads
+// it, and the tests count the calls of the library. The node is the offline identity world, the Delegate transaction comes from the real
+// builder, and a transaction is built and co-signed on the same world. The agent is a fake fetch that records every request. Each
+// refusal has the good path as its twin in the same test. No network.
 import { afterEach, describe, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -28,7 +30,7 @@ import { buildUndelegate } from '../src/vector/delegation-build.ts';
 import type { DelegateBuild, DelegateParams } from '../src/vector/delegation-build.ts';
 import {
   AgentRefusal, CALLER_ORIGIN_LIMIT_PER_MINUTE, CODE_TEXT, COSIGN_CALL, COSIGN_CODES, COSIGN_PATH, COSIGN_USER_AGENT, MAX_COSIGN_TX_HEX, ORIGIN_LIMIT_PER_MINUTE, SMALL_ORDER_ENCODINGS,
-  agentEndpoint, cosignWitnessOf, extraPartsOf, hasSmallOrder, newOriginLimiter, readDelegateTransaction, requestDelegationCosign, signatureVerifies, withWitness,
+  agentEndpoint, cosignWitnessOf, delegatorProblem, delegatorSigned, extraPartsOf, hasSmallOrder, newOriginLimiter, readDelegateTransaction, requestDelegationCosign, signatureVerifies, withWitness,
 } from '../src/vector/delegation-cosign.ts';
 import type { OriginLimiter } from '../src/vector/delegation-cosign.ts';
 import { decodeDelegationDatum, encodeDelegationDatum, utf8Hex } from '../src/vector/identity-codec.ts';
@@ -728,10 +730,42 @@ describe('withWitness: the transaction that the caller gave, with the witness of
 interface Setup { provider?: FixtureProvider; now?: number; limiter?: OriginLimiter; caller?: string }
 /** Limits that no test reaches, for the tests that are not about the limits. */
 const openLimiter = () => newOriginLimiter({ perCallerAndOrigin: 1_000, perOrigin: 1_000 });
-const cosign = (txCbor: string, fetchImpl: typeof fetch, setup: Setup = {}) =>
+/** The call of the tool with the transaction exactly as it is given. The tests of the rule of the delegator side use it. */
+const cosignAsGiven = (txCbor: string, fetchImpl: typeof fetch, setup: Setup = {}) =>
   requestDelegationCosign({ provider: setup.provider ?? world(), deployment: DEPLOYMENT, caller: setup.caller ?? 'caller-a' }, txCbor, {
     fetchImpl, lookup: publicLookup, now: () => setup.now ?? AT_BUILD, originLimiter: setup.limiter ?? openLimiter(),
   });
+/** The keys of the delegator side that the tests hold: the principal key, a stranger, and the delegate key of the parent delegation of the sub-delegation tests. */
+const HELD_KEYS = [PRINCIPAL_KEY, STRANGER_KEY, signingKey(2)];
+/** The key hashes in the required signers of the body of `cbor`. */
+function requiredSignersOf(cbor: string): string[] {
+  const list = txOf(cbor).body().required_signers();
+  return Array.from({ length: list?.len() ?? 0 }, (_, i) => list!.get(i).to_hex());
+}
+/**
+ * The transaction as a member sends it (route contract, version 2): the delegator side signs it first. A transaction that has no witness
+ * yet is signed with each key of HELD_KEYS that is one of its required signers (the delegate key is not one of them: the agent signs
+ * with it). A transaction that has a witness already is given as it is.
+ */
+function delegatorSignsFirst(txCbor: string): string {
+  if (vkeysOf(txCbor).length > 0) return txCbor;
+  const keys = HELD_KEYS.filter((key) => requiredSignersOf(txCbor).includes(key.keyHash));
+  return keys.length === 0 ? txCbor : signedBy(txCbor, ...keys);
+}
+/** The call of a member: the delegator side signs first, then the tool is called. */
+const cosign = (txCbor: string, fetchImpl: typeof fetch, setup: Setup = {}) => cosignAsGiven(delegatorSignsFirst(txCbor), fetchImpl, setup);
+/** The node of a sub-delegation: the record of the agent that delegates on, and the parent delegation of a principal key to that agent (its delegate key is LISTED). */
+function subDelegationWorld(agentId: string, parentId: string): FixtureProvider {
+  const parent: UTxO = {
+    txHash: 'dd'.repeat(32), outputIndex: 1, address: DEPLOYMENT.delegation.address, assets: { lovelace: 1_500_000n, [`${POLICY}${parentId}`]: 1n },
+    datum: encodeDelegationDatum({
+      delegator: { type: 'PrincipalKey', hash: PRINCIPAL_KEY.keyHash, organisation: null }, parent: null, delegate: agentId, delegateKey: LISTED.keyHash,
+      actions: [utf8Hex(HIRE_ACTION)], resources: [utf8Hex('*')], notBefore: NOW - 10 * DAY, notAfter: NOW + 60 * DAY, depth: 1, remaining: 2, purpose: null,
+      value: { perTx: 100_000_000n, total: 1_000_000_000n, periodMs: DAY },
+    }),
+  };
+  return world(ENDPOINT, recordUtxo(agentId, rootRecord()), parent);
+}
 /** A node that does not hold these outputs, as one that has seen them spent. */
 function without(provider: FixtureProvider, ...gone: string[]): FixtureProvider {
   const real = provider.getUtxosByOutRef.bind(provider);
@@ -937,10 +971,11 @@ describe('the keys of the body are read from the bytes, and the decoder library 
 
   test('the whole call: a transaction with one of the six keys is refused before the library and before the send; a good call decodes the transaction and the answer, once each', async () => {
     const b = await delegateBuild();
-    const answer = cosigned(b.txCbor);
+    const sent = signedBy(b.txCbor, PRINCIPAL_KEY);
+    const answer = cosigned(sent);
     const agent = agentFetch(() => json(200, { transaction: answer }));
     const decoder = decoderCalls();
-    const r = await cosign(b.txCbor, agent.fetchImpl);
+    const r = await cosignAsGiven(sent, agent.fetchImpl);
     assert.equal(r.txHash, b.txHash);
     assert.equal(decoder.mock.callCount(), 2, 'the transaction of the caller and the answer');
     decoder.mock.restore();
@@ -949,7 +984,7 @@ describe('the keys of the body are read from the bytes, and the decoder library 
       const tx = withBody(b.txCbor, { change: alone });
       const refused = agentFetch(() => json(200, { transaction: answer }));
       const spy = decoderCalls();
-      await assert.rejects(cosign(tx, refused.fetchImpl), /it must do nothing but delegate \(.*\)\. Nothing was sent\.$/, String(key));
+      await assert.rejects(cosignAsGiven(tx, refused.fetchImpl), /it must do nothing but delegate \(.*\)\. Nothing was sent\.$/, String(key));
       assert.equal(spy.mock.callCount(), 0, `${key}: the library is not called`);
       assert.equal(refused.calls.length, 0, `${key}: nothing was sent`);
       spy.mock.restore();
@@ -1062,20 +1097,22 @@ describe('the body of an answer is compared in the bytes, and the decoder librar
 
   test('the whole call: an answer with another body is refused after one decode, the one of the transaction of the caller', async () => {
     const b = await delegateBuild();
+    const sent = signedBy(b.txCbor, PRINCIPAL_KEY);
     const answer = cosigned(withBodyKey(b.txCbor, '04', '80'));
     const agent = agentFetch(() => json(200, { transaction: answer }));
     const decoder = decoderCalls();
-    await assert.rejects(cosign(b.txCbor, agent.fetchImpl), message(new RegExp(`^The answer of the agent of ${DELEGATE_DID} at ${ENDPOINT} is refused: its body is not the body that was sent\\. Nothing from the agent is used\\.$`)));
+    await assert.rejects(cosignAsGiven(sent, agent.fetchImpl), message(new RegExp(`^The answer of the agent of ${DELEGATE_DID} at ${ENDPOINT} is refused: its body is not the body that was sent\\. Nothing from the agent is used\\.$`)));
     assert.equal(decoder.mock.callCount(), 1);
     assert.equal(agent.calls.length, 1);
   });
 });
 
 describe('requestDelegationCosign: the good path', () => {
-  test('an unsigned transaction: one POST to the origin of the record endpoint with the fixed path; the agent signs; the rest are missing', async () => {
+  test('a transaction that the delegator signed: one POST to the origin of the record endpoint with the fixed path, as it came in; the agent signs; only the wallet is missing', async () => {
     const b = await delegateBuild();
+    const sent = signedBy(b.txCbor, PRINCIPAL_KEY);
     const agent = faithfulAgent();
-    const r = await cosign(b.txCbor, agent.fetchImpl);
+    const r = await cosign(sent, agent.fetchImpl);
 
     assert.equal(agent.calls.length, 1);
     const [call] = agent.calls;
@@ -1085,37 +1122,26 @@ describe('requestDelegationCosign: the good path', () => {
     assert.equal(call.headers.accept, 'application/json');
     assert.equal(call.headers['user-agent'], COSIGN_USER_AGENT);
     assert.equal(COSIGN_USER_AGENT, `vector-mcp-builder/${SERVER_VERSION}`, 'the server and its version');
-    assert.deepEqual(JSON.parse(call.body), { transaction: b.txCbor });
+    assert.deepEqual(JSON.parse(call.body), { transaction: sent }, 'the transaction goes out as it came in, the witness of the delegator included');
     assert.equal(call.redirect, 'manual', 'no redirect is followed');
     assert.equal(call.hasSignal, true, 'the call has a time budget');
 
-    assert.equal(r.txCbor, cosigned(b.txCbor));
+    assert.equal(r.txCbor, cosigned(sent));
     assert.equal(r.txHash, b.txHash);
     assert.equal(r.id, b.id);
     assert.deepEqual(r.delegation, b.delegation);
     assert.deepEqual(r.agent, { did: DELEGATE_DID, origin: ENDPOINT });
     assert.deepEqual(r.coSigner, { keyHash: DELEGATE_KEY.keyHash, publicKey: DELEGATE_KEY.publicKey });
-    assert.deepEqual(r.signed, [DELEGATE_KEY.keyHash]);
-    assert.deepEqual(keyHashesOf(r.txCbor), [DELEGATE_KEY.keyHash]);
+    assert.deepEqual(r.signed, [PRINCIPAL_KEY.keyHash, DELEGATE_KEY.keyHash]);
+    assert.deepEqual(keyHashesOf(r.txCbor), [PRINCIPAL_KEY.keyHash, DELEGATE_KEY.keyHash], 'the witness of the delegator stays, the witness of the agent is last');
     assert.equal(r.validFrom, NOW - 60_000, 'the window of the build, read from the body');
     assert.equal(r.validTo, NOW + 30 * 60_000);
     assert.deepEqual(sorted(r.required.map((s) => s.keyHash)), sorted([PRINCIPAL_KEY.keyHash, DELEGATE_KEY.keyHash, OWN_KEY_HASH]));
-    assert.deepEqual(sorted(r.missing.map((s) => s.keyHash)), sorted([PRINCIPAL_KEY.keyHash, OWN_KEY_HASH]));
+    assert.deepEqual(r.missing.map((s) => s.keyHash), [OWN_KEY_HASH], 'only the wallet is missing');
     const role = (hash: string) => r.required.find((s) => s.keyHash === hash)!.roles;
     assert.deepEqual(role(DELEGATE_KEY.keyHash), [`delegate key (${DELEGATE_DID})`]);
     assert.deepEqual(role(PRINCIPAL_KEY.keyHash), ['principal key (delegator)']);
     assert.deepEqual(role(OWN_KEY_HASH), ['wallet (inputs, fee and collateral)']);
-  });
-
-  test('a transaction that the delegator signed: the witness stays, the agent adds its own, and only the wallet is missing', async () => {
-    const b = await delegateBuild();
-    const sent = signedBy(b.txCbor, PRINCIPAL_KEY);
-    const agent = faithfulAgent();
-    const r = await cosign(sent, agent.fetchImpl);
-    assert.equal(requestedTx(agent.calls[0]), sent, 'the transaction goes out as it came in, witnesses included');
-    assert.deepEqual(r.signed, [PRINCIPAL_KEY.keyHash, DELEGATE_KEY.keyHash]);
-    assert.deepEqual(r.missing.map((s) => s.keyHash), [OWN_KEY_HASH]);
-    assert.deepEqual(keyHashesOf(r.txCbor), [PRINCIPAL_KEY.keyHash, DELEGATE_KEY.keyHash]);
   });
 
   test('a transaction is built and co-signed on one world: the instance that built it holds what the tool reads, and it builds the shared transaction', async () => {
@@ -1125,16 +1151,17 @@ describe('requestDelegationCosign: the good path', () => {
     const agent = faithfulAgent();
     const r = await cosign(b.txCbor, agent.fetchImpl, { provider });
     assert.equal(r.txHash, b.txHash);
-    assert.deepEqual(r.signed, [DELEGATE_KEY.keyHash]);
+    assert.deepEqual(r.signed, [PRINCIPAL_KEY.keyHash, DELEGATE_KEY.keyHash]);
     assert.deepEqual(agent.calls.map((c) => c.url), [ROUTE]);
   });
 
   test('the request carries the transaction in lower case without spaces, whatever the caller wrote', async () => {
     const b = await delegateBuild();
+    const sent = signedBy(b.txCbor, PRINCIPAL_KEY);
     const agent = faithfulAgent();
-    const r = await cosign(`  ${b.txCbor.toUpperCase()}\n`, agent.fetchImpl);
-    assert.equal(requestedTx(agent.calls[0]), b.txCbor);
-    assert.equal(r.txCbor, cosigned(b.txCbor));
+    const r = await cosignAsGiven(`  ${sent.toUpperCase()}\n`, agent.fetchImpl);
+    assert.equal(requestedTx(agent.calls[0]), sent);
+    assert.equal(r.txCbor, cosigned(sent));
   });
 
   test('every key has signed: nothing is missing (the twin without the wallet witness misses the wallet key)', async () => {
@@ -1183,33 +1210,278 @@ describe('requestDelegationCosign: the good path', () => {
     assert.equal(other.txCbor, withWitness(read(sent), cosignWitnessOf(read(sent), cosigned(sent))));
   });
 
-  test('a delegator that is an agent: its controller is a required signer, and its role says whom it signs for', async () => {
+  test('a delegator that is an agent: the key that signs for it is a required signer and has signed, and its role names the delegator', async () => {
     const agentId = 'a1'.repeat(32);
     const provider = world(ENDPOINT, recordUtxo(agentId, rootRecord({ controller: PRINCIPAL_KEY.publicKey })));
     const b = await buildDelegation({ delegator: { type: 'Agent', id: agentId } }, false, provider);
     assert.deepEqual(b.delegation.delegator, { type: 'Agent', id: agentId });
-    const r = await cosign(b.txCbor, faithfulAgent().fetchImpl, { provider });
-    assert.deepEqual(r.required.find((s) => s.keyHash === PRINCIPAL_KEY.keyHash)!.roles, [`signs for the delegator did:vector:${agentId}`]);
-    assert.ok(r.missing.some((s) => s.keyHash === PRINCIPAL_KEY.keyHash));
+    const r = await cosign(signedBy(b.txCbor, PRINCIPAL_KEY), faithfulAgent().fetchImpl, { provider });
+    assert.deepEqual(r.required.find((s) => s.keyHash === PRINCIPAL_KEY.keyHash)!.roles, [`required signer for the delegator did:vector:${agentId}`]);
+    assert.deepEqual(r.signed, [PRINCIPAL_KEY.keyHash, DELEGATE_KEY.keyHash]);
+    assert.ok(!r.missing.some((s) => s.keyHash === PRINCIPAL_KEY.keyHash), 'it has signed, so it is not missing');
   });
 
-  test('a sub-delegation: the delegate key of the parent delegation signs, and its role says so', async () => {
+  test('a sub-delegation: the delegate key of the parent delegation is a required signer and has signed, and its role names the delegator', async () => {
     const agentId = 'a1'.repeat(32);
     const parentId = '9a'.repeat(32);
-    const parent: UTxO = {
-      txHash: 'dd'.repeat(32), outputIndex: 1, address: DEPLOYMENT.delegation.address, assets: { lovelace: 1_500_000n, [`${POLICY}${parentId}`]: 1n },
-      datum: encodeDelegationDatum({
-        delegator: { type: 'PrincipalKey', hash: PRINCIPAL_KEY.keyHash, organisation: null }, parent: null, delegate: agentId, delegateKey: LISTED.keyHash,
-        actions: [utf8Hex(HIRE_ACTION)], resources: [utf8Hex('*')], notBefore: NOW - 10 * DAY, notAfter: NOW + 60 * DAY, depth: 1, remaining: 2, purpose: null,
-        value: { perTx: 100_000_000n, total: 1_000_000_000n, periodMs: DAY },
-      }),
-    };
-    const provider = world(ENDPOINT, recordUtxo(agentId, rootRecord()), parent);
+    const provider = subDelegationWorld(agentId, parentId);
     const b = await buildDelegation({ delegator: undefined, parent: parentId }, false, provider);
     assert.equal(b.delegation.parent, parentId);
-    const r = await cosign(b.txCbor, faithfulAgent().fetchImpl, { provider });
-    assert.deepEqual(r.required.find((s) => s.keyHash === LISTED.keyHash)!.roles, [`delegate key of the parent delegation ${parentId} (did:vector:${agentId})`]);
-    assert.ok(r.missing.some((s) => s.keyHash === LISTED.keyHash));
+    const r = await cosign(signedBy(b.txCbor, signingKey(2)), faithfulAgent().fetchImpl, { provider });
+    assert.deepEqual(r.required.find((s) => s.keyHash === LISTED.keyHash)!.roles, [`required signer for the delegator did:vector:${agentId}`]);
+    assert.deepEqual(r.signed, [LISTED.keyHash, DELEGATE_KEY.keyHash]);
+    assert.ok(!r.missing.some((s) => s.keyHash === LISTED.keyHash), 'it has signed, so it is not missing');
+  });
+});
+
+// ─── The delegator side signs first (route contract, version 2) ────────────────────────────────────────────────────────────────
+
+/** A node that fails each call: a refusal that comes before every read of the node never touches it. */
+function silentNode(): FixtureProvider {
+  return new Proxy(world(), {
+    get: (target, prop, receiver) => {
+      const value: unknown = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? () => { throw new Error(`the node was asked: ${String(prop)}`); } : value;
+    },
+  });
+}
+
+const SIGN = 'Sign the transaction with the key or keys of the delegator first \\(vector_signer_sign \\{ txCbor \\}\\), then call this tool again with the signed transaction\\.';
+const PRINCIPAL_ROLE = 'principal key \\(delegator\\)';
+const SIGNER_ROLE = 'required signer of the transaction';
+/** What is wrong with a key that has no witness. */
+const hasNo = (keyHash: string, role: string) => `key ${keyHash}, ${role}, has no vkey witness`;
+/** The words of a refusal for keys that did not sign: `faults` says what is wrong with each key, in the order of the body. `tail` follows the words in the text of the tool. */
+const unsigned = (faults: string[], tail = ''): RegExp =>
+  new RegExp(`^The transaction does not carry the signatures of the delegator side: ${faults.join('; ')}\\. The route takes exactly one vkey witness of each key of the delegator side, and each one must verify over the body hash\\. ${SIGN}${tail}$`);
+
+describe('delegatorSigned: a key signed this body: exactly one witness of the key, and it verifies over the body hash', () => {
+  const key = PRINCIPAL_KEY.keyHash;
+  /** The shared build, signed by the delegator: what the tool reads from it, its witness and the hash of its body. */
+  const sealed = async () => {
+    const b = await delegateBuild();
+    const sent = read(signedBy(b.txCbor, PRINCIPAL_KEY));
+    return { b, sent, txHash: sent.txHash, good: sent.witnesses[0] };
+  };
+
+  test('one witness of the key that verifies over the body hash: yes; the witnesses of other keys around it do not matter', async () => {
+    const { b, good, txHash } = await sealed();
+    assert.equal(delegatorSigned({ witnesses: [good], txHash }, key), true);
+    for (const keys of [[STRANGER_KEY, PRINCIPAL_KEY], [PRINCIPAL_KEY, STRANGER_KEY], [STRANGER_KEY, PRINCIPAL_KEY, WALLET_KEY]]) {
+      assert.equal(delegatorSigned(read(signedBy(b.txCbor, ...keys)), key), true, keys.map((k) => k.keyHash.slice(0, 6)).join(' '));
+    }
+  });
+
+  test('no witness, witnesses of other keys only, and the hash of another key: no', async () => {
+    const { b, good, txHash } = await sealed();
+    assert.equal(delegatorSigned({ witnesses: [good], txHash }, key), true, 'the twin');
+    assert.equal(delegatorSigned(read(b.txCbor), key), false, 'no witness');
+    assert.equal(delegatorSigned(read(signedBy(b.txCbor, STRANGER_KEY, WALLET_KEY)), key), false, 'witnesses of other keys');
+    assert.equal(delegatorSigned({ witnesses: [good], txHash }, STRANGER_KEY.keyHash), false, 'the witness is of another key');
+  });
+
+  test('two witnesses of the key are not one, also when they are the same; a witness that does not verify does not hide behind one that does, in each order', async () => {
+    const { good, txHash } = await sealed();
+    const bad = { ...good, signature: '07'.repeat(64) };
+    assert.equal(delegatorSigned({ witnesses: [good], txHash }, key), true, 'the twin');
+    for (const [what, witnesses] of [['the same witness twice', [good, good]], ['a good one and a bad one', [good, bad]], ['a bad one and a good one', [bad, good]], ['a bad one alone', [bad]]] as const) {
+      assert.equal(delegatorSigned({ witnesses: [...witnesses], txHash }, key), false, what);
+    }
+  });
+
+  test('a signature that does not verify, and a key or a signature of the wrong length: no', async () => {
+    const { b, good, txHash } = await sealed();
+    const flipped = Buffer.from(good.signature, 'hex');
+    flipped[10] ^= 1;
+    const cases: Array<[string, { publicKey: string; signature: string }]> = [
+      ['one bit changed', { publicKey: good.publicKey, signature: flipped.toString('hex') }],
+      ['64 zero bytes', { publicKey: good.publicKey, signature: '00'.repeat(64) }],
+      ['the signature of another key', { publicKey: good.publicKey, signature: witnessOf(STRANGER_KEY, b.txCbor).ed25519_signature().to_hex() }],
+      ['a signature over another message', { publicKey: good.publicKey, signature: PRINCIPAL_KEY.privateKey.sign(Buffer.alloc(32, 7)).to_hex() }],
+      ['a key of 31 bytes', { publicKey: good.publicKey.slice(2), signature: good.signature }],
+      ['a key of 33 bytes', { publicKey: `${good.publicKey}00`, signature: good.signature }],
+      ['a signature of 63 bytes', { publicKey: good.publicKey, signature: good.signature.slice(2) }],
+      ['a signature of 65 bytes', { publicKey: good.publicKey, signature: `${good.signature}00` }],
+    ];
+    for (const [what, parts] of cases) assert.equal(delegatorSigned({ witnesses: [{ ...good, ...parts }], txHash }, key), false, what);
+  });
+
+  test('a key of a small order with the signature that CML alone takes over every body, and a signature that starts with a point of a small order: no', async () => {
+    const { good, txHash } = await sealed();
+    const identity = IDENTITY_POINT.toString('hex');
+    const forged = { publicKey: identity, signature: UNIVERSAL.toString('hex'), keyHash: keyHashOf(identity) };
+    assert.ok(CML.PublicKey.from_bytes(IDENTITY_POINT).verify(Buffer.from(txHash, 'hex'), CML.Ed25519Signature.from_raw_bytes(UNIVERSAL)), 'CML alone takes the forgery');
+    assert.equal(delegatorSigned({ witnesses: [forged], txHash }, forged.keyHash), false);
+    assert.equal(delegatorSigned({ witnesses: [{ ...good, signature: `${identity}${'00'.repeat(32)}` }], txHash }, key), false, 'a real key, and R of a small order');
+  });
+});
+
+describe('delegatorProblem: each required signer of the body except the delegate key, and the principal key of the datum, must have signed', () => {
+  test('a transaction that the delegator signed has no problem; the unsigned build has one, which names the key with its role and says what to do; the delegate key is not asked for', async () => {
+    const b = await delegateBuild();
+    assert.equal(delegatorProblem(read(signedBy(b.txCbor, PRINCIPAL_KEY))), null, 'the twin');
+    const problem = delegatorProblem(read(b.txCbor)) ?? '';
+    assert.match(problem, unsigned([hasNo(PRINCIPAL_KEY.keyHash, PRINCIPAL_ROLE)]));
+    assert.ok(!problem.includes(DELEGATE_KEY.keyHash), 'the delegate key signs through the agent: nothing is asked of it');
+  });
+
+  test('each key that did not sign is named with its role, in the order of the body, and a key that signed is not named; a key that the body lists twice is asked once', async () => {
+    const b = await delegateBuild();
+    const more = withBody(b.txCbor, { requiredSigners: [STRANGER_KEY.keyHash, DELEGATE_KEY.keyHash, PRINCIPAL_KEY.keyHash, STRANGER_KEY.keyHash] });
+    assert.match(delegatorProblem(read(more)) ?? '', unsigned([hasNo(STRANGER_KEY.keyHash, SIGNER_ROLE), hasNo(PRINCIPAL_KEY.keyHash, PRINCIPAL_ROLE)]));
+    assert.match(delegatorProblem(read(signedBy(more, PRINCIPAL_KEY))) ?? '', unsigned([hasNo(STRANGER_KEY.keyHash, SIGNER_ROLE)]));
+    assert.match(delegatorProblem(read(signedBy(more, STRANGER_KEY))) ?? '', unsigned([hasNo(PRINCIPAL_KEY.keyHash, PRINCIPAL_ROLE)]));
+    assert.equal(delegatorProblem(read(signedBy(more, PRINCIPAL_KEY, STRANGER_KEY))), null, 'the twin: each key signed');
+  });
+
+  test('a principal key that the datum names as the delegator is asked for also when the body does not list it as a required signer; its witness settles it', async () => {
+    const b = await delegateBuild();
+    const unlisted = withBody(b.txCbor, { requiredSigners: [DELEGATE_KEY.keyHash] });
+    assert.deepEqual(read(unlisted).requiredSigners, [DELEGATE_KEY.keyHash], 'the body lists the delegate key only');
+    assert.match(delegatorProblem(read(unlisted)) ?? '', unsigned([hasNo(PRINCIPAL_KEY.keyHash, PRINCIPAL_ROLE)]));
+    assert.match(delegatorProblem(read(signedBy(unlisted, STRANGER_KEY))) ?? '', unsigned([hasNo(PRINCIPAL_KEY.keyHash, PRINCIPAL_ROLE)]), 'the witness of another key does not help');
+    assert.equal(delegatorProblem(read(signedBy(unlisted, PRINCIPAL_KEY))), null, 'the twin: its witness is there');
+  });
+
+  test('one witness that does not verify, and two witnesses, are named with their number (the whole call meets the first one in the reader)', async () => {
+    const b = await delegateBuild();
+    const sent = read(signedBy(b.txCbor, PRINCIPAL_KEY));
+    const [good] = sent.witnesses;
+    const words = (what: string) => unsigned([`key ${PRINCIPAL_KEY.keyHash}, ${PRINCIPAL_ROLE}, has ${what}`]);
+    assert.match(delegatorProblem({ ...sent, witnesses: [{ ...good, signature: '07'.repeat(64) }] }) ?? '', words('one vkey witness that does not verify over the body hash'));
+    assert.match(delegatorProblem({ ...sent, witnesses: [good, good] }) ?? '', words('2 vkey witnesses'));
+  });
+});
+
+describe('requestDelegationCosign: the delegator side signs first (route contract, version 2)', () => {
+  const principal = PRINCIPAL_KEY.privateKey.to_public();
+  /** The text of a refusal for keys that did not sign, as the tool ends it. */
+  const refused = (...faults: string[]) => unsigned(faults, ' Nothing was sent\\.');
+  /** A witness that does not verify: the words name its key. For a key of the delegator side they add its role and what to do. */
+  const notVerified = (keyHash: string, txHash: string, role?: string) =>
+    new RegExp(`^The transaction carries a vkey witness of key ${keyHash} whose signature does not verify over the body hash ${txHash}, so the ledger refuses it\\.${role === undefined ? '' : ` The role of this key: ${role}\\. ${SIGN}`} Nothing was sent\\.$`);
+  /** The call with the transaction as it is given, on a node that fails each call: the tool must refuse in these words, send nothing and read nothing. */
+  const refusedBeforeAnyRead = async (what: string, txCbor: string, words: RegExp) => {
+    const agent = faithfulAgent();
+    await assert.rejects(cosignAsGiven(txCbor, agent.fetchImpl, { provider: silentNode() }), message(words), what);
+    assert.equal(agent.calls.length, 0, `${what}: no request`);
+  };
+
+  test('a transaction that the delegator did not sign, or signed in a way that the route does not take, is refused: nothing is read and nothing is sent; the twin that the delegator signed is sent', async () => {
+    const b = await delegateBuild();
+    const mine = await delegateBuildMine();
+    const hash = hashBytes(b.txCbor);
+    const own = witnessOf(PRINCIPAL_KEY, b.txCbor);
+    const stale = withBody(signedBy(b.txCbor, PRINCIPAL_KEY), { fee: txOf(b.txCbor).body().fee() + 1n });
+    const underKey = (signature: CML.Ed25519Signature) => withVkeys(b.txCbor, [CML.Vkeywitness.new(principal, signature)]);
+    const missing = refused(hasNo(PRINCIPAL_KEY.keyHash, PRINCIPAL_ROLE));
+    const unlisted = withBody(b.txCbor, { requiredSigners: [DELEGATE_KEY.keyHash] });
+    // A principal key that is also the delegate key (a self-delegation) stays on the delegator side. A signed one carries a signature of
+    // the delegate key, so the earlier rule "already carries a signature of the delegate key" refuses it, and it needs no row here.
+    const self = await buildDelegation({ delegator: { type: 'PrincipalKey', hash: DELEGATE_KEY.keyHash } });
+    const rows: Array<[string, string, RegExp]> = [
+      ['no witness at all', b.txCbor, missing],
+      ['a witness of a stranger', signedBy(b.txCbor, STRANGER_KEY), missing],
+      ['witnesses of the wallet and of a stranger, and none of the delegator', signedBy(mine.txCbor, WALLET_KEY, STRANGER_KEY), missing],
+      ['two witnesses of the delegator key', withVkeys(b.txCbor, [own, own]), refused(`key ${PRINCIPAL_KEY.keyHash}, ${PRINCIPAL_ROLE}, has 2 vkey witnesses`)],
+      ['the signature of a stranger under the key of the delegator', underKey(STRANGER_KEY.privateKey.sign(hash)), notVerified(PRINCIPAL_KEY.keyHash, b.txHash, PRINCIPAL_ROLE)],
+      ['a signature of the delegator over another message', underKey(PRINCIPAL_KEY.privateKey.sign(Buffer.alloc(32, 7))), notVerified(PRINCIPAL_KEY.keyHash, b.txHash, PRINCIPAL_ROLE)],
+      ['64 zero bytes under the key of the delegator', underKey(CML.Ed25519Signature.from_raw_bytes(Buffer.alloc(64))), notVerified(PRINCIPAL_KEY.keyHash, b.txHash, PRINCIPAL_ROLE)],
+      ['a witness that the delegator made before the body changed', stale, notVerified(PRINCIPAL_KEY.keyHash, bodyHashOf(stale), PRINCIPAL_ROLE)],
+      ['the key of a stranger with the signature of the delegator', withVkeys(b.txCbor, [CML.Vkeywitness.new(STRANGER_KEY.privateKey.to_public(), PRINCIPAL_KEY.privateKey.sign(hash))]), notVerified(STRANGER_KEY.keyHash, b.txHash)],
+      ['a signature of a stranger under the delegate key (the delegate key is not of the delegator side, so its words give no advice for the delegator)', withVkeys(b.txCbor, [CML.Vkeywitness.new(DELEGATE_KEY.privateKey.to_public(), STRANGER_KEY.privateKey.sign(hash))]), notVerified(DELEGATE_KEY.keyHash, b.txHash)],
+      ['a principal key delegator that the body does not list as a required signer, with no witness', unlisted, missing],
+      ['a signature of a stranger under the key of that unlisted principal key delegator', withVkeys(unlisted, [CML.Vkeywitness.new(principal, STRANGER_KEY.privateKey.sign(hashBytes(unlisted)))]), notVerified(PRINCIPAL_KEY.keyHash, bodyHashOf(unlisted), PRINCIPAL_ROLE)],
+      ['a principal key that is also the delegate key (a self-delegation), with no witness', self.txCbor, refused(hasNo(DELEGATE_KEY.keyHash, `delegate key \\(${DELEGATE_DID}\\)`))],
+    ];
+    for (const [what, txCbor, words] of rows) await refusedBeforeAnyRead(what, txCbor, words);
+
+    const sent = signedBy(b.txCbor, PRINCIPAL_KEY);
+    const agent = faithfulAgent();
+    const r = await cosignAsGiven(sent, agent.fetchImpl);
+    assert.equal(agent.calls.length, 1, 'the twin: the transaction that the delegator signed is sent once');
+    assert.equal(requestedTx(agent.calls[0]), sent);
+    assert.equal(r.txCbor, cosigned(sent), 'and the agent adds its witness as before');
+    assert.deepEqual(r.signed, [PRINCIPAL_KEY.keyHash, DELEGATE_KEY.keyHash]);
+
+    // The twin of the unlisted principal key: with its witness the request is sent.
+    const unlistedAgent = faithfulAgent();
+    const unlistedResult = await cosignAsGiven(signedBy(unlisted, PRINCIPAL_KEY), unlistedAgent.fetchImpl);
+    assert.equal(unlistedAgent.calls.length, 1);
+    assert.deepEqual(unlistedResult.signed, [PRINCIPAL_KEY.keyHash, DELEGATE_KEY.keyHash]);
+  });
+
+  test('a delegator whose key is a point of a small order is not impersonated by the forgery that CML alone takes over every body', async () => {
+    const identity = IDENTITY_POINT.toString('hex');
+    const small = await buildDelegation({ delegator: { type: 'PrincipalKey', hash: keyHashOf(identity) } });
+    const forgery = CML.Vkeywitness.new(CML.PublicKey.from_bytes(IDENTITY_POINT), CML.Ed25519Signature.from_raw_bytes(UNIVERSAL));
+    assert.ok(forgery.vkey().verify(hashBytes(small.txCbor), forgery.ed25519_signature()), 'CML alone takes the forgery');
+    await refusedBeforeAnyRead('the forgery of a key of a small order', withVkeys(small.txCbor, [forgery]), notVerified(keyHashOf(identity), small.txHash, PRINCIPAL_ROLE));
+    await refusedBeforeAnyRead('no witness, with a delegator of a small order', small.txCbor, refused(hasNo(keyHashOf(identity), PRINCIPAL_ROLE)));
+  });
+
+  test('the witnesses of other keys before and after the witness of the delegator stay, and the request carries them', async () => {
+    const mine = await delegateBuildMine();
+    for (const keys of [[STRANGER_KEY, PRINCIPAL_KEY], [PRINCIPAL_KEY, STRANGER_KEY, WALLET_KEY]]) {
+      const sent = signedBy(mine.txCbor, ...keys);
+      const agent = faithfulAgent();
+      const r = await cosignAsGiven(sent, agent.fetchImpl);
+      assert.equal(requestedTx(agent.calls[0]), sent, 'the transaction goes out as it came in');
+      assert.deepEqual(r.signed, [...keys.map((k) => k.keyHash), DELEGATE_KEY.keyHash]);
+    }
+  });
+
+  test('a delegator that is an agent: the key that signs for it must have signed; the twin is sent', async () => {
+    const agentId = 'a1'.repeat(32);
+    const provider = world(ENDPOINT, recordUtxo(agentId, rootRecord({ controller: PRINCIPAL_KEY.publicKey })));
+    const byAgent = await buildDelegation({ delegator: { type: 'Agent', id: agentId } }, false, provider);
+    const missing = refused(hasNo(PRINCIPAL_KEY.keyHash, `required signer for the delegator did:vector:${agentId}`));
+    await refusedBeforeAnyRead('no witness of the controller', byAgent.txCbor, missing);
+    await refusedBeforeAnyRead('a witness of a stranger', signedBy(byAgent.txCbor, STRANGER_KEY), missing);
+    const sent = signedBy(byAgent.txCbor, PRINCIPAL_KEY);
+    const agent = faithfulAgent();
+    const r = await cosignAsGiven(sent, agent.fetchImpl, { provider });
+    assert.equal(requestedTx(agent.calls[0]), sent);
+    assert.deepEqual(r.signed, [PRINCIPAL_KEY.keyHash, DELEGATE_KEY.keyHash]);
+  });
+
+  test('a sub-delegation: the delegate key of the parent delegation must have signed, and the principal key of the parent delegation is not that key; the twin is sent', async () => {
+    const agentId = 'a1'.repeat(32);
+    const parentId = '9a'.repeat(32);
+    const provider = subDelegationWorld(agentId, parentId);
+    const sub = await buildDelegation({ delegator: undefined, parent: parentId }, false, provider);
+    const missing = refused(hasNo(LISTED.keyHash, `required signer for the delegator did:vector:${agentId}`));
+    await refusedBeforeAnyRead('no witness of the delegate key of the parent', sub.txCbor, missing);
+    await refusedBeforeAnyRead('a witness of the principal key of the parent delegation', signedBy(sub.txCbor, PRINCIPAL_KEY), missing);
+    const sent = signedBy(sub.txCbor, signingKey(2));
+    const agent = faithfulAgent();
+    const r = await cosignAsGiven(sent, agent.fetchImpl, { provider });
+    assert.equal(requestedTx(agent.calls[0]), sent);
+    assert.deepEqual(r.signed, [LISTED.keyHash, DELEGATE_KEY.keyHash]);
+  });
+
+  test('every required signer except the delegate key must have signed: each key that did not is named with its role, in the order of the body', async () => {
+    const b = await delegateBuild();
+    const more = withBody(b.txCbor, { requiredSigners: [STRANGER_KEY.keyHash, DELEGATE_KEY.keyHash, PRINCIPAL_KEY.keyHash] });
+    await refusedBeforeAnyRead('none of the two signed', more, refused(hasNo(STRANGER_KEY.keyHash, SIGNER_ROLE), hasNo(PRINCIPAL_KEY.keyHash, PRINCIPAL_ROLE)));
+    await refusedBeforeAnyRead('only the principal key signed', signedBy(more, PRINCIPAL_KEY), refused(hasNo(STRANGER_KEY.keyHash, SIGNER_ROLE)));
+    await refusedBeforeAnyRead('only the stranger signed', signedBy(more, STRANGER_KEY), refused(hasNo(PRINCIPAL_KEY.keyHash, PRINCIPAL_ROLE)));
+    const sent = signedBy(more, PRINCIPAL_KEY, STRANGER_KEY);
+    const agent = faithfulAgent();
+    const r = await cosignAsGiven(sent, agent.fetchImpl);
+    assert.equal(agent.calls.length, 1, 'the twin: both signed');
+    assert.deepEqual(r.signed, [PRINCIPAL_KEY.keyHash, STRANGER_KEY.keyHash, DELEGATE_KEY.keyHash]);
+  });
+
+  test('a refused call uses no slot of the two limits for each host: calls without the signature, then the calls that the limit allows', async () => {
+    const b = await delegateBuild();
+    const sent = signedBy(b.txCbor, PRINCIPAL_KEY);
+    const limiter = newOriginLimiter();
+    for (let i = 0; i < 2 * CALLER_ORIGIN_LIMIT_PER_MINUTE; i++) await assert.rejects(cosignAsGiven(b.txCbor, faithfulAgent().fetchImpl, { limiter }), /has no vkey witness/);
+    const agent = faithfulAgent();
+    for (let i = 0; i < CALLER_ORIGIN_LIMIT_PER_MINUTE; i++) await cosignAsGiven(sent, agent.fetchImpl, { limiter });
+    assert.equal(agent.calls.length, CALLER_ORIGIN_LIMIT_PER_MINUTE, 'each call that the limit allows was sent');
+    await assert.rejects(cosignAsGiven(sent, agent.fetchImpl, { limiter }), /Too many requests from this caller/);
   });
 });
 
@@ -1341,7 +1613,9 @@ describe('requestDelegationCosign: a transaction that the ledger would refuse is
     await sendsNothing(withReference(b.txCbor, SEED), {}, new RegExp(`The transaction spends the output ${SEED} and also reads it as a reference input`));
     await sendsNothing(cosigned(b.txCbor), {}, new RegExp(`already carries a signature of the delegate key ${DELEGATE_KEY.keyHash}`));
     await sendsNothing(withVkeys(b.txCbor, [CML.Vkeywitness.new(PRINCIPAL_KEY.privateKey.to_public(), STRANGER_KEY.privateKey.sign(hashBytes(b.txCbor)))]), {}, /whose signature does not verify over the body hash/);
-    await sendsNothing('ab'.repeat(MAX_COSIGN_TX_HEX / 2 + 1), {}, new RegExp(`longer than ${MAX_COSIGN_TX_HEX} hex characters`));
+    const tooLong = faithfulAgent();
+    await assert.rejects(cosignAsGiven('ab'.repeat(MAX_COSIGN_TX_HEX / 2 + 1), tooLong.fetchImpl), message(new RegExp(`longer than ${MAX_COSIGN_TX_HEX} hex characters.* Nothing was sent\\.$`)));
+    assert.equal(tooLong.calls.length, 0, 'no request');
   });
 });
 
@@ -1389,7 +1663,7 @@ describe('requestDelegationCosign: a request leaves the tool only for the endpoi
     }
     const agent = faithfulAgent();
     await assert.rejects(
-      requestDelegationCosign({ provider: world(), deployment: DEPLOYMENT, caller: 'caller-a' }, b.txCbor, { fetchImpl: agent.fetchImpl, lookup: async () => [{ address: '10.0.0.8', family: 4 }], now: () => AT_BUILD, originLimiter: openLimiter() }),
+      requestDelegationCosign({ provider: world(), deployment: DEPLOYMENT, caller: 'caller-a' }, delegatorSignsFirst(b.txCbor), { fetchImpl: agent.fetchImpl, lookup: async () => [{ address: '10.0.0.8', family: 4 }], now: () => AT_BUILD, originLimiter: openLimiter() }),
       /private or reserved address/,
     );
     assert.equal(agent.calls.length, 0);
@@ -1399,7 +1673,7 @@ describe('requestDelegationCosign: a request leaves the tool only for the endpoi
     const b = await delegateBuild();
     const refusedBy = async (lookup: () => Promise<Array<{ address: string; family: number }>>) => {
       const agent = faithfulAgent();
-      const error = await requestDelegationCosign({ provider: world(), deployment: DEPLOYMENT, caller: 'caller-a' }, b.txCbor, { fetchImpl: agent.fetchImpl, lookup, now: () => AT_BUILD, originLimiter: openLimiter() }).then(() => null, (err: Error) => err);
+      const error = await requestDelegationCosign({ provider: world(), deployment: DEPLOYMENT, caller: 'caller-a' }, delegatorSignsFirst(b.txCbor), { fetchImpl: agent.fetchImpl, lookup, now: () => AT_BUILD, originLimiter: openLimiter() }).then(() => null, (err: Error) => err);
       assert.equal(agent.calls.length, 0);
       return error?.message;
     };
@@ -1502,7 +1776,7 @@ describe('requestDelegationCosign: a request leaves the tool only for the endpoi
     const b = await delegateBuild();
     const endpoint = `https://shared-${process.pid}-${Date.now()}.example`;
     const agent = faithfulAgent();
-    const shared = (caller: string) => requestDelegationCosign({ provider: world(endpoint), deployment: DEPLOYMENT, caller }, b.txCbor, { fetchImpl: agent.fetchImpl, lookup: publicLookup, now: () => AT_BUILD });
+    const shared = (caller: string) => requestDelegationCosign({ provider: world(endpoint), deployment: DEPLOYMENT, caller }, delegatorSignsFirst(b.txCbor), { fetchImpl: agent.fetchImpl, lookup: publicLookup, now: () => AT_BUILD });
     for (let i = 0; i < CALLER_ORIGIN_LIMIT_PER_MINUTE; i++) await shared('shared-caller');
     await assert.rejects(shared('shared-caller'), /Too many requests from this caller went to/);
     for (let i = 0; i < ORIGIN_LIMIT_PER_MINUTE - CALLER_ORIGIN_LIMIT_PER_MINUTE; i++) await shared(`shared-other-${i}`);
@@ -1732,9 +2006,9 @@ describe('requestDelegationCosign: the signers that are still missing', () => {
       return provider;
     };
     const script = await cosign(b.txCbor, faithfulAgent().fetchImpl, { provider: inputsAt(DEPLOYMENT.delegation.address) });
-    assert.deepEqual(script.missing.map((s) => s.keyHash), [PRINCIPAL_KEY.keyHash], 'a script credential is not a key that signs');
+    assert.deepEqual(script.missing.map((s) => s.keyHash), [], 'a script credential is not a key that signs, and the delegator has signed');
     const key = await cosign(b.txCbor, faithfulAgent().fetchImpl, { provider: inputsAt(MY_WALLET) });
-    assert.deepEqual(sorted(key.missing.map((s) => s.keyHash)), sorted([PRINCIPAL_KEY.keyHash, WALLET_KEY.keyHash]));
+    assert.deepEqual(key.missing.map((s) => s.keyHash), [WALLET_KEY.keyHash]);
   });
 
   test('the wallet keys come from the spent and the collateral inputs, and the node is asked once for each output', async () => {
@@ -1762,16 +2036,16 @@ describe('requestDelegationCosign: the signers that are still missing', () => {
     provider.getUtxosByOutRef = async (refs) => (await real(refs)).map((u) => (`${u.txHash}#${u.outputIndex}` === RECORD_REF ? { ...u, address: strangerAddress } : u));
     const r = await cosign(b.txCbor, faithfulAgent().fetchImpl, { provider });
     assert.ok(!r.required.some((s) => s.keyHash === STRANGER_KEY.keyHash), 'the key of a reference input is not required');
-    assert.deepEqual(sorted(r.missing.map((s) => s.keyHash)), sorted([PRINCIPAL_KEY.keyHash, OWN_KEY_HASH]));
+    assert.deepEqual(r.missing.map((s) => s.keyHash), [OWN_KEY_HASH]);
   });
 
-  test('a required signer that the datum does not name is listed as a required signer of the transaction', async () => {
+  test('a required signer that the datum does not name is listed as a required signer of the transaction, and it has signed', async () => {
     const b = await delegateBuild();
     const more = withBody(b.txCbor, { requiredSigners: [PRINCIPAL_KEY.keyHash, DELEGATE_KEY.keyHash, STRANGER_KEY.keyHash] });
     const r = await cosign(more, faithfulAgent().fetchImpl);
     assert.deepEqual(r.required.find((s) => s.keyHash === STRANGER_KEY.keyHash)!.roles, ['required signer of the transaction']);
     assert.deepEqual(r.required.find((s) => s.keyHash === PRINCIPAL_KEY.keyHash)!.roles, ['principal key (delegator)']);
-    assert.ok(r.missing.some((s) => s.keyHash === STRANGER_KEY.keyHash));
+    assert.ok(!r.missing.some((s) => s.keyHash === STRANGER_KEY.keyHash), 'it has signed, so it is not missing');
   });
 
   test('an output that is the collateral and is also read as a reference input is one output for the node, and the ledger accepts the transaction', async () => {

@@ -1,10 +1,10 @@
 // packages/builder/src/vector/delegation-cosign-tools.ts
 // vector_delegation_request_cosign (Part 2 Section 5.2): asks the delegate agent of a Delegate transaction for its co-signature. The tool
-// takes the transaction and nothing else. It reads the delegate from the transaction, finds the endpoint in the identity record of the
-// delegate, and sends there through safeFetch (delegation-cosign.ts has the route and every check). The result is the transaction that
-// the caller gave, with the one witness of the delegate key added. The tool holds no key, adds no signature of its own, and submits
-// nothing. The node comes from `providerFor` and the deployment from `deploymentFor`, as for the other delegation tools, so a test can
-// hand in its own.
+// takes the transaction, signed by the delegator, and nothing else. It reads the delegate from the transaction, finds the endpoint in the
+// identity record of the delegate, and sends there through safeFetch (delegation-cosign.ts has the route and every check). The result is
+// the transaction that the caller gave, with the one witness of the delegate key added. The tool holds no key, adds no signature of its own,
+// and submits nothing. The node comes from `providerFor` and the deployment from `deploymentFor`, as for the other delegation tools, so a
+// test can hand in its own.
 import { z } from 'zod/v4';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Provider } from '@lucid-evolution/lucid';
@@ -23,7 +23,7 @@ import type { CosignAccess, CosignResult } from './delegation-cosign.js';
 
 /** What to do after each refusal code of the route. */
 const CODE_TIPS: Readonly<Record<string, string>> = {
-  not_a_delegation: 'Give the transaction that vector_build_delegation_delegate returned (unsigned, or signed by the delegator), not another transaction',
+  not_a_delegation: 'Give the transaction that vector_build_delegation_delegate returned, signed by the delegator, not another transaction',
   not_for_this_agent: 'The agent signs only for a delegation that names it and one of its own delegation keys: check the delegate and delegate_key of the build',
   key_in_use: 'The delegate key is in use: build again with another delegation key that the delegate lists, or ask again with the same transaction (the route gives the same answer for the same transaction). Only the delegator of a live delegation that uses the key, or the delegator of one of its ancestors, can end it (vector_build_delegation_undelegate)',
   principal_not_allowed: 'The agent accepts delegations only from the principals that its operator allows: ask the operator, or use another delegator',
@@ -32,11 +32,12 @@ const CODE_TIPS: Readonly<Record<string, string>> = {
 };
 const ROUTE_TIP = `The delegate agent must serve POST ${COSIGN_PATH} (route contract, version ${COSIGN_ROUTE_VERSION}); ask its operator when it does not`;
 const RECORD_TIP = 'vector_get_agent_profile { agent_id } shows the record of the delegate, with its status, its keys and its endpoint';
-const TX_TIP = 'Give txCbor exactly as vector_build_delegation_delegate returned it, or the same transaction signed by the delegator, before its validity window ends';
+const TX_TIP = 'Give txCbor as vector_build_delegation_delegate returned it, signed by the delegator (vector_signer_sign { txCbor }), before its validity window ends';
 
 const DESCRIPTION =
   'Ask the delegate agent of a Delegate transaction for its co-signature. A Delegate transaction needs a signature of the delegate key (Part 2 Section 5.2), and only the delegate agent holds that key. ' +
-  'Give txCbor: the unsigned transaction that vector_build_delegation_delegate returned, or the same transaction signed by the delegator. ' +
+  'Give txCbor: the Delegate transaction that vector_build_delegation_delegate returned, signed by the delegator: sign it first with the key or keys of the delegator (vector_signer_sign). ' +
+  'The request carries the signatures of the delegator side: for each required signer of the body except the delegate key (the principal key of the delegator, the key that signs for an agent that is the delegator, or the delegate key of the parent delegation in a sub-delegation), exactly one vkey witness that verifies over the body hash. An agent can refuse a request without them with 403 principal_not_allowed. So the tool refuses a transaction that lacks one of them, or has two witnesses of one key, and it sends nothing. The tool also asks for the witness of the principal key that the datum names as the delegator when the body does not list that key as a required signer. ' +
   'The tool reads the delegate from the transaction, finds the endpoint in the identity record of the delegate, and sends the transaction to ' +
   `POST <origin of the endpoint>${COSIGN_PATH} (route contract, version ${COSIGN_ROUTE_VERSION}). ` +
   'The request has the content type application/json and the body {"transaction": "<hex CBOR>"}. The answer is 200 {"transaction": "<hex CBOR>"}: the same body, every witness that was sent, and one more vkey witness, of the delegate key. ' +
@@ -53,6 +54,7 @@ const DESCRIPTION =
   'The tool holds no key, adds no signature of its own, and submits nothing: the other key holders sign with vector_signer_sign, then the transaction is submitted. ' +
   'For operators of agents: the route is public, so the agent decides alone and the checks of the tool give it no assurance. The agent signs only when it decodes the transaction itself and finds that the only action is the Delegate ' +
   '(one delegation token minted, is_valid true, no withdrawal, certificate, vote or proposal), that no input and no collateral is at an address of a key of the agent, and that the datum names this agent and one of its own delegation keys. ' +
+  'It may also require the signatures of the delegator side, and it may accept only some delegators, for example only principal keys: it refuses any other request with 403 principal_not_allowed. The checks of the tool cannot know that policy. ' +
   'It never signs anything else with a delegation key. The contract does not enforce fresh keys, so the agent remembers each body that it co-signed: it refuses another body for the same key while the window of the first is open (key_in_use), and it gives the same answer for the same body again. ' +
   'It keeps the body bytes as it received them and adds only its vkey witness. spends_agent_funds means any input, collateral, withdrawal or certificate of a key of the agent. Other codes are allowed.';
 
@@ -103,7 +105,7 @@ export function registerDelegationCosignTool(server: McpServer, identity: string
     DESCRIPTION,
     {
       txCbor: z.string().max(MAX_COSIGN_TX_HEX).regex(/^[0-9a-fA-F]+$/, 'expected the hex CBOR of a transaction')
-        .describe(`The Delegate transaction as hex CBOR: the unsigned transaction that vector_build_delegation_delegate returned, or the same transaction signed by the delegator (at most ${MAX_COSIGN_TX_HEX} hex characters). The tool reads the delegate from it; there is no other input`),
+        .describe(`The Delegate transaction as hex CBOR, signed by the delegator: the transaction that vector_build_delegation_delegate returned, with the witness of each key of the delegator added (at most ${MAX_COSIGN_TX_HEX} hex characters). The tool reads the delegate from it; there is no other input`),
     },
     async ({ txCbor }) => {
       const limited = checkRateLimit(); if (limited) return limited;
