@@ -2,13 +2,14 @@
 // Handler-level tests of the self-improvement (Module-6) tools: registerSelfImprovementTools with a minimal fake server that checks
 // the arguments with each tool's zod schema (as the MCP server does) and calls the handler. The node is the offline Module-6 world
 // (gov-world.ts): the applied Module-6 validators run on every step 2. The deployments, Koios and the clock come from the test. No network.
-import { describe, test } from 'node:test';
+import { afterEach, describe, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod/v4';
 import type { UTxO } from '@lucid-evolution/lucid';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { OgmiosProvider } from '@apexfusion/vector-mcp-shared/provider';
 import { registerSelfImprovementTools } from '../src/vector/self-improvement.ts';
 import type { SelfImprovementDeps } from '../src/vector/self-improvement.ts';
 import { RateLimiter } from '../src/vector/rate-limiter.ts';
@@ -239,5 +240,59 @@ describe('the read tools', () => {
     assert.match(answer, /^# Improvement Proposals \(1 found, previous deployment \(read-only; its positions stay until their owners exit\)\)/);
     assert.match(answer, new RegExp(`\\*\\*UTxO:\\*\\* ${sample.txHash}#0`));
     assert.match(await call('vector_self_improvement_analyze_metrics', { deployment: 'previous', focus: 'treasury' }), new RegExp(`\\*\\*Address:\\*\\* ${PREVIOUS_GOV_DEPLOYMENT.treasuryAddress}`));
+  });
+});
+
+describe('the read tools when the node cannot be read', () => {
+  afterEach(() => { mock.restoreAll(); });
+
+  /**
+   * Each read of outputs of the tools: the tool, its arguments, the words of its failure, and the address that the read asks for. A
+   * tool reads more than one address, so a row lets the node fail for that address alone and answer the others with an empty list.
+   */
+  const READS: Array<[string, Record<string, unknown>, string, string]> = [
+    ['vector_self_improvement_browse', { entity: 'proposals' }, 'browse proposal data', GOV.proposalAddress],
+    ['vector_self_improvement_browse', { entity: 'critiques' }, 'browse proposal data', GOV.critiqueAddress],
+    ['vector_self_improvement_browse', { entity: 'critiques', proposalTxHash: seed.txHash }, 'browse proposal data', GOV.proposalAddress],
+    ['vector_self_improvement_browse', { entity: 'critiques', proposalTxHash: seed.txHash }, 'browse proposal data', GOV.critiqueAddress],
+    ['vector_self_improvement_browse', { entity: 'endorsements' }, 'browse proposal data', GOV.endorsementAddress],
+    ['vector_self_improvement_browse', { entity: 'treasury' }, 'browse proposal data', GOV.treasuryAddress],
+    ['vector_self_improvement_analyze_metrics', {}, 'analyze proposal metrics', GOV.treasuryAddress],
+    ['vector_self_improvement_analyze_metrics', {}, 'analyze proposal metrics', GOV.proposalAddress],
+    ['vector_self_improvement_analyze_metrics', { focus: 'treasury' }, 'analyze proposal metrics', GOV.treasuryAddress],
+  ];
+
+  test('a node that gives no list, or fails, is an error that says so: never "No proposals found", never a treasury of 0', async () => {
+    let failing = '';
+    let refusal: () => Response = () => Response.json({ jsonrpc: '2.0', result: null, id: null });
+    mock.method(globalThis, 'fetch', async (_input: unknown, init?: { body?: unknown }) => {
+      const asked: string = JSON.parse(String(init?.body)).params.addresses[0];
+      return asked === failing ? refusal() : Response.json({ jsonrpc: '2.0', result: [], id: null });
+    });
+    mock.method(console, 'error', () => undefined);
+    const { call } = tools(() => govWorld(), { provider: () => new OgmiosProvider({ ogmiosUrl: 'https://ogmios.example', submitUrl: 'https://submit.example' }) });
+
+    const refusals: Array<[string, () => Response, string]> = [
+      ['"result": null', () => Response.json({ jsonrpc: '2.0', result: null, id: null }), 'the node gave no list'],
+      ['no result', () => Response.json({ jsonrpc: '2.0', id: null }), 'the node gave no list'],
+      ['a 503', () => new Response('busy', { status: 503, statusText: 'Service Unavailable' }), '503 Service Unavailable'],
+    ];
+    for (const [what, answer, reason] of refusals) {
+      refusal = answer;
+      for (const [name, args, task, address] of READS) {
+        failing = address;
+        const reply = await call(name, args);
+        const row = `${name} ${JSON.stringify(args)} fails at ${address}, ${what}`;
+        assert.equal(reply.split('\n')[0], `Failed to ${task}: Ogmios request failed (queryLedgerState/utxo): ${reason}`, row);
+        assert.doesNotMatch(reply, /No (proposals|critiques|endorsements) found|Total:|Balance:/, row);
+      }
+    }
+
+    // The twin: the node answers an empty list for an address with no outputs, and that is read as no outputs.
+    failing = '';
+    assert.match(await call('vector_self_improvement_browse', { entity: 'proposals' }), /^No proposals found on-chain \(current deployment\)\./);
+    assert.match(await call('vector_self_improvement_browse', { entity: 'treasury' }), /\*\*Total:\*\* 0\.000000 AP3X/);
+    assert.match(await call('vector_self_improvement_analyze_metrics', { focus: 'treasury' }), /\*\*Balance:\*\* 0\.000000 AP3X[\s\S]*WARNING/);
+    assert.match(await call('vector_self_improvement_analyze_metrics', {}), /- \*\*Total on-chain:\*\* 0\n/);
   });
 });

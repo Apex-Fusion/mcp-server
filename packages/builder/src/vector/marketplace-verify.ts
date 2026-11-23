@@ -13,6 +13,7 @@ import { resolveEscrowLineage, readEscrowOutput, readSubmittedOutput, submittedR
 import type { EscrowLineage, EscrowLayout } from './marketplace-lineage.js';
 import { cell } from './marketplace-shared.js';
 import { readTargetAdvert, callFailure, trim, jsonObject, canonicalRef, notThePostOutput } from './marketplace-supplier.js';
+import { signatureVerifies } from './ed25519-rules.js';
 import type { IdentityDeployment } from './identity-deployment.js';
 
 // ─── Verifying a receipt ─────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -24,7 +25,8 @@ import type { IdentityDeployment } from './identity-deployment.js';
 //   (3) supplier_key_matches    the supplier's public key hashes to receipt.supplier_pkh AND to the supplier_pkh of the escrow's datum,
 //                               the key hash the buyer paid against. A dishonest endpoint can serve a matching receipt, report text and
 //                               key; it cannot serve the key hash that is in the buyer's escrow.
-//   (4) signature_valid         Ed25519 over canonicalize(receipt) verifies under that key.
+//   (4) signature_valid         Ed25519 over canonicalize(receipt) verifies under that key, by the rules of the ledger (ed25519-rules.ts): a key
+//                               of a small order, an R of a small order and an S that is not below the group order do not verify.
 //   (5) on_chain_hash_matches   the result_receipt_hash in the escrow's Submitted output equals sha256(canonicalize({receipt, signature})):
 //                               the bytes verified here are the bytes the supplier committed on chain in its Submit. The output is
 //                               found live, or, once it is spent, through the marketplace indexer (submittedReceiptHash).
@@ -140,7 +142,7 @@ export function verifyReceipt(i: VerifyInput): ReceiptVerdict {
   else if (pub === null) signatureValid = failed('there is no usable public key to check it with');
   else {
     let ok = false;
-    try { ok = pub.verify(Buffer.from(canonicalize(receipt), 'utf8'), CML.Ed25519Signature.from_hex(signature)); } catch { /* a signature that cannot be read does not verify */ }
+    try { ok = signatureVerifies(pub.to_raw_bytes(), Buffer.from(signature, 'hex'), Buffer.from(canonicalize(receipt), 'utf8')); } catch { /* a signature that cannot be read does not verify */ }
     signatureValid = ok ? passed() : failed('the signature does not verify against that key and this receipt');
   }
 
