@@ -1,7 +1,8 @@
 // packages/builder/test/reputation-datum.test.ts
 // The data of the identity-era Module-3 reputation validator: the deployment values that the builders carry against the captured chain
 // data (reputation-golden.fixture.ts, from capture-reputation-golden.mjs) and the deployment record, the 8-field stake datum, the stake
-// token name, and the readers of the module parameters and the cross references. No network is touched.
+// token name, and the readers of the module parameters and the cross references. The datum, the token name and the address are also held
+// against the stake that the chain holds (LIVE_STAKE_UTXO), not only against datums that a test builds. No network is touched.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Constr, Data, credentialToAddress, getAddressDetails, validatorToScriptHash } from '@lucid-evolution/lucid';
@@ -13,7 +14,7 @@ import {
   ENDORSEMENT_SCRIPT_HASH, PARAMS_TOKEN_NAME, REFS_TOKEN_NAME, REPUTATION_IDENTITY_HASH, REPUTATION_PARAMS_HOLDER_ADDRESS, REPUTATION_PARAMS_HOLDER_HASH,
   REPUTATION_PARAMS_TOKEN_POLICY, REPUTATION_REF_SCRIPT_UTXO, REPUTATION_REFS_TOKEN_POLICY, VECTOR_MAINNET_ZERO_TIME_MS,
 } from '../src/vector/reputation-build.ts';
-import { AGENT_RECORDS, CROSS_REFS_UTXO, PARAMS_UTXO, REPUTATION_REF_UTXO, REPUTATION_SCRIPT_CBOR } from './fixtures/reputation-golden.fixture.ts';
+import { AGENT_RECORDS, CROSS_REFS_UTXO, LIVE_STAKE_UTXO, PARAMS_UTXO, REPUTATION_REF_UTXO, REPUTATION_SCRIPT_CBOR } from './fixtures/reputation-golden.fixture.ts';
 import { REAL_IDENTITY } from './fixtures/reputation-world.ts';
 
 /** `reputation_config_cbor` of Module-3/deploy/identity/mainnet/deploy_state.json: the ReputationConfig that the deployed script has applied. */
@@ -27,6 +28,13 @@ const DATUM: StakeDatum = {
   history_points: 0n, challenge_locks: [], stake_id: { txHash: 'ab'.repeat(32), outputIndex: 1 },
 };
 
+/** What the datum of LIVE_STAKE_UTXO holds, written from the chain: the stake of a test record of the Foundation (11 AP3X, two capabilities, no lock). */
+const LIVE_STAKE: StakeDatum = {
+  agent_did: '4e1272ee30e5bdf5ad75be55553563a7056ab228295c70ffda988892da4a8fe9', owner_pkh: '34267e928e17c77063ee4957b6932182b7d804ed1d3f77c3f4121682', stake_amount: 11_000_000n,
+  staked_capabilities: [Buffer.from('smoke.stake-check.a.v1').toString('hex'), Buffer.from('smoke.stake-check.b.v1').toString('hex')], last_updated: 1_795_425_911_000,
+  history_points: 0n, challenge_locks: [], stake_id: { txHash: 'c4ec66206f6f917519f411f9fbab1d709c918b30acf6bc7951759a513fa22c8c', outputIndex: 0 },
+};
+
 describe('the deployment that the builders name is the one on the chain', () => {
   test('the deployed reputation script has the hash fad945ab…, and its address is the exact script address', () => {
     assert.equal(validatorToScriptHash(REPUTATION_REF_UTXO.scriptRef!), 'fad945ab20f61a58fbdf6a33a8f491899b7dd4167fb64200bc060424');
@@ -34,6 +42,9 @@ describe('the deployment that the builders name is the one on the chain', () => 
     assert.equal(credentialToAddress('Mainnet', { type: 'Script', hash: REPUTATION_SCRIPT_HASH }), REPUTATION_ADDRESS);
     assert.equal(REPUTATION_ADDRESS, 'addr1w8adj3dtyrmp5k8mma4r8285jxyeklw5zelmvssqhsrqgfqc9uavs');
     assert.equal(getAddressDetails(REPUTATION_ADDRESS).stakeCredential, undefined, 'no stake credential: every stake sits at the exact address');
+  });
+  test('the stake that the chain holds sits at the stake address of the builders: the read and the builders look for stakes only there', () => {
+    assert.equal(LIVE_STAKE_UTXO.address, REPUTATION_ADDRESS);
   });
   test('the reference script is the output that deploy_state.json names; the parameters and the cross references are found by their tokens at the params holder', () => {
     assert.deepEqual({ txHash: REPUTATION_REF_UTXO.txHash, outputIndex: REPUTATION_REF_UTXO.outputIndex }, REPUTATION_REF_SCRIPT_UTXO);
@@ -84,6 +95,14 @@ describe('the stake datum', () => {
     assert.equal(encodeStakeDatum(DATUM), expected);
     assert.deepEqual(decodeStakeDatum(expected), DATUM);
   });
+  test('reads the datum of the stake that the chain holds, field by field', () => {
+    // LIVE_STAKE_UTXO is the stake of a test record of the Foundation, as its last action left it. The 8 fields are the ones that the chain holds, not ones that a test builds.
+    assert.deepEqual(decodeStakeDatum(LIVE_STAKE_UTXO.datum!), LIVE_STAKE);
+  });
+  test('writes the fields of that stake as the chain holds them, byte for byte', () => {
+    // The bytes that the chain holds: the capabilities are an indefinite list of two 22-byte strings (9f56..ff), the empty challenge_locks is 80, and last_updated is a 64-bit integer (1b000001a207b940d8).
+    assert.equal(encodeStakeDatum(LIVE_STAKE), LIVE_STAKE_UTXO.datum);
+  });
   test('round trips with locks, history points and an opening placeholder', () => {
     const d: StakeDatum = { ...DATUM, history_points: 7n, challenge_locks: ['72636c5f' + '01'.repeat(24)], stake_id: SEED_STAKE_ID, staked_capabilities: ['61', '62'] };
     assert.deepEqual(decodeStakeDatum(encodeStakeDatum(d)), d);
@@ -118,6 +137,12 @@ describe('the stake token', () => {
     assert.equal(stakeTokenName('8a98c4b74f0e49a09ca4b3502e121c96a8e6992afd2cba64ef8128042fedd440'), '7273746b5f59bf69e33704bdced209a605cedeec1c9c2439920829877ca45915');
     assert.equal(stakeTokenName(ID).length, 64, '32 bytes, the longest asset name');
     assert.equal(stakeTokenUnit(ID), REPUTATION_SCRIPT_HASH + stakeTokenName(ID));
+  });
+  test('the stake that the chain holds carries the token that the identifier of its agent gives, and no other token', () => {
+    // The name rule on the identity-era deployment itself: the test above uses a stake of the earlier deployment. The name comes from the identifier of the agent, not from stake_id.
+    const unit = stakeTokenUnit(LIVE_STAKE.agent_did);
+    assert.deepEqual(Object.keys(LIVE_STAKE_UTXO.assets).filter((u) => u !== 'lovelace'), [unit]);
+    assert.equal(LIVE_STAKE_UTXO.assets[unit], 1n);
   });
   test('an identifier is 32 bytes of lowercase hex', () => {
     assert.throws(() => stakeTokenName('abcd'), /32 bytes/);
