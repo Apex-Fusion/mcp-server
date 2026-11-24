@@ -619,6 +619,28 @@ hosted builder does (no key), then has the local signer decode, policy-check, an
 against live chain data. **Never submits.** Never runs in CI. See
 [`packages/signer/README.md`](packages/signer/README.md#testing).
 
+### The TypeScript compiler
+
+```bash
+npm run typecheck
+```
+
+Checks `packages/shared`, `packages/builder` and `packages/signer`, tests included. It writes no file. CI runs
+it on every PR.
+
+The type check uses TypeScript 7 (`typescript` ^7.0.2 in the root `package.json`). Its `tsc` is a native
+program. On a Linux build machine with 16 threads, `npm run typecheck` took 1.1 s with it and 9.8 s with
+tsc 5.9.3 (2026-11-24, no build info, median of 3 runs). It needs no `NODE_OPTIONS` heap flag.
+
+- TypeScript 7 sets `types` to `[]` by default. Each `tsconfig.json` in `packages/` names `node` in `types`.
+  A config that needs other global types must name them too.
+- TypeScript 7 removed `moduleResolution: node` (node10). Each package uses `bundler`.
+- `tsup` (esbuild) writes the files in `build/`, and the tests run with `tsx`. Only `npm run typecheck`
+  runs the compiler, so its version does not change the build. A build with TypeScript 5.9.3 and a build
+  with 7.0.2 gave identical files.
+- The main entry of `typescript` 7.0 has no compiler API. No code of this repo uses it. A script that needs
+  the API must add `@typescript/typescript6` (the API of TypeScript 6) as a `devDependency` and import it.
+
 ## Architecture
 
 ```

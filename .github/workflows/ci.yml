@@ -67,5 +67,3 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
-        env:
-          NODE_OPTIONS: --max-old-space-size=12288
